@@ -9,6 +9,12 @@
 
 Superpowers 作为本项目本地资源放在 `.local\superpowers`。需要使用 Superpowers 流程时，先阅读 `.local\superpowers\skills\using-superpowers\SKILL.md` 和对应 skill 的 `SKILL.md`；不要假设存在用户级全局安装。
 
+## 当前仓库策略
+
+- 助教目前尚未最终确认期末项目提交应使用 GitHub 还是 NJU Git；在平台要求明确前，本项目先使用 GitHub 仓库 `JianingZhangnan/AISE` 作为主要开发与协作仓库，以保证当前开发、提交、PR 和过程记录可以顺畅推进。
+- 若后续课程明确要求提交到 NJU Git，应以 GitHub 仓库的完整历史、文档、CI 配置和交付物为源，迁移或镜像到 NJU Git，并在 `AGENT_LOG.md` / `SPEC_PROCESS.md` 中记录平台切换原因与关键操作。
+- 不论最终提交平台如何，仓库纪律、凭据安全、CI、SPEC / PLAN / SPEC_PROCESS / AGENT_LOG 等交付要求保持不变。
+
 ## Agent 工作原则
 
 - 本项目不是普通应用包装，而是要交付一个**自己编码实现的 Coding Agent Harness 内核**。
