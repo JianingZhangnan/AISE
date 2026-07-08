@@ -1830,7 +1830,7 @@ git commit -m "feat: add mock llm adapters"
 - 产出：`AgentLoop.run(user_input: str) -> AgentRunResult`。
 - 产出：`AgentRunResult(final_text: str | None, events: list[AgentEvent], stopped_reason: str)`。
 
-- [ ] **步骤 1：编写失败的 agent 循环测试**
+- [x] **步骤 1：编写失败的 agent 循环测试**
 
 创建 `tests/test_agent_loop.py`：
 
@@ -1882,13 +1882,13 @@ def test_agent_routes_tool_call_and_then_final(tmp_path: Path):
     assert any(event.type == AgentEventType.FEEDBACK_SIGNAL for event in result.events)
 ```
 
-- [ ] **步骤 2：运行失败的测试**
+- [x] **步骤 2：运行失败的测试**
 
 运行：`uv run pytest tests/test_agent_loop.py -v`
 
 预期：FAIL，报缺少 agent 模块。
 
-- [ ] **步骤 3：实现 agent 循环**
+- [x] **步骤 3：实现 agent 循环**
 
 创建 `src/phycode/agent.py`：
 
@@ -1969,13 +1969,13 @@ class AgentLoop:
         self.trace_store.append(event)
 ```
 
-- [ ] **步骤 4：运行测试**
+- [x] **步骤 4：运行测试**
 
 运行：`uv run pytest tests/test_agent_loop.py -v`
 
 预期：PASS。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/phycode/agent.py tests/test_agent_loop.py
