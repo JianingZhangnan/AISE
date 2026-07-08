@@ -44,7 +44,7 @@
 
 ## 冷启动验证
 
-当前状态：**尚未执行**。
+当前状态：**第一次验证已执行，verdict 为 FAIL；已记录并修订流程说明，进入 Task 1 前仍需复验通过。**
 
 进入 Task 1 编写实现代码之前，必须完成一次陌生 agent 冷启动验证。验证方式如下：
 
@@ -52,6 +52,20 @@
 2. 要求它只分析，不写实现代码。
 3. 要求它复述 Task 1 的目标、要创建/修改的文件、红绿测试路径、实现边界和可能歧义。
 4. 若发现 SPEC / PLAN 不足，先修订文档，再把问题、偏差和修订摘要记录在本节。
+
+### 第一次冷启动验证记录
+
+- 执行方式：用户使用 Cursor agent 进行外部冷启动验证，并将报告贴回仓库维护对话。
+- 报告 verdict：`FAIL`。
+- 报告识别的阻塞项：
+  - B1：`docs/superpowers/specs/2026-07-08-phycode-phase1-agent-harness-design.md` 仍为英文。
+  - B2：`docs/superpowers/plans/2026-07-08-phycode-phase1-agent-harness.md` 仍为英文。
+- 当前仓库复核：`main` 上述两个文件已经在 `ccc52d0` 中改为中文，且不再保留旧的 fallback JSON action parser 设计。报告读取到的 docs 状态与当前 `origin/main` 不一致，推测是外部验证环境未同步最新提交。
+- 报告识别的应修项：
+  - R1：认为 Task 1 的 `"No tools registered yet"` 断言会与后续工具注册矛盾。复核结论：Task 1 中 CLI 尚不注册工具，Task 5 才引入 `file.read` 并更新断言，因此当前 Task 1 断言成立，不需要修改。
+  - R2：Task 0 步骤 4 未明确冷启动验证由谁执行，以及 FAIL 后如何处理。处理结论：采纳，已在 `PLAN.md` Task 0 步骤 4 中补充外部 agent 只输出报告、维护者修订并复验的规则。
+  - R3：认为 Task 1 提交命令遗漏 `README.md`。复核结论：当前 `PLAN.md` Task 1 步骤 6 的 `git add` 已包含 `README.md`，不需要修改。
+- 复验要求：请在外部 Cursor 工作区执行 `git pull` 后重新运行冷启动验证。复验报告 verdict 为 `PASS` 或可接受的 `PASS_WITH_NOTES` 后，才能进入 Task 1。
 
 ## 仓库平台记录
 

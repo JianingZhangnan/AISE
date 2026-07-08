@@ -18,3 +18,4 @@
 - 本次整理使用技能：`using-superpowers`、`writing-plans`、`verification-before-completion`。
 - 本次整理范围：接受 Claude 对 `SPEC.md` / `PLAN.md` 的修改，中文化并同步 `docs/superpowers` 发现文档，新增 `SPEC_PROCESS.md` 和 `AGENT_LOG.md`，将实现前冷启动门禁写入 `PLAN.md`。
 - 实现代码状态：尚未开始。进入 Task 1 前必须先完成陌生 agent 冷启动验证。
+- 冷启动验证第一次执行：用户使用 Cursor agent 生成外部验证报告，verdict 为 `FAIL`。维护者复核后发现 B1/B2 基于未同步的旧 docs 状态，当前 `origin/main` 已由 `ccc52d0` 中文化相关文档；R2 关于冷启动执行主体和 FAIL 后处理流程的建议有效，已修订 `PLAN.md` 并记录到 `SPEC_PROCESS.md`。实现代码仍未开始，进入 Task 1 前需要让外部 agent 在最新 `main` 上复验。

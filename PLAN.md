@@ -95,7 +95,9 @@
 
 - [ ] **步骤 4：执行陌生 agent 冷启动验证**
 
-给一个未参与前期讨论的 agent 只提供 `SPEC.md`、`PLAN.md`、`CLAUDE.md` 和仓库当前状态，让它复述 Task 1 的目标、文件、红绿测试路径和可能歧义。若暴露规范缺口，先修订 `SPEC.md` / `PLAN.md`，并把问题与修订记录写入 `SPEC_PROCESS.md`。
+由当前人工操作者或项目维护者启动一个未参与前期讨论的外部 agent，只提供 `SPEC.md`、`PLAN.md`、`CLAUDE.md`、过程文档和仓库当前状态，让它复述 Task 1 的目标、文件、红绿测试路径和可能歧义。外部 agent 只输出报告，不直接修改仓库。
+
+如果报告 verdict 为 `FAIL`，当前维护者必须先修订相关文档，把问题、偏差、修订摘要和复验要求写入 `SPEC_PROCESS.md` / `AGENT_LOG.md`，然后重新进行冷启动验证。只有报告 verdict 为 `PASS` 或维护者确认 `PASS_WITH_NOTES` 中的 notes 不阻塞实现时，才可进入 Task 1。
 
 - [ ] **步骤 5：提交实现前门禁文档**
 
