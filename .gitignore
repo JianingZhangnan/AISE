@@ -13,6 +13,10 @@ venv/
 *.log
 .superpowers/
 .worktrees/
+.phycode/
+dist/
+build/
+*.egg-info/
 
 # OS/editor noise
 .DS_Store

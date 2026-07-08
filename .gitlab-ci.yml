@@ -1,0 +1,11 @@
+stages:
+  - test
+
+unit-test:
+  stage: test
+  image: python:3.11
+  before_script:
+    - pip install uv
+    - uv sync --dev
+  script:
+    - uv run pytest
