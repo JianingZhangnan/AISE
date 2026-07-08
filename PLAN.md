@@ -24,6 +24,7 @@
 - 在 `SPEC_PROCESS.md` 和 `AGENT_LOG.md` 建立初始记录，并完成陌生 agent 冷启动验证之前，不得编写实现代码。
 - 主要供应商路径是 OpenAI-compatible Chat Completions，使用 `tools` / `tool_calls`。
 - 每个工具调用必须流经 schema 验证、策略决策、执行包装、反馈映射和 trace 记录。
+- 脱敏必须接在统一输出出口上；`redaction.py` 是最后兜底，不能替代“不要让 key 进入日志、trace、错误报告、LLM 消息记录和 CLI 输出”的设计。
 - 策略决策准确为 `allow`、`ask` 和 `deny`。
 - 工具风险等级准确为 `safe`、`risky` 和 `dangerous`。
 - 记忆分类准确为 `decision`、`preference`、`project_fact` 和 `test_command`。
@@ -1454,6 +1455,7 @@ git commit -m "feat: add shell tools and feedback classification"
 - 产出：`MemoryStore.append(entry: MemoryEntry) -> None`、`MemoryStore.summary() -> str`。
 - 产出：`SessionStore.add_event(event: AgentEvent) -> None`。
 - 产出：`ContextBuilder.build(current_input: str) -> list[dict[str, object]]`。
+- 安全 TODO：在本任务中建立 trace、memory、LLM 消息历史和 CLI/错误报告的统一安全出口；禁止后续业务代码直接记录原始 key、原始模型响应或原始工具输出。
 
 - [ ] **步骤 1：编写失败的测试**
 

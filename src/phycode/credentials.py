@@ -26,6 +26,8 @@ class CredentialBackend(Protocol):
 
 @dataclass
 class InMemoryCredentialBackend:
+    """Test-only credential backend; never use as a production fallback."""
+
     source_name: str = "memory"
     _values: dict[tuple[str, str], str] = field(default_factory=dict)
 

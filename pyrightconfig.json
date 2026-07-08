@@ -1,0 +1,14 @@
+{
+  "include": ["src", "tests"],
+  "exclude": [".venv", ".worktrees", "course_resource", "pre_trial"],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic",
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": ["src"]
+    }
+  ]
+}
