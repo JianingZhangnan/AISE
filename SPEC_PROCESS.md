@@ -67,6 +67,17 @@
   - R3：认为 Task 1 提交命令遗漏 `README.md`。复核结论：当前 `PLAN.md` Task 1 步骤 6 的 `git add` 已包含 `README.md`，不需要修改。
 - 复验要求：请在外部 Cursor 工作区执行 `git pull` 后重新运行冷启动验证。复验报告 verdict 为 `PASS` 或可接受的 `PASS_WITH_NOTES` 后，才能进入 Task 1。
 
+### 第二次冷启动验证记录
+
+- 执行方式：用户再次使用 Cursor agent 进行外部复验，并将报告贴回仓库维护对话。
+- 报告 verdict：`FAIL`。
+- 报告识别的阻塞项：
+  - B1：认为 `docs/superpowers/specs/2026-07-08-phycode-phase1-agent-harness-design.md` 仍为英文。
+  - B2：认为 Task 0 冷启动验证仍未通过。
+- 当前仓库复核：维护者在本地 `main` 和 `origin/main` 分别读取该文件，文件开头均为 `# PhyCode 第一阶段 Agent Harness 设计记录`，正文为中文；`git ls-remote origin refs/heads/main` 返回 `eda48914c22cd0c83289cff9360da3c399dddbee`，与当前 `origin/main` 一致。因此第二次报告仍未读取到最新远端状态，或 Cursor 工作区存在未提交旧文件覆盖。
+- 处理结论：不修改 `docs/superpowers/specs` 内容；在 `PLAN.md` Task 0 步骤 4 增加冷启动报告的证据要求，要求外部 agent 报告开头输出 `git rev-parse HEAD`、`git status --short --branch` 和目标 docs 文件前 5 行。
+- 复验要求：下一次 Cursor 验证前必须确认工作区位于 `eda4891` 或更新的 `main`，并在报告中附上述命令输出。只有该证据与当前仓库一致时，verdict 才可作为门禁依据。
+
 ## 仓库平台记录
 
 助教尚未最终确认期末项目应提交到 GitHub 还是 NJU Git。当前为了开发、提交、review 和过程记录顺畅，先使用 GitHub 仓库 `JianingZhangnan/AISE`。如课程后续明确要求 NJU Git，将以 GitHub 仓库完整历史为源迁移或镜像，并在本文件和 `AGENT_LOG.md` 中记录切换原因与关键操作。
