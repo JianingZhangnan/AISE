@@ -81,25 +81,25 @@
 - 产出与根目录规范一致的 Superpowers 发现入口。
 - 产出实现前门禁状态：冷启动验证通过后，Task 1 才能开始。
 
-- [ ] **步骤 1：创建 SPEC_PROCESS 初始记录**
+- [x] **步骤 1：创建 SPEC_PROCESS 初始记录**
 
 创建 `SPEC_PROCESS.md`，记录 brainstorm 迭代、AI 建议取舍、供应商策略修订、仓库平台策略和冷启动验证状态。初始版本必须明确写出冷启动验证尚未执行，以及进入 Task 1 前必须完成。
 
-- [ ] **步骤 2：创建 AGENT_LOG 初始记录**
+- [x] **步骤 2：创建 AGENT_LOG 初始记录**
 
 创建 `AGENT_LOG.md`，按日期记录本项目已经完成的 `brainstorming`、`writing-plans`、Claude review、规范合流，以及当前尚未开始实现代码。
 
-- [ ] **步骤 3：同步 Superpowers 发现文档**
+- [x] **步骤 3：同步 Superpowers 发现文档**
 
 将 `docs/superpowers/specs/2026-07-08-phycode-phase1-agent-harness-design.md` 和 `docs/superpowers/plans/2026-07-08-phycode-phase1-agent-harness.md` 改为中文，并同步新版供应商策略：仅支持 OpenAI-compatible `tools` / `tool_calls`，不引入备用 JSON action 解析器。
 
-- [ ] **步骤 4：执行陌生 agent 冷启动验证**
+- [x] **步骤 4：执行陌生 agent 冷启动验证**
 
 由当前人工操作者或项目维护者启动一个未参与前期讨论的外部 agent，只提供 `SPEC.md`、`PLAN.md`、`CLAUDE.md`、过程文档和仓库当前状态，让它复述 Task 1 的目标、文件、红绿测试路径和可能歧义。外部 agent 只输出报告，不直接修改仓库。报告开头必须包含 `git rev-parse HEAD`、`git status --short --branch`，以及 `docs/superpowers/specs/2026-07-08-phycode-phase1-agent-harness-design.md` 的前 5 行，以证明它读取的是最新仓库状态。
 
 如果报告 verdict 为 `FAIL`，当前维护者必须先修订相关文档，把问题、偏差、修订摘要和复验要求写入 `SPEC_PROCESS.md` / `AGENT_LOG.md`，然后重新进行冷启动验证。只有报告 verdict 为 `PASS` 或维护者确认 `PASS_WITH_NOTES` 中的 notes 不阻塞实现时，才可进入 Task 1。
 
-- [ ] **步骤 5：提交实现前门禁文档**
+- [x] **步骤 5：提交实现前门禁文档**
 
 ```bash
 git add PLAN.md SPEC_PROCESS.md AGENT_LOG.md docs/superpowers/specs/2026-07-08-phycode-phase1-agent-harness-design.md docs/superpowers/plans/2026-07-08-phycode-phase1-agent-harness.md

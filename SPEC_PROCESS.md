@@ -44,7 +44,7 @@
 
 ## 冷启动验证
 
-当前状态：**第一次验证已执行，verdict 为 FAIL；已记录并修订流程说明，进入 Task 1 前仍需复验通过。**
+当前状态：**冷启动验证已通过；允许进入 Task 1。**
 
 进入 Task 1 编写实现代码之前，必须完成一次陌生 agent 冷启动验证。验证方式如下：
 
@@ -77,6 +77,13 @@
 - 当前仓库复核：维护者在本地 `main` 和 `origin/main` 分别读取该文件，文件开头均为 `# PhyCode 第一阶段 Agent Harness 设计记录`，正文为中文；`git ls-remote origin refs/heads/main` 返回 `eda48914c22cd0c83289cff9360da3c399dddbee`，与当前 `origin/main` 一致。因此第二次报告仍未读取到最新远端状态，或 Cursor 工作区存在未提交旧文件覆盖。
 - 处理结论：不修改 `docs/superpowers/specs` 内容；在 `PLAN.md` Task 0 步骤 4 增加冷启动报告的证据要求，要求外部 agent 报告开头输出 `git rev-parse HEAD`、`git status --short --branch` 和目标 docs 文件前 5 行。
 - 复验要求：下一次 Cursor 验证前必须确认工作区位于 `eda4891` 或更新的 `main`，并在报告中附上述命令输出。只有该证据与当前仓库一致时，verdict 才可作为门禁依据。
+
+### 第三次冷启动验证记录
+
+- 执行方式：用户确认外部 Cursor agent 冷启动复验已成功。
+- 报告 verdict：通过。
+- 处理结论：冷启动门禁解除，允许按 `PLAN.md` 从 Task 1 开始实现。
+- 后续要求：Task 1 必须继续遵守 TDD 红绿路径，不得在没有失败测试证据的情况下编写生产代码。
 
 ## 仓库平台记录
 
