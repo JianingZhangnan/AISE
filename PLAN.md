@@ -296,7 +296,7 @@ git commit -m "chore: scaffold phycode package"
 
 ---
 
-### Task 2: 核心模型和脱敏
+### Task 2: 核心模型和脱敏 - ✅ 完成于 2026-07-08 - commit: `304ab79`
 
 **文件：**
 - 创建：`src/phycode/models.py`
@@ -309,7 +309,7 @@ git commit -m "chore: scaffold phycode package"
 - 产出模型：`AgentEvent`、`ToolSpec`、`ToolCall`、`PolicyDecision`、`ToolResult`、`FeedbackSignal`、`MemoryEntry`、`Session`、`ProviderConfig`。
 - 产出函数：`redact_text(text: str) -> str`。
 
-- [ ] **步骤 1：编写失败的模型测试**
+- [x] **步骤 1：编写失败的模型测试**
 
 创建 `tests/test_models.py`：
 
@@ -359,13 +359,13 @@ def test_redacts_env_assignment():
     assert "OPENAI_API_KEY=[REDACTED_SECRET]" in redact_text(text)
 ```
 
-- [ ] **步骤 2：运行测试以验证失败**
+- [x] **步骤 2：运行测试以验证失败**
 
 运行：`uv run pytest tests/test_models.py tests/test_redaction.py -v`
 
 预期：FAIL，报缺少模块或缺少类。
 
-- [ ] **步骤 3：实现核心模型**
+- [x] **步骤 3：实现核心模型**
 
 创建 `src/phycode/models.py`：
 
@@ -504,7 +504,7 @@ class ProviderConfig(BaseModel):
     credential_ref: str | None = None
 ```
 
-- [ ] **步骤 4：实现脱敏**
+- [x] **步骤 4：实现脱敏**
 
 创建 `src/phycode/redaction.py`：
 
@@ -529,13 +529,13 @@ def redact_text(text: str) -> str:
     return redacted
 ```
 
-- [ ] **步骤 5：运行测试**
+- [x] **步骤 5：运行测试**
 
 运行：`uv run pytest tests/test_models.py tests/test_redaction.py -v`
 
 预期：PASS。
 
-- [ ] **步骤 6：提交**
+- [x] **步骤 6：提交**
 
 ```bash
 git add src/phycode/models.py src/phycode/redaction.py tests/test_models.py tests/test_redaction.py
