@@ -6,6 +6,8 @@ from rich.console import Console
 from phycode import __version__
 from phycode.config import load_project_config
 from phycode.credentials import CredentialStore
+from phycode.tools import ToolRegistry
+from phycode.tools.file_tools import register_file_tools
 
 app = typer.Typer(help="PhyCode coding agent harness")
 tools_app = typer.Typer(help="Inspect registered tools")
@@ -17,6 +19,12 @@ app.add_typer(keys_app, name="keys")
 console = Console()
 
 
+def build_default_registry() -> ToolRegistry:
+    registry = ToolRegistry()
+    register_file_tools(registry)
+    return registry
+
+
 @app.command()
 def version() -> None:
     """Print the PhyCode version."""
@@ -26,7 +34,9 @@ def version() -> None:
 @tools_app.command("list")
 def list_tools() -> None:
     """List registered tools."""
-    console.print("No tools registered yet")
+    registry = build_default_registry()
+    for spec in registry.list_specs():
+        console.print(f"{spec.name}\t{spec.risk_level.value}\t{spec.description}")
 
 
 @config_app.command("read")

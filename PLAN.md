@@ -997,7 +997,7 @@ git commit -m "feat: add deterministic policy engine"
 - 产出：`ToolRuntime.run(call: ToolCall, context: PolicyContext, approved: bool = False) -> ToolRuntimeResult`。
 - 产出：`register_file_tools(registry: ToolRegistry) -> None`。
 
-- [ ] **步骤 1：编写失败的注册表和文件工具测试**
+- [x] **步骤 1：编写失败的注册表和文件工具测试**
 
 创建 `tests/test_tool_registry.py`：
 
@@ -1056,13 +1056,13 @@ def test_file_edit_requires_approval_then_writes_diff(tmp_path: Path):
     assert "+x = 2" in result.tool_result.stdout
 ```
 
-- [ ] **步骤 2：运行失败的测试**
+- [x] **步骤 2：运行失败的测试**
 
 运行：`uv run pytest tests/test_tool_registry.py tests/test_file_tools.py -v`
 
 预期：FAIL，报缺少工具模块。
 
-- [ ] **步骤 3：实现注册表和运行时**
+- [x] **步骤 3：实现注册表和运行时**
 
 创建 `src/phycode/tools/base.py`：
 
@@ -1125,7 +1125,7 @@ from phycode.tools.base import ToolRegistry, ToolRuntime, ToolRuntimeResult
 __all__ = ["ToolRegistry", "ToolRuntime", "ToolRuntimeResult"]
 ```
 
-- [ ] **步骤 4：实现文件和搜索工具**
+- [x] **步骤 4：实现文件和搜索工具**
 
 创建 `src/phycode/tools/file_tools.py`：
 
@@ -1188,7 +1188,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
     registry.register(ToolSpec(name="file.edit", description="Edit a file by exact replacement", input_schema={"type": "object"}, risk_level=ToolRiskLevel.RISKY), _file_edit)
 ```
 
-- [ ] **步骤 5：连接工具列表 CLI**
+- [x] **步骤 5：连接工具列表 CLI**
 
 修改 `src/phycode/cli.py`：
 
@@ -1211,13 +1211,13 @@ def list_tools() -> None:
         console.print(f"{spec.name}\t{spec.risk_level.value}\t{spec.description}")
 ```
 
-- [ ] **步骤 6：运行测试**
+- [x] **步骤 6：运行测试**
 
 运行：`uv run pytest tests/test_tool_registry.py tests/test_file_tools.py tests/test_cli_smoke.py -v`
 
 预期：更新 `tests/test_cli_smoke.py::test_tools_list_command_exists` 以断言 `"file.read"` 出现，然后 PASS。
 
-- [ ] **步骤 7：提交**
+- [x] **步骤 7：提交**
 
 ```bash
 git add src/phycode/tools src/phycode/cli.py tests/test_tool_registry.py tests/test_file_tools.py tests/test_cli_smoke.py

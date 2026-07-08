@@ -15,4 +15,4 @@ def test_version_command_prints_version():
 def test_tools_list_command_exists():
     result = runner.invoke(app, ["tools", "list"])
     assert result.exit_code == 0
-    assert "No tools registered yet" in result.stdout
+    assert "file.read" in result.stdout
