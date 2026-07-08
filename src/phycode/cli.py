@@ -8,6 +8,8 @@ from phycode.config import load_project_config
 from phycode.credentials import CredentialStore
 from phycode.tools import ToolRegistry
 from phycode.tools.file_tools import register_file_tools
+from phycode.tools.shell_tools import register_shell_tools
+from phycode.tools.state_tools import register_state_tools
 
 app = typer.Typer(help="PhyCode coding agent harness")
 tools_app = typer.Typer(help="Inspect registered tools")
@@ -21,7 +23,10 @@ console = Console()
 
 def build_default_registry() -> ToolRegistry:
     registry = ToolRegistry()
+    root = Path.cwd()
     register_file_tools(registry)
+    register_shell_tools(registry, workspace_root=root, test_command="uv run pytest")
+    register_state_tools(registry, workspace_root=root)
     return registry
 
 

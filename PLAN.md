@@ -1241,7 +1241,7 @@ git commit -m "feat: add tool registry and file tools"
 - 产出：`register_state_tools(registry: ToolRegistry, workspace_root: Path) -> None`。
 - 产出：`classify_feedback(result: ToolResult) -> list[FeedbackSignal]`。
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 创建 `tests/test_shell_and_feedback.py`：
 
@@ -1289,13 +1289,13 @@ def test_workspace_status_reports_root(tmp_path: Path):
     assert str(tmp_path) in result.tool_result.stdout
 ```
 
-- [ ] **步骤 2：运行失败的测试**
+- [x] **步骤 2：运行失败的测试**
 
 运行：`uv run pytest tests/test_shell_and_feedback.py tests/test_state_tools.py -v`
 
 预期：FAIL，报缺少模块。
 
-- [ ] **步骤 3：实现反馈分类器**
+- [x] **步骤 3：实现反馈分类器**
 
 创建 `src/phycode/feedback.py`：
 
@@ -1354,7 +1354,7 @@ def _next_step_for(kind: FeedbackKind) -> str | None:
     return None
 ```
 
-- [ ] **步骤 4：实现 shell 和状态工具**
+- [x] **步骤 4：实现 shell 和状态工具**
 
 创建 `src/phycode/tools/shell_tools.py`：
 
@@ -1407,7 +1407,7 @@ def register_state_tools(registry: ToolRegistry, workspace_root: Path) -> None:
     registry.register(ToolSpec(name="workspace.status", description="Show workspace status", input_schema={"type": "object"}, risk_level=ToolRiskLevel.SAFE), workspace_status)
 ```
 
-- [ ] **步骤 5：在 CLI 中注册 shell 和状态工具**
+- [x] **步骤 5：在 CLI 中注册 shell 和状态工具**
 
 修改 `src/phycode/cli.py` 中的 `build_default_registry()`：
 
@@ -1427,13 +1427,13 @@ def build_default_registry() -> ToolRegistry:
     return registry
 ```
 
-- [ ] **步骤 6：运行测试**
+- [x] **步骤 6：运行测试**
 
 运行：`uv run pytest tests/test_shell_and_feedback.py tests/test_state_tools.py tests/test_cli_smoke.py -v`
 
 预期：PASS。
 
-- [ ] **步骤 7：提交**
+- [x] **步骤 7：提交**
 
 ```bash
 git add src/phycode/tools/shell_tools.py src/phycode/tools/state_tools.py src/phycode/feedback.py src/phycode/cli.py tests/test_shell_and_feedback.py tests/test_state_tools.py
