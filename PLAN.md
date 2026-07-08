@@ -1457,7 +1457,7 @@ git commit -m "feat: add shell tools and feedback classification"
 - 产出：`ContextBuilder.build(current_input: str) -> list[dict[str, object]]`。
 - 安全 TODO：在本任务中建立 trace、memory、LLM 消息历史和 CLI/错误报告的统一安全出口；禁止后续业务代码直接记录原始 key、原始模型响应或原始工具输出。
 
-- [ ] **步骤 1：编写失败的测试**
+- [x] **步骤 1：编写失败的测试**
 
 创建 `tests/test_trace_context_memory.py`：
 
@@ -1491,13 +1491,13 @@ def test_context_includes_recent_feedback_and_memory(tmp_path: Path):
     assert "fix it" in rendered
 ```
 
-- [ ] **步骤 2：运行失败的测试**
+- [x] **步骤 2：运行失败的测试**
 
 运行：`uv run pytest tests/test_trace_context_memory.py -v`
 
 预期：FAIL，报缺少模块。
 
-- [ ] **步骤 3：实现 trace 存储**
+- [x] **步骤 3：实现 trace 存储**
 
 创建 `src/phycode/trace.py`：
 
@@ -1530,7 +1530,7 @@ class TraceStore:
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 ```
 
-- [ ] **步骤 4：实现会话、记忆和上下文**
+- [x] **步骤 4：实现会话、记忆和上下文**
 
 创建 `src/phycode/context.py`：
 
@@ -1593,13 +1593,13 @@ class ContextBuilder:
         ]
 ```
 
-- [ ] **步骤 5：运行测试**
+- [x] **步骤 5：运行测试**
 
 运行：`uv run pytest tests/test_trace_context_memory.py -v`
 
 预期：PASS。
 
-- [ ] **步骤 6：提交**
+- [x] **步骤 6：提交**
 
 ```bash
 git add src/phycode/trace.py src/phycode/context.py tests/test_trace_context_memory.py
