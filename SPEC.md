@@ -103,7 +103,7 @@ agent 主循环由 PhyCode 自身代码实现，执行以下步骤：
 - `FailingLLM`：供应商错误测试用。
 - `OpenAICompatibleChatAdapter`：与 `/v1/chat/completions` 兼容供应商的真实交互。
 
-主要的真实供应商路径使用 OpenAI 兼容的 `tools` / `tool_calls`。可为工具调用支持不稳定的供应商启用备用 JSON 动作解析器。产品核心不使用 OpenAI Agents SDK 作为循环运行器。
+主要的真实供应商路径使用 OpenAI 兼容的 `tools` / `tool_calls`，不引入备用 JSON 解析器；不支持该 API 的供应商不在本项目支持范围内。产品核心不使用 OpenAI Agents SDK 作为循环运行器。
 
 ### 5.4 内部事件模型
 
@@ -590,7 +590,7 @@ Python 标准测试框架，支持 fixture、参数化和插件生态，与 mock
 ## 12. 风险与应对
 
 - 物理领域工具的范围蔓延：推迟到未来扩展；核心 harness 必须独立成立。
-- 不同供应商之间的 tool-call 兼容性差异：支持 OpenAI 兼容 tool calls 和备用 JSON 解析器。
+- 不同供应商之间的 tool-call 兼容性差异：仅支持 OpenAI 兼容 tool calls，不兼容的供应商视为不支持。
 - 过度使用供应商状态或 Agents SDK：保持 PhyCode 循环自实现。
 - 安全仅靠提示词：在确定性代码和测试中强制护栏。
 - 上下文管理过于复杂：仅实现会话历史、记忆摘要、截断和预算选择。

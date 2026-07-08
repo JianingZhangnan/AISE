@@ -1,81 +1,131 @@
-# PhyCode Phase 1 Agent Harness Implementation Plan
+# PhyCode 第一阶段 Agent Harness 实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **面向智能体工作者：** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实施本计划。步骤使用复选框（`- [ ]`）语法进行追踪。
 
-**Goal:** Build a CLI-first, self-implemented coding agent harness with a policy-aware tool runtime, mock-LLM test path, safe credential handling, context/memory/trace support, deterministic demos, and CI.
+**目标：** 构建一个 CLI 优先、自主实现的 coding agent harness，包含策略感知工具运行时、mock LLM 测试路径、安全凭据处理、上下文/记忆/trace 支持、确定性演示和 CI。
 
-**Architecture:** The project uses a Python `src/phycode` package. The CLI calls a self-owned agent loop; the loop normalizes LLM output into events, routes tool calls through a policy-aware runtime, classifies feedback, writes traces, and builds the next context turn. The core test path uses scripted mock LLMs and fake tool executors so required verification never depends on network or real API keys.
+**架构：** 项目使用 Python `src/phycode` 包。CLI 调用自有 agent 循环；循环将 LLM 输出规范化为事件，通过策略感知运行时路由工具调用，分类反馈，写入 trace，并构建下一轮上下文。核心测试路径使用脚本化 mock LLM 和 fake 工具执行器，因此必需的验证永远不依赖网络或真实 API key。
 
-**Tech Stack:** Python 3.11+, `uv`, Typer, Rich, Pydantic v2, pytest, keyring, cryptography, OpenAI-compatible Chat Completions.
+**技术栈：** Python 3.11+、`uv`、Typer、Rich、Pydantic v2、pytest、keyring、cryptography、OpenAI-compatible Chat Completions。
 
-## Global Constraints
+## 完成标记说明
 
-- Use Python with `uv`; do not use pip or conda workflows.
-- No WebUI in Phase 1.
-- Do not use OpenAI Agents SDK, LangChain `AgentExecutor`, AutoGen, CrewAI, LlamaIndex agent, or a host coding-agent SDK loop as the product core.
-- Tests and CI must not require a real LLM provider, network access, or API key.
-- Main provider path is OpenAI-compatible Chat Completions with `tools` / `tool_calls`; keep fallback JSON action parsing available.
-- Every tool call must flow through schema validation, policy decision, execution wrapper, feedback mapping, and trace recording.
-- Policy decisions are exactly `allow`, `ask`, and `deny`.
-- Tool risk levels are exactly `safe`, `risky`, and `dangerous`.
-- Memory categories are exactly `decision`, `preference`, `project_fact`, and `test_command`.
-- Feedback kinds are exactly `success`, `command_failed`, `test_failed`, `policy_blocked`, `policy_requires_approval`, `invalid_tool_args`, `tool_error`, `timeout`, and `output_truncated`.
-- Default max agent steps is 50.
-- Default workspace root is the current project directory; extra roots require explicit allowlist configuration.
-- `.env`, private keys, token stores, `.phycode/`, traces, logs, and caches must not be committed.
-- `.gitlab-ci.yml` must include a `unit-test` job running `uv run pytest`.
+每个任务完成后，应在任务标题后标注完成日期和 commit hash，例如：
+- **Task 1: 项目脚手架、CLI 冒烟测试和 CI 骨架** - ✅ 完成于 2026-07-08 - commit: `abc1234`
 
----
+任务内的步骤使用 `- [x]` 标记已完成的 checkbox。
 
-## File Structure
+## 全局约束
 
-Create these files and responsibilities:
-
-- `pyproject.toml`: package metadata, dependencies, console script, pytest settings.
-- `README.md`: install, run, test, security, distribution, and project overview.
-- `.gitlab-ci.yml`: required `unit-test` CI job.
-- `.github/workflows/test.yml`: convenience GitHub CI while development happens on GitHub.
-- `src/phycode/__init__.py`: package version.
-- `src/phycode/cli.py`: Typer commands and Rich rendering entrypoints.
-- `src/phycode/models.py`: Pydantic data models and enums shared across modules.
-- `src/phycode/redaction.py`: secret redaction helpers.
-- `src/phycode/config.py`: user/project config loading and saving.
-- `src/phycode/credentials.py`: keyring and encrypted-file credential store.
-- `src/phycode/policy.py`: workspace, shell, credential, and approval policy.
-- `src/phycode/tools/base.py`: tool registry, runtime, executor protocol.
-- `src/phycode/tools/file_tools.py`: file and search tools.
-- `src/phycode/tools/shell_tools.py`: shell and test tools.
-- `src/phycode/tools/state_tools.py`: workspace, memory, config, and key-status tools.
-- `src/phycode/feedback.py`: feedback classifiers.
-- `src/phycode/context.py`: session store, memory store, context builder.
-- `src/phycode/trace.py`: JSONL trace writer and reader.
-- `src/phycode/llm.py`: LLM client protocol, scripted mocks, OpenAI-compatible adapter.
-- `src/phycode/agent.py`: agent loop and stop controller.
-- `src/phycode/demos.py`: deterministic demo scenarios.
-- `tests/`: unit, integration, CLI, credential, and demo tests.
+- 使用 Python 和 `uv`；不使用 pip 或 conda 工作流。
+- 第一阶段无 WebUI。
+- 不使用 OpenAI Agents SDK、LangChain `AgentExecutor`、AutoGen、CrewAI、LlamaIndex agent 或宿主编码智能体 SDK 的 agent loop 作为产品核心。
+- 测试和 CI 不得要求真实 LLM 供应商、网络访问或 API key。
+- 在 `SPEC_PROCESS.md` 和 `AGENT_LOG.md` 建立初始记录，并完成陌生 agent 冷启动验证之前，不得编写实现代码。
+- 主要供应商路径是 OpenAI-compatible Chat Completions，使用 `tools` / `tool_calls`。
+- 每个工具调用必须流经 schema 验证、策略决策、执行包装、反馈映射和 trace 记录。
+- 策略决策准确为 `allow`、`ask` 和 `deny`。
+- 工具风险等级准确为 `safe`、`risky` 和 `dangerous`。
+- 记忆分类准确为 `decision`、`preference`、`project_fact` 和 `test_command`。
+- 反馈类型准确为 `success`、`command_failed`、`test_failed`、`policy_blocked`、`policy_requires_approval`、`invalid_tool_args`、`tool_error`、`timeout` 和 `output_truncated`。
+- 默认最大 agent 步数为 50。
+- 默认工作区根目录是当前项目目录；额外的根目录需要显式白名单配置。
+- `.env`、私钥、token 存储、`.phycode/`、traces、日志和缓存不得提交。
+- `.gitlab-ci.yml` 必须包含运行 `uv run pytest` 的 `unit-test` job。
 
 ---
 
-### Task 1: Project Scaffold, CLI Smoke Test, and CI Skeleton
+## 文件结构
 
-**Files:**
-- Create: `pyproject.toml`
-- Create: `README.md`
-- Create: `.gitlab-ci.yml`
-- Create: `.github/workflows/test.yml`
-- Create: `src/phycode/__init__.py`
-- Create: `src/phycode/cli.py`
-- Create: `tests/test_cli_smoke.py`
-- Modify: `.gitignore`
+创建这些文件及其职责：
 
-**Interfaces:**
-- Produces: console script `phycode = phycode.cli:app`.
-- Produces: `phycode.__version__: str`.
-- Produces: Typer app object `phycode.cli.app`.
+- `pyproject.toml`: 包元数据、依赖、console script、pytest 设置。
+- `README.md`: 安装、运行、测试、安全、分发和项目概览。
+- `SPEC_PROCESS.md`: brainstorm、AI 建议取舍、冷启动验证和规范修订证据。
+- `AGENT_LOG.md`: 按时间顺序记录 agent 工作流、关键决策、commit 和人工干预。
+- `.gitlab-ci.yml`: 必需的 `unit-test` CI job。
+- `.github/workflows/test.yml`: 便利的 GitHub CI（在 GitHub 上开发期间）。
+- `src/phycode/__init__.py`: 包版本。
+- `src/phycode/cli.py`: Typer 命令和 Rich 渲染入口点。
+- `src/phycode/models.py`: 跨模块共享的 Pydantic 数据模型和枚举。
+- `src/phycode/redaction.py`: 秘密脱敏辅助函数。
+- `src/phycode/config.py`: 用户/项目配置加载和保存。
+- `src/phycode/credentials.py`: keyring 和加密文件凭据存储。
+- `src/phycode/policy.py`: 工作区、shell、凭据和审批策略。
+- `src/phycode/tools/base.py`: 工具注册表、运行时、执行器协议。
+- `src/phycode/tools/file_tools.py`: 文件和搜索工具。
+- `src/phycode/tools/shell_tools.py`: shell 和测试工具。
+- `src/phycode/tools/state_tools.py`: 工作区、记忆、配置和 key 状态工具。
+- `src/phycode/feedback.py`: 反馈分类器。
+- `src/phycode/context.py`: 会话存储、记忆存储、上下文构建器。
+- `src/phycode/trace.py`: JSONL trace 写入器和读取器。
+- `src/phycode/llm.py`: LLM 客户端协议、脚本化 mock、OpenAI-compatible 适配器。
+- `src/phycode/agent.py`: agent 循环和停止控制器。
+- `src/phycode/demos.py`: 确定性演示场景。
+- `tests/`: 单元、集成、CLI、凭据和演示测试。
 
-- [ ] **Step 1: Write the failing CLI smoke test**
+---
 
-Create `tests/test_cli_smoke.py`:
+### Task 0: 实现前过程记录和冷启动门禁
+
+**文件：**
+- 修改：`PLAN.md`
+- 修改：`docs/superpowers/specs/2026-07-08-phycode-phase1-agent-harness-design.md`
+- 修改：`docs/superpowers/plans/2026-07-08-phycode-phase1-agent-harness.md`
+- 创建：`SPEC_PROCESS.md`
+- 创建：`AGENT_LOG.md`
+
+**接口：**
+- 产出实现前过程记录：`SPEC_PROCESS.md`。
+- 产出 agent 工作日志：`AGENT_LOG.md`。
+- 产出与根目录规范一致的 Superpowers 发现入口。
+- 产出实现前门禁状态：冷启动验证通过后，Task 1 才能开始。
+
+- [ ] **步骤 1：创建 SPEC_PROCESS 初始记录**
+
+创建 `SPEC_PROCESS.md`，记录 brainstorm 迭代、AI 建议取舍、供应商策略修订、仓库平台策略和冷启动验证状态。初始版本必须明确写出冷启动验证尚未执行，以及进入 Task 1 前必须完成。
+
+- [ ] **步骤 2：创建 AGENT_LOG 初始记录**
+
+创建 `AGENT_LOG.md`，按日期记录本项目已经完成的 `brainstorming`、`writing-plans`、Claude review、规范合流，以及当前尚未开始实现代码。
+
+- [ ] **步骤 3：同步 Superpowers 发现文档**
+
+将 `docs/superpowers/specs/2026-07-08-phycode-phase1-agent-harness-design.md` 和 `docs/superpowers/plans/2026-07-08-phycode-phase1-agent-harness.md` 改为中文，并同步新版供应商策略：仅支持 OpenAI-compatible `tools` / `tool_calls`，不引入备用 JSON action 解析器。
+
+- [ ] **步骤 4：执行陌生 agent 冷启动验证**
+
+给一个未参与前期讨论的 agent 只提供 `SPEC.md`、`PLAN.md`、`CLAUDE.md` 和仓库当前状态，让它复述 Task 1 的目标、文件、红绿测试路径和可能歧义。若暴露规范缺口，先修订 `SPEC.md` / `PLAN.md`，并把问题与修订记录写入 `SPEC_PROCESS.md`。
+
+- [ ] **步骤 5：提交实现前门禁文档**
+
+```bash
+git add PLAN.md SPEC_PROCESS.md AGENT_LOG.md docs/superpowers/specs/2026-07-08-phycode-phase1-agent-harness-design.md docs/superpowers/plans/2026-07-08-phycode-phase1-agent-harness.md
+git commit -m "docs: align pre-implementation planning records"
+```
+
+---
+
+### Task 1: 项目脚手架、CLI 冒烟测试和 CI 骨架
+
+**文件：**
+- 创建：`pyproject.toml`
+- 创建：`README.md`
+- 创建：`.gitlab-ci.yml`
+- 创建：`.github/workflows/test.yml`
+- 创建：`src/phycode/__init__.py`
+- 创建：`src/phycode/cli.py`
+- 创建：`tests/test_cli_smoke.py`
+- 修改：`.gitignore`
+
+**接口：**
+- 产出：console script `phycode = phycode.cli:app`。
+- 产出：`phycode.__version__: str`。
+- 产出：Typer app 对象 `phycode.cli.app`。
+
+- [ ] **步骤 1：编写失败的 CLI 冒烟测试**
+
+创建 `tests/test_cli_smoke.py`：
 
 ```python
 from typer.testing import CliRunner
@@ -98,15 +148,15 @@ def test_tools_list_command_exists():
     assert "No tools registered yet" in result.stdout
 ```
 
-- [ ] **Step 2: Run the failing smoke test**
+- [ ] **步骤 2：运行失败的冒烟测试**
 
-Run: `uv run pytest tests/test_cli_smoke.py -v`
+运行：`uv run pytest tests/test_cli_smoke.py -v`
 
-Expected: FAIL with an import error for `phycode` or `phycode.cli`.
+预期：FAIL，报 `phycode` 或 `phycode.cli` 导入错误。
 
-- [ ] **Step 3: Create package scaffold**
+- [ ] **步骤 3：创建包脚手架**
 
-Create `pyproject.toml`:
+创建 `pyproject.toml`：
 
 ```toml
 [project]
@@ -145,13 +195,13 @@ pythonpath = ["src"]
 addopts = "-q"
 ```
 
-Create `src/phycode/__init__.py`:
+创建 `src/phycode/__init__.py`：
 
 ```python
 __version__ = "0.1.0"
 ```
 
-Create `src/phycode/cli.py`:
+创建 `src/phycode/cli.py`：
 
 ```python
 import typer
@@ -177,9 +227,9 @@ def list_tools() -> None:
     console.print("No tools registered yet")
 ```
 
-- [ ] **Step 4: Add CI skeletons**
+- [ ] **步骤 4：添加 CI 骨架**
 
-Create `.gitlab-ci.yml`:
+创建 `.gitlab-ci.yml`：
 
 ```yaml
 stages:
@@ -195,7 +245,7 @@ unit-test:
     - uv run pytest
 ```
 
-Create `.github/workflows/test.yml`:
+创建 `.github/workflows/test.yml`：
 
 ```yaml
 name: test
@@ -219,7 +269,7 @@ jobs:
       - run: uv run pytest
 ```
 
-Append these lines to `.gitignore` if they are not present:
+若 `.gitignore` 中没有以下行，则追加：
 
 ```gitignore
 .phycode/
@@ -228,13 +278,13 @@ build/
 *.egg-info/
 ```
 
-- [ ] **Step 5: Run the smoke test**
+- [ ] **步骤 5：运行冒烟测试**
 
-Run: `uv run pytest tests/test_cli_smoke.py -v`
+运行：`uv run pytest tests/test_cli_smoke.py -v`
 
-Expected: PASS for both smoke tests.
+预期：两个冒烟测试均 PASS。
 
-- [ ] **Step 6: Commit**
+- [ ] **步骤 6：提交**
 
 ```bash
 git add pyproject.toml README.md .gitlab-ci.yml .github/workflows/test.yml src/phycode/__init__.py src/phycode/cli.py tests/test_cli_smoke.py .gitignore
@@ -243,22 +293,22 @@ git commit -m "chore: scaffold phycode package"
 
 ---
 
-### Task 2: Core Models and Redaction
+### Task 2: 核心模型和脱敏
 
-**Files:**
-- Create: `src/phycode/models.py`
-- Create: `src/phycode/redaction.py`
-- Create: `tests/test_models.py`
-- Create: `tests/test_redaction.py`
+**文件：**
+- 创建：`src/phycode/models.py`
+- 创建：`src/phycode/redaction.py`
+- 创建：`tests/test_models.py`
+- 创建：`tests/test_redaction.py`
 
-**Interfaces:**
-- Produces enums: `AgentEventType`, `ToolRiskLevel`, `PolicyAction`, `FeedbackKind`, `MemoryCategory`, `SessionMode`.
-- Produces models: `AgentEvent`, `ToolSpec`, `ToolCall`, `PolicyDecision`, `ToolResult`, `FeedbackSignal`, `MemoryEntry`, `Session`, `ProviderConfig`.
-- Produces function: `redact_text(text: str) -> str`.
+**接口：**
+- 产出枚举：`AgentEventType`、`ToolRiskLevel`、`PolicyAction`、`FeedbackKind`、`MemoryCategory`、`SessionMode`。
+- 产出模型：`AgentEvent`、`ToolSpec`、`ToolCall`、`PolicyDecision`、`ToolResult`、`FeedbackSignal`、`MemoryEntry`、`Session`、`ProviderConfig`。
+- 产出函数：`redact_text(text: str) -> str`。
 
-- [ ] **Step 1: Write failing model tests**
+- [ ] **步骤 1：编写失败的模型测试**
 
-Create `tests/test_models.py`:
+创建 `tests/test_models.py`：
 
 ```python
 from phycode.models import FeedbackKind, MemoryCategory, PolicyAction, ToolCall, ToolRiskLevel, ToolSpec
@@ -288,7 +338,7 @@ def test_required_enums_match_spec_values():
     assert "test_failed" in {item.value for item in FeedbackKind}
 ```
 
-Create `tests/test_redaction.py`:
+创建 `tests/test_redaction.py`：
 
 ```python
 from phycode.redaction import redact_text
@@ -306,15 +356,15 @@ def test_redacts_env_assignment():
     assert "OPENAI_API_KEY=[REDACTED_SECRET]" in redact_text(text)
 ```
 
-- [ ] **Step 2: Run tests to verify failure**
+- [ ] **步骤 2：运行测试以验证失败**
 
-Run: `uv run pytest tests/test_models.py tests/test_redaction.py -v`
+运行：`uv run pytest tests/test_models.py tests/test_redaction.py -v`
 
-Expected: FAIL with missing module or missing classes.
+预期：FAIL，报缺少模块或缺少类。
 
-- [ ] **Step 3: Implement core models**
+- [ ] **步骤 3：实现核心模型**
 
-Create `src/phycode/models.py`:
+创建 `src/phycode/models.py`：
 
 ```python
 from __future__ import annotations
@@ -451,9 +501,9 @@ class ProviderConfig(BaseModel):
     credential_ref: str | None = None
 ```
 
-- [ ] **Step 4: Implement redaction**
+- [ ] **步骤 4：实现脱敏**
 
-Create `src/phycode/redaction.py`:
+创建 `src/phycode/redaction.py`：
 
 ```python
 from __future__ import annotations
@@ -476,13 +526,13 @@ def redact_text(text: str) -> str:
     return redacted
 ```
 
-- [ ] **Step 5: Run tests**
+- [ ] **步骤 5：运行测试**
 
-Run: `uv run pytest tests/test_models.py tests/test_redaction.py -v`
+运行：`uv run pytest tests/test_models.py tests/test_redaction.py -v`
 
-Expected: PASS.
+预期：PASS。
 
-- [ ] **Step 6: Commit**
+- [ ] **步骤 6：提交**
 
 ```bash
 git add src/phycode/models.py src/phycode/redaction.py tests/test_models.py tests/test_redaction.py
@@ -491,24 +541,24 @@ git commit -m "feat: add core event models and redaction"
 
 ---
 
-### Task 3: Configuration and Credential Storage
+### Task 3: 配置和凭据存储
 
-**Files:**
-- Create: `src/phycode/config.py`
-- Create: `src/phycode/credentials.py`
-- Create: `tests/test_config.py`
-- Create: `tests/test_credentials.py`
-- Modify: `src/phycode/cli.py`
+**文件：**
+- 创建：`src/phycode/config.py`
+- 创建：`src/phycode/credentials.py`
+- 创建：`tests/test_config.py`
+- 创建：`tests/test_credentials.py`
+- 修改：`src/phycode/cli.py`
 
-**Interfaces:**
-- Consumes: `ProviderConfig` from `src/phycode/models.py`.
-- Produces: `ProjectConfig`, `UserConfig`, `load_project_config(path: Path) -> ProjectConfig`.
-- Produces: `CredentialStore` with `set_key(provider: str, secret: str)`, `get_key(provider: str) -> str | None`, `clear_key(provider: str)`, `status(provider: str) -> CredentialStatus`.
-- Produces CLI commands: `phycode config read`, `phycode keys status`.
+**接口：**
+- 消费：`src/phycode/models.py` 中的 `ProviderConfig`。
+- 产出：`ProjectConfig`、`UserConfig`、`load_project_config(path: Path) -> ProjectConfig`。
+- 产出：`CredentialStore`，包含 `set_key(provider: str, secret: str)`、`get_key(provider: str) -> str | None`、`clear_key(provider: str)`、`status(provider: str) -> CredentialStatus`。
+- 产出 CLI 命令：`phycode config read`、`phycode keys status`。
 
-- [ ] **Step 1: Write failing config and credential tests**
+- [ ] **步骤 1：编写失败的配置和凭据测试**
 
-Create `tests/test_config.py`:
+创建 `tests/test_config.py`：
 
 ```python
 from pathlib import Path
@@ -528,7 +578,7 @@ def test_project_config_reads_test_command(tmp_path: Path):
     assert config.test.command == "uv run pytest"
 ```
 
-Create `tests/test_credentials.py`:
+创建 `tests/test_credentials.py`：
 
 ```python
 from phycode.credentials import InMemoryCredentialBackend, CredentialStore
@@ -550,15 +600,15 @@ def test_clear_key_removes_secret():
     assert store.status("openai-compatible").configured is False
 ```
 
-- [ ] **Step 2: Run tests to verify failure**
+- [ ] **步骤 2：运行测试以验证失败**
 
-Run: `uv run pytest tests/test_config.py tests/test_credentials.py -v`
+运行：`uv run pytest tests/test_config.py tests/test_credentials.py -v`
 
-Expected: FAIL with missing modules.
+预期：FAIL，报缺少模块。
 
-- [ ] **Step 3: Implement configuration models**
+- [ ] **步骤 3：实现配置模型**
 
-Create `src/phycode/config.py`:
+创建 `src/phycode/config.py`：
 
 ```python
 from __future__ import annotations
@@ -611,9 +661,9 @@ def load_project_config(workspace_root: Path) -> ProjectConfig:
     )
 ```
 
-- [ ] **Step 4: Implement credential store**
+- [ ] **步骤 4：实现凭据存储**
 
-Create `src/phycode/credentials.py`:
+创建 `src/phycode/credentials.py`：
 
 ```python
 from __future__ import annotations
@@ -707,9 +757,9 @@ class CredentialStore:
         )
 ```
 
-- [ ] **Step 5: Add CLI status commands**
+- [ ] **步骤 5：添加 CLI 状态命令**
 
-Modify `src/phycode/cli.py` by adding config and keys apps:
+通过添加 config 和 keys app 修改 `src/phycode/cli.py`：
 
 ```python
 from pathlib import Path
@@ -735,13 +785,13 @@ def keys_status(provider: str = "openai-compatible") -> None:
     console.print_json(status.model_dump_json())
 ```
 
-- [ ] **Step 6: Run tests**
+- [ ] **步骤 6：运行测试**
 
-Run: `uv run pytest tests/test_config.py tests/test_credentials.py tests/test_cli_smoke.py -v`
+运行：`uv run pytest tests/test_config.py tests/test_credentials.py tests/test_cli_smoke.py -v`
 
-Expected: PASS.
+预期：PASS。
 
-- [ ] **Step 7: Commit**
+- [ ] **步骤 7：提交**
 
 ```bash
 git add src/phycode/config.py src/phycode/credentials.py src/phycode/cli.py tests/test_config.py tests/test_credentials.py
@@ -750,21 +800,21 @@ git commit -m "feat: add config and credential foundations"
 
 ---
 
-### Task 4: Workspace Policy and Guardrails
+### Task 4: 工作区策略和防护栏
 
-**Files:**
-- Create: `src/phycode/policy.py`
-- Create: `tests/test_policy.py`
+**文件：**
+- 创建：`src/phycode/policy.py`
+- 创建：`tests/test_policy.py`
 
-**Interfaces:**
-- Consumes: `ToolCall`, `PolicyDecision`, `PolicyAction`.
-- Produces: `PolicyContext(workspace_root: Path, allowlist: list[Path], interactive: bool)`.
-- Produces: `PolicyEngine.decide(call: ToolCall, context: PolicyContext) -> PolicyDecision`.
-- Produces: `resolve_workspace_path(path: str, context: PolicyContext) -> Path`.
+**接口：**
+- 消费：`ToolCall`、`PolicyDecision`、`PolicyAction`。
+- 产出：`PolicyContext(workspace_root: Path, allowlist: list[Path], interactive: bool)`。
+- 产出：`PolicyEngine.decide(call: ToolCall, context: PolicyContext) -> PolicyDecision`。
+- 产出：`resolve_workspace_path(path: str, context: PolicyContext) -> Path`。
 
-- [ ] **Step 1: Write failing policy tests**
+- [ ] **步骤 1：编写失败的策略测试**
 
-Create `tests/test_policy.py`:
+创建 `tests/test_policy.py`：
 
 ```python
 from pathlib import Path
@@ -806,15 +856,15 @@ def test_env_file_read_is_denied(tmp_path: Path):
     assert decision.decision == PolicyAction.DENY
 ```
 
-- [ ] **Step 2: Run failing tests**
+- [ ] **步骤 2：运行失败的测试**
 
-Run: `uv run pytest tests/test_policy.py -v`
+运行：`uv run pytest tests/test_policy.py -v`
 
-Expected: FAIL with missing policy module.
+预期：FAIL，报缺少 policy 模块。
 
-- [ ] **Step 3: Implement policy**
+- [ ] **步骤 3：实现策略**
 
-Create `src/phycode/policy.py`:
+创建 `src/phycode/policy.py`：
 
 ```python
 from __future__ import annotations
@@ -912,13 +962,13 @@ class PolicyEngine:
         return PolicyDecision(tool_call_id=call.id, decision=PolicyAction.DENY, rule_id="tool.unknown", reason="Unknown tool")
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **步骤 4：运行测试**
 
-Run: `uv run pytest tests/test_policy.py -v`
+运行：`uv run pytest tests/test_policy.py -v`
 
-Expected: PASS.
+预期：PASS。
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤 5：提交**
 
 ```bash
 git add src/phycode/policy.py tests/test_policy.py
@@ -927,25 +977,25 @@ git commit -m "feat: add deterministic policy engine"
 
 ---
 
-### Task 5: Tool Registry and File/Search Tools
+### Task 5: 工具注册表和文件/搜索工具
 
-**Files:**
-- Create: `src/phycode/tools/__init__.py`
-- Create: `src/phycode/tools/base.py`
-- Create: `src/phycode/tools/file_tools.py`
-- Create: `tests/test_tool_registry.py`
-- Create: `tests/test_file_tools.py`
-- Modify: `src/phycode/cli.py`
+**文件：**
+- 创建：`src/phycode/tools/__init__.py`
+- 创建：`src/phycode/tools/base.py`
+- 创建：`src/phycode/tools/file_tools.py`
+- 创建：`tests/test_tool_registry.py`
+- 创建：`tests/test_file_tools.py`
+- 修改：`src/phycode/cli.py`
 
-**Interfaces:**
-- Consumes: `PolicyEngine`, `PolicyContext`, `ToolCall`, `ToolResult`.
-- Produces: `ToolRegistry.register(spec: ToolSpec, executor: ToolExecutor) -> None`.
-- Produces: `ToolRuntime.run(call: ToolCall, context: PolicyContext, approved: bool = False) -> ToolRuntimeResult`.
-- Produces: `register_file_tools(registry: ToolRegistry) -> None`.
+**接口：**
+- 消费：`PolicyEngine`、`PolicyContext`、`ToolCall`、`ToolResult`。
+- 产出：`ToolRegistry.register(spec: ToolSpec, executor: ToolExecutor) -> None`。
+- 产出：`ToolRuntime.run(call: ToolCall, context: PolicyContext, approved: bool = False) -> ToolRuntimeResult`。
+- 产出：`register_file_tools(registry: ToolRegistry) -> None`。
 
-- [ ] **Step 1: Write failing registry and file tool tests**
+- [ ] **步骤 1：编写失败的注册表和文件工具测试**
 
-Create `tests/test_tool_registry.py`:
+创建 `tests/test_tool_registry.py`：
 
 ```python
 from pathlib import Path
@@ -970,7 +1020,7 @@ def test_registry_lists_specs():
     assert [spec.name for spec in registry.list_specs()] == ["x.echo"]
 ```
 
-Create `tests/test_file_tools.py`:
+创建 `tests/test_file_tools.py`：
 
 ```python
 from pathlib import Path
@@ -1002,15 +1052,15 @@ def test_file_edit_requires_approval_then_writes_diff(tmp_path: Path):
     assert "+x = 2" in result.tool_result.stdout
 ```
 
-- [ ] **Step 2: Run failing tests**
+- [ ] **步骤 2：运行失败的测试**
 
-Run: `uv run pytest tests/test_tool_registry.py tests/test_file_tools.py -v`
+运行：`uv run pytest tests/test_tool_registry.py tests/test_file_tools.py -v`
 
-Expected: FAIL with missing tool modules.
+预期：FAIL，报缺少工具模块。
 
-- [ ] **Step 3: Implement registry and runtime**
+- [ ] **步骤 3：实现注册表和运行时**
 
-Create `src/phycode/tools/base.py`:
+创建 `src/phycode/tools/base.py`：
 
 ```python
 from __future__ import annotations
@@ -1063,7 +1113,7 @@ class ToolRuntime:
         return ToolRuntimeResult(decision, executor(call))
 ```
 
-Create `src/phycode/tools/__init__.py`:
+创建 `src/phycode/tools/__init__.py`：
 
 ```python
 from phycode.tools.base import ToolRegistry, ToolRuntime, ToolRuntimeResult
@@ -1071,9 +1121,9 @@ from phycode.tools.base import ToolRegistry, ToolRuntime, ToolRuntimeResult
 __all__ = ["ToolRegistry", "ToolRuntime", "ToolRuntimeResult"]
 ```
 
-- [ ] **Step 4: Implement file and search tools**
+- [ ] **步骤 4：实现文件和搜索工具**
 
-Create `src/phycode/tools/file_tools.py`:
+创建 `src/phycode/tools/file_tools.py`：
 
 ```python
 from __future__ import annotations
@@ -1134,9 +1184,9 @@ def register_file_tools(registry: ToolRegistry) -> None:
     registry.register(ToolSpec(name="file.edit", description="Edit a file by exact replacement", input_schema={"type": "object"}, risk_level=ToolRiskLevel.RISKY), _file_edit)
 ```
 
-- [ ] **Step 5: Wire tools list CLI**
+- [ ] **步骤 5：连接工具列表 CLI**
 
-Modify `src/phycode/cli.py`:
+修改 `src/phycode/cli.py`：
 
 ```python
 from phycode.tools import ToolRegistry
@@ -1157,13 +1207,13 @@ def list_tools() -> None:
         console.print(f"{spec.name}\t{spec.risk_level.value}\t{spec.description}")
 ```
 
-- [ ] **Step 6: Run tests**
+- [ ] **步骤 6：运行测试**
 
-Run: `uv run pytest tests/test_tool_registry.py tests/test_file_tools.py tests/test_cli_smoke.py -v`
+运行：`uv run pytest tests/test_tool_registry.py tests/test_file_tools.py tests/test_cli_smoke.py -v`
 
-Expected: update `tests/test_cli_smoke.py::test_tools_list_command_exists` to assert `"file.read"` appears, then PASS.
+预期：更新 `tests/test_cli_smoke.py::test_tools_list_command_exists` 以断言 `"file.read"` 出现，然后 PASS。
 
-- [ ] **Step 7: Commit**
+- [ ] **步骤 7：提交**
 
 ```bash
 git add src/phycode/tools src/phycode/cli.py tests/test_tool_registry.py tests/test_file_tools.py tests/test_cli_smoke.py
@@ -1172,24 +1222,24 @@ git commit -m "feat: add tool registry and file tools"
 
 ---
 
-### Task 6: Shell, Test, Workspace, and Feedback Tools
+### Task 6: Shell、测试、工作区和反馈工具
 
-**Files:**
-- Create: `src/phycode/tools/shell_tools.py`
-- Create: `src/phycode/tools/state_tools.py`
-- Create: `src/phycode/feedback.py`
-- Create: `tests/test_shell_and_feedback.py`
-- Create: `tests/test_state_tools.py`
-- Modify: `src/phycode/cli.py`
+**文件：**
+- 创建：`src/phycode/tools/shell_tools.py`
+- 创建：`src/phycode/tools/state_tools.py`
+- 创建：`src/phycode/feedback.py`
+- 创建：`tests/test_shell_and_feedback.py`
+- 创建：`tests/test_state_tools.py`
+- 修改：`src/phycode/cli.py`
 
-**Interfaces:**
-- Produces: `register_shell_tools(registry: ToolRegistry, workspace_root: Path, test_command: str) -> None`.
-- Produces: `register_state_tools(registry: ToolRegistry, workspace_root: Path) -> None`.
-- Produces: `classify_feedback(result: ToolResult) -> list[FeedbackSignal]`.
+**接口：**
+- 产出：`register_shell_tools(registry: ToolRegistry, workspace_root: Path, test_command: str) -> None`。
+- 产出：`register_state_tools(registry: ToolRegistry, workspace_root: Path) -> None`。
+- 产出：`classify_feedback(result: ToolResult) -> list[FeedbackSignal]`。
 
-- [ ] **Step 1: Write failing tests**
+- [ ] **步骤 1：编写失败的测试**
 
-Create `tests/test_shell_and_feedback.py`:
+创建 `tests/test_shell_and_feedback.py`：
 
 ```python
 from pathlib import Path
@@ -1217,7 +1267,7 @@ def test_tool_error_maps_to_tool_error():
     assert feedback[0].kind == FeedbackKind.TOOL_ERROR
 ```
 
-Create `tests/test_state_tools.py`:
+创建 `tests/test_state_tools.py`：
 
 ```python
 from pathlib import Path
@@ -1235,15 +1285,15 @@ def test_workspace_status_reports_root(tmp_path: Path):
     assert str(tmp_path) in result.tool_result.stdout
 ```
 
-- [ ] **Step 2: Run failing tests**
+- [ ] **步骤 2：运行失败的测试**
 
-Run: `uv run pytest tests/test_shell_and_feedback.py tests/test_state_tools.py -v`
+运行：`uv run pytest tests/test_shell_and_feedback.py tests/test_state_tools.py -v`
 
-Expected: FAIL with missing modules.
+预期：FAIL，报缺少模块。
 
-- [ ] **Step 3: Implement feedback classifier**
+- [ ] **步骤 3：实现反馈分类器**
 
-Create `src/phycode/feedback.py`:
+创建 `src/phycode/feedback.py`：
 
 ```python
 from __future__ import annotations
@@ -1300,9 +1350,9 @@ def _next_step_for(kind: FeedbackKind) -> str | None:
     return None
 ```
 
-- [ ] **Step 4: Implement shell and state tools**
+- [ ] **步骤 4：实现 shell 和状态工具**
 
-Create `src/phycode/tools/shell_tools.py`:
+创建 `src/phycode/tools/shell_tools.py`：
 
 ```python
 from __future__ import annotations
@@ -1335,7 +1385,7 @@ def register_shell_tools(registry: ToolRegistry, workspace_root: Path, test_comm
     registry.register(ToolSpec(name="test.run", description="Run configured tests", input_schema={"type": "object"}, risk_level=ToolRiskLevel.RISKY), test_run)
 ```
 
-Create `src/phycode/tools/state_tools.py`:
+创建 `src/phycode/tools/state_tools.py`：
 
 ```python
 from __future__ import annotations
@@ -1353,9 +1403,9 @@ def register_state_tools(registry: ToolRegistry, workspace_root: Path) -> None:
     registry.register(ToolSpec(name="workspace.status", description="Show workspace status", input_schema={"type": "object"}, risk_level=ToolRiskLevel.SAFE), workspace_status)
 ```
 
-- [ ] **Step 5: Register shell and state tools in CLI**
+- [ ] **步骤 5：在 CLI 中注册 shell 和状态工具**
 
-Modify `build_default_registry()` in `src/phycode/cli.py`:
+修改 `src/phycode/cli.py` 中的 `build_default_registry()`：
 
 ```python
 from pathlib import Path
@@ -1373,13 +1423,13 @@ def build_default_registry() -> ToolRegistry:
     return registry
 ```
 
-- [ ] **Step 6: Run tests**
+- [ ] **步骤 6：运行测试**
 
-Run: `uv run pytest tests/test_shell_and_feedback.py tests/test_state_tools.py tests/test_cli_smoke.py -v`
+运行：`uv run pytest tests/test_shell_and_feedback.py tests/test_state_tools.py tests/test_cli_smoke.py -v`
 
-Expected: PASS.
+预期：PASS。
 
-- [ ] **Step 7: Commit**
+- [ ] **步骤 7：提交**
 
 ```bash
 git add src/phycode/tools/shell_tools.py src/phycode/tools/state_tools.py src/phycode/feedback.py src/phycode/cli.py tests/test_shell_and_feedback.py tests/test_state_tools.py
@@ -1388,23 +1438,23 @@ git commit -m "feat: add shell tools and feedback classification"
 
 ---
 
-### Task 7: Trace, Memory, Session, and Context Builder
+### Task 7: Trace、记忆、会话和上下文构建器
 
-**Files:**
-- Create: `src/phycode/trace.py`
-- Create: `src/phycode/context.py`
-- Create: `tests/test_trace_context_memory.py`
+**文件：**
+- 创建：`src/phycode/trace.py`
+- 创建：`src/phycode/context.py`
+- 创建：`tests/test_trace_context_memory.py`
 
-**Interfaces:**
-- Consumes: `AgentEvent`, `FeedbackSignal`, `MemoryEntry`, `Session`.
-- Produces: `TraceStore.append(event: AgentEvent) -> None`.
-- Produces: `MemoryStore.append(entry: MemoryEntry) -> None`, `MemoryStore.summary() -> str`.
-- Produces: `SessionStore.add_event(event: AgentEvent) -> None`.
-- Produces: `ContextBuilder.build(current_input: str) -> list[dict[str, object]]`.
+**接口：**
+- 消费：`AgentEvent`、`FeedbackSignal`、`MemoryEntry`、`Session`。
+- 产出：`TraceStore.append(event: AgentEvent) -> None`。
+- 产出：`MemoryStore.append(entry: MemoryEntry) -> None`、`MemoryStore.summary() -> str`。
+- 产出：`SessionStore.add_event(event: AgentEvent) -> None`。
+- 产出：`ContextBuilder.build(current_input: str) -> list[dict[str, object]]`。
 
-- [ ] **Step 1: Write failing tests**
+- [ ] **步骤 1：编写失败的测试**
 
-Create `tests/test_trace_context_memory.py`:
+创建 `tests/test_trace_context_memory.py`：
 
 ```python
 from pathlib import Path
@@ -1436,15 +1486,15 @@ def test_context_includes_recent_feedback_and_memory(tmp_path: Path):
     assert "fix it" in rendered
 ```
 
-- [ ] **Step 2: Run failing tests**
+- [ ] **步骤 2：运行失败的测试**
 
-Run: `uv run pytest tests/test_trace_context_memory.py -v`
+运行：`uv run pytest tests/test_trace_context_memory.py -v`
 
-Expected: FAIL with missing modules.
+预期：FAIL，报缺少模块。
 
-- [ ] **Step 3: Implement trace store**
+- [ ] **步骤 3：实现 trace 存储**
 
-Create `src/phycode/trace.py`:
+创建 `src/phycode/trace.py`：
 
 ```python
 from __future__ import annotations
@@ -1475,9 +1525,9 @@ class TraceStore:
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 ```
 
-- [ ] **Step 4: Implement session, memory, and context**
+- [ ] **步骤 4：实现会话、记忆和上下文**
 
-Create `src/phycode/context.py`:
+创建 `src/phycode/context.py`：
 
 ```python
 from __future__ import annotations
@@ -1538,13 +1588,13 @@ class ContextBuilder:
         ]
 ```
 
-- [ ] **Step 5: Run tests**
+- [ ] **步骤 5：运行测试**
 
-Run: `uv run pytest tests/test_trace_context_memory.py -v`
+运行：`uv run pytest tests/test_trace_context_memory.py -v`
 
-Expected: PASS.
+预期：PASS。
 
-- [ ] **Step 6: Commit**
+- [ ] **步骤 6：提交**
 
 ```bash
 git add src/phycode/trace.py src/phycode/context.py tests/test_trace_context_memory.py
@@ -1553,20 +1603,20 @@ git commit -m "feat: add trace memory and context stores"
 
 ---
 
-### Task 8: LLM Adapters and Event Normalization
+### Task 8: LLM 适配器和事件规范化
 
-**Files:**
-- Create: `src/phycode/llm.py`
-- Create: `tests/test_llm_adapters.py`
+**文件：**
+- 创建：`src/phycode/llm.py`
+- 创建：`tests/test_llm_adapters.py`
 
-**Interfaces:**
-- Consumes: `AgentEvent`, `AgentEventType`, `ToolCall`.
-- Produces protocol: `LLMClient.generate(messages: list[dict], tools: list[ToolSpec]) -> list[AgentEvent]`.
-- Produces: `ScriptedLLM`, `EchoLLM`, `FailingLLM`, `OpenAICompatibleChatAdapter`.
+**接口：**
+- 消费：`AgentEvent`、`AgentEventType`、`ToolCall`。
+- 产出协议：`LLMClient.generate(messages: list[dict], tools: list[ToolSpec]) -> list[AgentEvent]`。
+- 产出：`ScriptedLLM`、`EchoLLM`、`FailingLLM`、`OpenAICompatibleChatAdapter`。
 
-- [ ] **Step 1: Write failing LLM tests**
+- [ ] **步骤 1：编写失败的 LLM 测试**
 
-Create `tests/test_llm_adapters.py`:
+创建 `tests/test_llm_adapters.py`：
 
 ```python
 import pytest
@@ -1645,15 +1695,15 @@ def test_openai_compatible_adapter_maps_tool_calls():
     assert events[1].payload["args"] == {"path": "README.md"}
 ```
 
-- [ ] **Step 2: Run failing tests**
+- [ ] **步骤 2：运行失败的测试**
 
-Run: `uv run pytest tests/test_llm_adapters.py -v`
+运行：`uv run pytest tests/test_llm_adapters.py -v`
 
-Expected: FAIL with missing `phycode.llm`.
+预期：FAIL，报缺少 `phycode.llm`。
 
-- [ ] **Step 3: Implement mock adapters**
+- [ ] **步骤 3：实现 mock 适配器**
 
-Create `src/phycode/llm.py`:
+创建 `src/phycode/llm.py`：
 
 ```python
 from __future__ import annotations
@@ -1748,13 +1798,13 @@ class OpenAICompatibleChatAdapter:
         return events
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **步骤 4：运行测试**
 
-Run: `uv run pytest tests/test_llm_adapters.py -v`
+运行：`uv run pytest tests/test_llm_adapters.py -v`
 
-Expected: PASS.
+预期：PASS。
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤 5：提交**
 
 ```bash
 git add src/phycode/llm.py tests/test_llm_adapters.py
@@ -1763,21 +1813,21 @@ git commit -m "feat: add mock llm adapters"
 
 ---
 
-### Task 9: Agent Loop and Stop Controller
+### Task 9: Agent 循环和停止控制器
 
-**Files:**
-- Create: `src/phycode/agent.py`
-- Create: `tests/test_agent_loop.py`
+**文件：**
+- 创建：`src/phycode/agent.py`
+- 创建：`tests/test_agent_loop.py`
 
-**Interfaces:**
-- Consumes: `LLMClient`, `ContextBuilder`, `ToolRuntime`, `ToolRegistry`, `PolicyContext`, `TraceStore`, `classify_feedback`.
-- Produces: `AgentLoop.run_once(user_input: str) -> AgentRunResult`.
-- Produces: `AgentLoop.run(user_input: str) -> AgentRunResult`.
-- Produces: `AgentRunResult(final_text: str | None, events: list[AgentEvent], stopped_reason: str)`.
+**接口：**
+- 消费：`LLMClient`、`ContextBuilder`、`ToolRuntime`、`ToolRegistry`、`PolicyContext`、`TraceStore`、`classify_feedback`。
+- 产出：`AgentLoop.run_once(user_input: str) -> AgentRunResult`。
+- 产出：`AgentLoop.run(user_input: str) -> AgentRunResult`。
+- 产出：`AgentRunResult(final_text: str | None, events: list[AgentEvent], stopped_reason: str)`。
 
-- [ ] **Step 1: Write failing agent loop tests**
+- [ ] **步骤 1：编写失败的 agent 循环测试**
 
-Create `tests/test_agent_loop.py`:
+创建 `tests/test_agent_loop.py`：
 
 ```python
 from pathlib import Path
@@ -1827,15 +1877,15 @@ def test_agent_routes_tool_call_and_then_final(tmp_path: Path):
     assert any(event.type == AgentEventType.FEEDBACK_SIGNAL for event in result.events)
 ```
 
-- [ ] **Step 2: Run failing tests**
+- [ ] **步骤 2：运行失败的测试**
 
-Run: `uv run pytest tests/test_agent_loop.py -v`
+运行：`uv run pytest tests/test_agent_loop.py -v`
 
-Expected: FAIL with missing agent module.
+预期：FAIL，报缺少 agent 模块。
 
-- [ ] **Step 3: Implement agent loop**
+- [ ] **步骤 3：实现 agent 循环**
 
-Create `src/phycode/agent.py`:
+创建 `src/phycode/agent.py`：
 
 ```python
 from __future__ import annotations
@@ -1914,13 +1964,13 @@ class AgentLoop:
         self.trace_store.append(event)
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **步骤 4：运行测试**
 
-Run: `uv run pytest tests/test_agent_loop.py -v`
+运行：`uv run pytest tests/test_agent_loop.py -v`
 
-Expected: PASS.
+预期：PASS。
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤 5：提交**
 
 ```bash
 git add src/phycode/agent.py tests/test_agent_loop.py
@@ -1929,19 +1979,19 @@ git commit -m "feat: add mock-testable agent loop"
 
 ---
 
-### Task 10: CLI Run, Chat, Config, Keys, and Tool Listing
+### Task 10: CLI Run、Chat、Config、Keys 和工具列表
 
-**Files:**
-- Modify: `src/phycode/cli.py`
-- Create: `tests/test_cli_commands.py`
+**文件：**
+- 修改：`src/phycode/cli.py`
+- 创建：`tests/test_cli_commands.py`
 
-**Interfaces:**
-- Consumes: `AgentLoop`, `EchoLLM`, `ScriptedLLM`, stores, registry.
-- Produces commands: `phycode chat`, `phycode run`, `phycode tools list`, `phycode keys set/status/clear`, `phycode config read`.
+**接口：**
+- 消费：`AgentLoop`、`EchoLLM`、`ScriptedLLM`、stores、registry。
+- 产出命令：`phycode chat`、`phycode run`、`phycode tools list`、`phycode keys set/status/clear`、`phycode config read`。
 
-- [ ] **Step 1: Write failing CLI command tests**
+- [ ] **步骤 1：编写失败的 CLI 命令测试**
 
-Create `tests/test_cli_commands.py`:
+创建 `tests/test_cli_commands.py`：
 
 ```python
 from typer.testing import CliRunner
@@ -1971,15 +2021,15 @@ def test_tools_list_includes_shell_and_workspace():
     assert "workspace.status" in result.stdout
 ```
 
-- [ ] **Step 2: Run failing tests**
+- [ ] **步骤 2：运行失败的测试**
 
-Run: `uv run pytest tests/test_cli_commands.py -v`
+运行：`uv run pytest tests/test_cli_commands.py -v`
 
-Expected: FAIL until `run` is implemented and tool registry includes shell/state tools.
+预期：FAIL，直到 `run` 实现且工具注册表包含 shell/state 工具。
 
-- [ ] **Step 3: Implement CLI run command**
+- [ ] **步骤 3：实现 CLI run 命令**
 
-Modify `src/phycode/cli.py`:
+修改 `src/phycode/cli.py`：
 
 ```python
 from phycode.agent import AgentLoop
@@ -2031,9 +2081,9 @@ def chat() -> None:
             console.print(result.final_text)
 ```
 
-- [ ] **Step 4: Implement keys set and clear commands**
+- [ ] **步骤 4：实现 keys set 和 clear 命令**
 
-Modify `src/phycode/cli.py`:
+修改 `src/phycode/cli.py`：
 
 ```python
 @keys_app.command("set")
@@ -2049,13 +2099,13 @@ def keys_clear(provider: str = "openai-compatible") -> None:
     console.print(f"{provider} key cleared")
 ```
 
-- [ ] **Step 5: Run CLI tests**
+- [ ] **步骤 5：运行 CLI 测试**
 
-Run: `uv run pytest tests/test_cli_commands.py tests/test_cli_smoke.py -v`
+运行：`uv run pytest tests/test_cli_commands.py tests/test_cli_smoke.py -v`
 
-Expected: PASS.
+预期：PASS。
 
-- [ ] **Step 6: Commit**
+- [ ] **步骤 6：提交**
 
 ```bash
 git add src/phycode/cli.py tests/test_cli_commands.py
@@ -2064,22 +2114,22 @@ git commit -m "feat: add cli run chat config and key commands"
 
 ---
 
-### Task 11: Deterministic Demos
+### Task 11: 确定性演示
 
-**Files:**
-- Create: `src/phycode/demos.py`
-- Create: `tests/test_demos.py`
-- Modify: `src/phycode/cli.py`
+**文件：**
+- 创建：`src/phycode/demos.py`
+- 创建：`tests/test_demos.py`
+- 修改：`src/phycode/cli.py`
 
-**Interfaces:**
-- Produces: `run_guardrail_demo(workspace_root: Path) -> str`.
-- Produces: `run_feedback_demo(workspace_root: Path) -> str`.
-- Produces: `run_policy_demo(workspace_root: Path) -> str`.
-- Produces CLI command: `phycode demo guardrail|feedback|policy`.
+**接口：**
+- 产出：`run_guardrail_demo(workspace_root: Path) -> str`。
+- 产出：`run_feedback_demo(workspace_root: Path) -> str`。
+- 产出：`run_policy_demo(workspace_root: Path) -> str`。
+- 产出 CLI 命令：`phycode demo guardrail|feedback|policy`。
 
-- [ ] **Step 1: Write failing demo tests**
+- [ ] **步骤 1：编写失败的演示测试**
 
-Create `tests/test_demos.py`:
+创建 `tests/test_demos.py`：
 
 ```python
 from pathlib import Path
@@ -2105,15 +2155,15 @@ def test_policy_demo_shows_approval_required(tmp_path: Path):
     assert "policy_requires_approval" in output
 ```
 
-- [ ] **Step 2: Run failing tests**
+- [ ] **步骤 2：运行失败的测试**
 
-Run: `uv run pytest tests/test_demos.py -v`
+运行：`uv run pytest tests/test_demos.py -v`
 
-Expected: FAIL with missing demos.
+预期：FAIL，报缺少演示。
 
-- [ ] **Step 3: Implement demo functions**
+- [ ] **步骤 3：实现演示函数**
 
-Create `src/phycode/demos.py`:
+创建 `src/phycode/demos.py`：
 
 ```python
 from __future__ import annotations
@@ -2160,9 +2210,9 @@ def run_policy_demo(workspace_root: Path) -> str:
     return f"{result.policy.decision.value}\n{feedback.kind.value}"
 ```
 
-- [ ] **Step 4: Wire CLI demo command**
+- [ ] **步骤 4：连接 CLI 演示命令**
 
-Modify `src/phycode/cli.py`:
+修改 `src/phycode/cli.py`：
 
 ```python
 from phycode.demos import run_feedback_demo, run_guardrail_demo, run_policy_demo
@@ -2185,17 +2235,17 @@ def demo(name: str) -> None:
     raise typer.Exit(code=2)
 ```
 
-- [ ] **Step 5: Run demo tests and commands**
+- [ ] **步骤 5：运行演示测试和命令**
 
-Run: `uv run pytest tests/test_demos.py -v`
+运行：`uv run pytest tests/test_demos.py -v`
 
-Expected: PASS.
+预期：PASS。
 
-Run: `uv run phycode demo guardrail`
+运行：`uv run phycode demo guardrail`
 
-Expected output includes `policy_blocked`.
+预期输出包含 `policy_blocked`。
 
-- [ ] **Step 6: Commit**
+- [ ] **步骤 6：提交**
 
 ```bash
 git add src/phycode/demos.py src/phycode/cli.py tests/test_demos.py
@@ -2204,35 +2254,35 @@ git commit -m "feat: add deterministic mechanism demos"
 
 ---
 
-### Task 12: Documentation, SPEC_PROCESS, AGENT_LOG, and Final Verification
+### Task 12: README、过程记录收尾和最终验证
 
-**Files:**
-- Modify: `README.md`
-- Create: `SPEC_PROCESS.md`
-- Create: `AGENT_LOG.md`
-- Modify: `PLAN.md`
+**文件：**
+- 修改：`README.md`
+- 修改：`SPEC_PROCESS.md`
+- 修改：`AGENT_LOG.md`
+- 修改：`PLAN.md`
 
-**Interfaces:**
-- Produces user-facing install/run/test/security documentation.
-- Produces process evidence documents required by the course.
-- Produces final plan status entries with commit hashes for completed tasks.
+**接口：**
+- 产出面向用户的安装/运行/测试/安全文档。
+- 补全课程要求的过程证据文档。
+- 产出最终计划状态条目，包含已完成任务的 commit hash。
 
-- [ ] **Step 1: Write README with exact commands**
+- [ ] **步骤 1：编写包含确切命令的 README**
 
-Modify `README.md`:
+修改 `README.md`：
 
 ````markdown
 # PhyCode
 
-PhyCode is a CLI-first coding agent harness for the AI4SE final project. Phase 1 focuses on a general-purpose, self-implemented harness core: agent loop, OpenAI-compatible model adapter, mock LLM tests, policy-aware tool runtime, feedback loop, memory/context management, credential safety, CI, and deterministic demos.
+PhyCode 是面向 AI4SE 期末项目的 CLI 优先 coding agent harness。第一阶段聚焦通用、自主实现的 harness 核心：agent 循环、OpenAI-compatible 模型适配器、mock LLM 测试、策略感知工具运行时、反馈闭环、记忆/上下文管理、凭据安全、CI 和确定性演示。
 
-## Install
+## 安装
 
 ```bash
 uv sync --dev
 ```
 
-## Run
+## 运行
 
 ```bash
 uv run phycode version
@@ -2241,7 +2291,7 @@ uv run phycode run "hello"
 uv run phycode chat
 ```
 
-## Demos
+## 演示
 
 ```bash
 uv run phycode demo guardrail
@@ -2249,15 +2299,15 @@ uv run phycode demo feedback
 uv run phycode demo policy
 ```
 
-## Test
+## 测试
 
 ```bash
 uv run pytest
 ```
 
-## Secure Key Configuration
+## 安全 Key 配置
 
-Use:
+使用：
 
 ```bash
 uv run phycode keys set openai-compatible
@@ -2265,72 +2315,39 @@ uv run phycode keys status openai-compatible
 uv run phycode keys clear openai-compatible
 ```
 
-Keys are stored through OS keyring when available. `.env` is a plaintext fallback source only and must not be committed.
+Key 默认通过操作系统钥匙串存储。`.env` 仅作为明文回退来源，不得提交。
 
-## Safety Boundary
+## 安全边界
 
-The default workspace root is the current project directory. File operations outside the workspace are blocked unless explicitly allowlisted. Risky writes and shell commands require approval in interactive mode and fail with a structured policy signal in non-interactive mode.
+默认工作区根目录是当前项目目录。超出工作区的文件操作被阻止，除非显式加入白名单。交互模式下，危险写入和 shell 命令需要审批；非交互模式下则返回结构化策略信号并失败。
 ````
 
-- [ ] **Step 2: Create process documents**
+- [ ] **步骤 2：补全过程证据**
 
-Create `SPEC_PROCESS.md`:
+更新 `SPEC_PROCESS.md`，确保包含：
 
-```markdown
-# SPEC Process
+- brainstorm 关键追问与至少 3 轮关键迭代。
+- 采纳、拒绝和修正的 AI 建议及原因。
+- 陌生 agent 冷启动验证暴露的问题、产出偏差、SPEC / PLAN 修订前后关键 diff。
+- GitHub 与 NJU Git 平台策略的最终状态。
 
-## Brainstorming Iterations
+更新 `AGENT_LOG.md`，确保包含：
 
-1. The project was narrowed from a physics-specific PhyCode vision to a two-phase plan: Phase 1 general harness, Phase 2 physics extensions.
-2. The main contribution was refined from separate tool, governance, and feedback features into one Policy-Aware Tool Runtime.
-3. Provider strategy was revised after checking current OpenAI-compatible tool-call support: default to `tools` / `tool_calls`, keep fallback JSON action parsing.
-4. The interface was refined to an interactive CLI session rather than one command per turn.
-5. Context handling was scoped to session history, memory summary, trace, truncation, and feedback inclusion, without vector memory.
+- 每个 task 的日期、执行方式、使用的 Superpowers 技能和 commit hash。
+- subagent 或 inline 执行的关键输出摘要。
+- 人工干预、规范偏离、review 结论和修正记录。
 
-## Adopted AI Suggestions
+- [ ] **步骤 3：运行完整验证**
 
-- Adopted CLI-first design with lightweight Rich rendering.
-- Adopted Python + uv + Typer + Rich + pytest.
-- Adopted mock LLM tests as the required verification path.
-- Adopted Policy-Aware Tool Runtime as the primary mechanism contribution.
+运行：`uv run pytest`
 
-## Rejected or Deferred Suggestions
+预期：所有测试 PASS。
 
-- Deferred WebUI.
-- Deferred Wolfram, LaTeX, literature retrieval, and knowledge graph tools.
-- Deferred OpenAI Responses API adapter and Agents SDK integration as product core.
-- Deferred Docker unless time remains after core implementation.
+运行：`git status --short`
 
-## Cold-Start Validation
+预期：提交前仅有刻意的文档变更。
 
-This section will be updated after SPEC.md and PLAN.md are handed to a fresh agent for 1-2 task trials.
-```
-
-Create `AGENT_LOG.md`:
-
-```markdown
-# Agent Log
-
-## 2026-07-08
-
-- Skill flow: `brainstorming` -> `writing-plans`.
-- Key decision: Phase 1 delivers a general CLI coding agent harness; physics tools are Phase 2 extensions.
-- Key decision: main contribution is Policy-Aware Tool Runtime.
-- Repository strategy: GitHub is used for current development; NJU Git migration remains possible if required by course staff.
-- Implementation has not started before SPEC.md and PLAN.md completion.
-```
-
-- [ ] **Step 3: Run full verification**
-
-Run: `uv run pytest`
-
-Expected: all tests PASS.
-
-Run: `git status --short`
-
-Expected: only intentional documentation changes before commit.
-
-- [ ] **Step 4: Commit**
+- [ ] **步骤 4：提交**
 
 ```bash
 git add README.md SPEC_PROCESS.md AGENT_LOG.md PLAN.md
@@ -2339,51 +2356,53 @@ git commit -m "docs: add project process and usage documentation"
 
 ---
 
-## Dependency and Parallelization Notes
+## 依赖和并行化说明
 
-- Task 1 must run first.
-- Task 2 must run before Tasks 4-9.
-- Task 3 can run after Task 2.
-- Task 4 depends on Task 2.
-- Task 5 depends on Tasks 2 and 4.
-- Task 6 depends on Task 5.
-- Task 7 depends on Task 2.
-- Task 8 depends on Task 2.
-- Task 9 depends on Tasks 5, 6, 7, and 8.
-- Task 10 depends on Task 9.
-- Task 11 depends on Tasks 5, 6, and 10.
-- Task 12 depends on all implementation tasks.
+- Task 0 必须在任何实现任务之前完成。
+- Task 1 必须在 Task 0 通过后运行。
+- Task 2 必须在 Task 4-9 之前运行。
+- Task 3 可以在 Task 2 之后运行。
+- Task 4 依赖 Task 2。
+- Task 5 依赖 Task 2 和 Task 4。
+- Task 6 依赖 Task 5。
+- Task 7 依赖 Task 2。
+- Task 8 依赖 Task 2。
+- Task 9 依赖 Task 5、6、7 和 8。
+- Task 10 依赖 Task 9。
+- Task 11 依赖 Task 5、6 和 10。
+- Task 12 依赖 Task 0 和所有实现任务。
 
-After Task 2, these can proceed in separate worktrees if needed:
+Task 2 完成后，以下任务可在独立 worktree 中并行进行：
 
-- Config and credentials: Task 3.
-- Policy: Task 4.
-- Context/trace/memory: Task 7.
-- LLM adapters: Task 8.
+- 配置和凭据：Task 3。
+- 策略：Task 4。
+- 上下文/trace/记忆：Task 7。
+- LLM 适配器：Task 8。
 
-Tool runtime and agent-loop tasks should be integrated after those foundations are stable.
+工具运行时和 agent 循环任务应在这些基础稳定后集成。
 
-## Self-Review
+## 自我审查
 
-Spec coverage:
+规约覆盖：
 
-- Interactive CLI: Tasks 1 and 10.
-- OpenAI-compatible provider path and mock LLM: Task 8.
-- Self-implemented agent loop: Task 9.
-- Policy-aware tool runtime: Tasks 4, 5, 6, and 11.
-- Feedback loop: Tasks 6, 9, and 11.
-- Context, memory, and trace: Task 7.
-- Credential safety: Task 3 and Task 12.
-- Deterministic demos: Task 11.
-- CI and one-command tests: Tasks 1 and 12.
-- README, SPEC_PROCESS, AGENT_LOG: Task 12.
+- 交互式 CLI：Task 1 和 10。
+- OpenAI-compatible 供应商路径和 mock LLM：Task 8。
+- 自主实现的 agent 循环：Task 9。
+- 策略感知工具运行时：Task 4、5、6 和 11。
+- 反馈闭环：Task 6、9 和 11。
+- 上下文、记忆和 trace：Task 7。
+- 凭据安全：Task 3 和 12。
+- 确定性演示：Task 11。
+- CI 和一键测试：Task 1 和 12。
+- README：Task 12。
+- SPEC_PROCESS、AGENT_LOG：Task 0 建立初始记录，Task 12 补全最终证据。
 
-Red flag scan:
+红旗扫描：
 
-- This plan intentionally avoids empty implementation markers and defers only items listed as non-goals in SPEC.md.
+- 本计划刻意避免空的实现标记，仅推迟 SPEC.md 中列为非目标的项目。
 
-Type consistency:
+类型一致性：
 
-- `ToolCall`, `ToolResult`, `PolicyDecision`, and `FeedbackSignal` are defined in Task 2 and used consistently in later task interfaces.
-- `PolicyContext` is defined in Task 4 and used by `ToolRuntime` and `AgentLoop`.
-- `ToolRuntimeResult` is defined in Task 5 and used by agent and demo tasks.
+- `ToolCall`、`ToolResult`、`PolicyDecision` 和 `FeedbackSignal` 在 Task 2 定义，并在后续任务接口中一致使用。
+- `PolicyContext` 在 Task 4 定义，并由 `ToolRuntime` 和 `AgentLoop` 使用。
+- `ToolRuntimeResult` 在 Task 5 定义，并由 agent 和演示任务使用。
