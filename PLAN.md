@@ -108,10 +108,11 @@ git commit -m "docs: align pre-implementation planning records"
 
 ---
 
-### Task 1: 项目脚手架、CLI 冒烟测试和 CI 骨架
+### Task 1: 项目脚手架、CLI 冒烟测试和 CI 骨架 - ✅ 完成于 2026-07-08 - commit: `0ed8f0f`
 
 **文件：**
 - 创建：`pyproject.toml`
+- 创建：`uv.lock`
 - 创建：`README.md`
 - 创建：`.gitlab-ci.yml`
 - 创建：`.github/workflows/test.yml`
@@ -125,7 +126,7 @@ git commit -m "docs: align pre-implementation planning records"
 - 产出：`phycode.__version__: str`。
 - 产出：Typer app 对象 `phycode.cli.app`。
 
-- [ ] **步骤 1：编写失败的 CLI 冒烟测试**
+- [x] **步骤 1：编写失败的 CLI 冒烟测试**
 
 创建 `tests/test_cli_smoke.py`：
 
@@ -150,13 +151,13 @@ def test_tools_list_command_exists():
     assert "No tools registered yet" in result.stdout
 ```
 
-- [ ] **步骤 2：运行失败的冒烟测试**
+- [x] **步骤 2：运行失败的冒烟测试**
 
 运行：`uv run pytest tests/test_cli_smoke.py -v`
 
 预期：FAIL，报 `phycode` 或 `phycode.cli` 导入错误。
 
-- [ ] **步骤 3：创建包脚手架**
+- [x] **步骤 3：创建包脚手架**
 
 创建 `pyproject.toml`：
 
@@ -229,7 +230,7 @@ def list_tools() -> None:
     console.print("No tools registered yet")
 ```
 
-- [ ] **步骤 4：添加 CI 骨架**
+- [x] **步骤 4：添加 CI 骨架**
 
 创建 `.gitlab-ci.yml`：
 
@@ -280,16 +281,16 @@ build/
 *.egg-info/
 ```
 
-- [ ] **步骤 5：运行冒烟测试**
+- [x] **步骤 5：运行冒烟测试**
 
 运行：`uv run pytest tests/test_cli_smoke.py -v`
 
 预期：两个冒烟测试均 PASS。
 
-- [ ] **步骤 6：提交**
+- [x] **步骤 6：提交**
 
 ```bash
-git add pyproject.toml README.md .gitlab-ci.yml .github/workflows/test.yml src/phycode/__init__.py src/phycode/cli.py tests/test_cli_smoke.py .gitignore
+git add pyproject.toml uv.lock README.md .gitlab-ci.yml .github/workflows/test.yml src/phycode/__init__.py src/phycode/cli.py tests/test_cli_smoke.py .gitignore
 git commit -m "chore: scaffold phycode package"
 ```
 
