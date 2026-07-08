@@ -1619,7 +1619,7 @@ git commit -m "feat: add trace memory and context stores"
 - 产出协议：`LLMClient.generate(messages: list[dict], tools: list[ToolSpec]) -> list[AgentEvent]`。
 - 产出：`ScriptedLLM`、`EchoLLM`、`FailingLLM`、`OpenAICompatibleChatAdapter`。
 
-- [ ] **步骤 1：编写失败的 LLM 测试**
+- [x] **步骤 1：编写失败的 LLM 测试**
 
 创建 `tests/test_llm_adapters.py`：
 
@@ -1700,13 +1700,13 @@ def test_openai_compatible_adapter_maps_tool_calls():
     assert events[1].payload["args"] == {"path": "README.md"}
 ```
 
-- [ ] **步骤 2：运行失败的测试**
+- [x] **步骤 2：运行失败的测试**
 
 运行：`uv run pytest tests/test_llm_adapters.py -v`
 
 预期：FAIL，报缺少 `phycode.llm`。
 
-- [ ] **步骤 3：实现 mock 适配器**
+- [x] **步骤 3：实现 mock 适配器**
 
 创建 `src/phycode/llm.py`：
 
@@ -1803,13 +1803,13 @@ class OpenAICompatibleChatAdapter:
         return events
 ```
 
-- [ ] **步骤 4：运行测试**
+- [x] **步骤 4：运行测试**
 
 运行：`uv run pytest tests/test_llm_adapters.py -v`
 
 预期：PASS。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/phycode/llm.py tests/test_llm_adapters.py
