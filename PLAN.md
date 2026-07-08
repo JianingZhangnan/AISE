@@ -559,7 +559,7 @@ git commit -m "feat: add core event models and redaction"
 - 产出：`CredentialStore`，包含 `set_key(provider: str, secret: str)`、`get_key(provider: str) -> str | None`、`clear_key(provider: str)`、`status(provider: str) -> CredentialStatus`。
 - 产出 CLI 命令：`phycode config read`、`phycode keys status`。
 
-- [ ] **步骤 1：编写失败的配置和凭据测试**
+- [x] **步骤 1：编写失败的配置和凭据测试**
 
 创建 `tests/test_config.py`：
 
@@ -603,13 +603,13 @@ def test_clear_key_removes_secret():
     assert store.status("openai-compatible").configured is False
 ```
 
-- [ ] **步骤 2：运行测试以验证失败**
+- [x] **步骤 2：运行测试以验证失败**
 
 运行：`uv run pytest tests/test_config.py tests/test_credentials.py -v`
 
 预期：FAIL，报缺少模块。
 
-- [ ] **步骤 3：实现配置模型**
+- [x] **步骤 3：实现配置模型**
 
 创建 `src/phycode/config.py`：
 
@@ -664,7 +664,7 @@ def load_project_config(workspace_root: Path) -> ProjectConfig:
     )
 ```
 
-- [ ] **步骤 4：实现凭据存储**
+- [x] **步骤 4：实现凭据存储**
 
 创建 `src/phycode/credentials.py`：
 
@@ -760,7 +760,7 @@ class CredentialStore:
         )
 ```
 
-- [ ] **步骤 5：添加 CLI 状态命令**
+- [x] **步骤 5：添加 CLI 状态命令**
 
 通过添加 config 和 keys app 修改 `src/phycode/cli.py`：
 
@@ -788,13 +788,13 @@ def keys_status(provider: str = "openai-compatible") -> None:
     console.print_json(status.model_dump_json())
 ```
 
-- [ ] **步骤 6：运行测试**
+- [x] **步骤 6：运行测试**
 
 运行：`uv run pytest tests/test_config.py tests/test_credentials.py tests/test_cli_smoke.py -v`
 
 预期：PASS。
 
-- [ ] **步骤 7：提交**
+- [x] **步骤 7：提交**
 
 ```bash
 git add src/phycode/config.py src/phycode/credentials.py src/phycode/cli.py tests/test_config.py tests/test_credentials.py
