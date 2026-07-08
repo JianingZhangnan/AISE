@@ -1,0 +1,37 @@
+from pathlib import Path
+
+import pytest
+
+from phycode.models import PolicyAction, ToolCall
+from phycode.policy import PolicyContext, PolicyEngine, WorkspaceViolation, resolve_workspace_path
+
+
+def test_safe_read_is_allowed(tmp_path: Path):
+    call = ToolCall(tool_name="file.read", args={"path": "README.md"})
+    decision = PolicyEngine().decide(call, PolicyContext(workspace_root=tmp_path, allowlist=[], interactive=True))
+    assert decision.decision == PolicyAction.ALLOW
+
+
+def test_file_edit_requires_approval(tmp_path: Path):
+    call = ToolCall(tool_name="file.edit", args={"path": "app.py", "old": "a", "new": "b"})
+    decision = PolicyEngine().decide(call, PolicyContext(workspace_root=tmp_path, allowlist=[], interactive=True))
+    assert decision.decision == PolicyAction.ASK
+    assert decision.requires_user is True
+
+
+def test_path_escape_is_rejected(tmp_path: Path):
+    with pytest.raises(WorkspaceViolation):
+        resolve_workspace_path("../secret.txt", PolicyContext(workspace_root=tmp_path, allowlist=[], interactive=True))
+
+
+def test_dangerous_shell_is_denied(tmp_path: Path):
+    call = ToolCall(tool_name="shell.run", args={"command": "rm -rf /"})
+    decision = PolicyEngine().decide(call, PolicyContext(workspace_root=tmp_path, allowlist=[], interactive=True))
+    assert decision.decision == PolicyAction.DENY
+    assert decision.rule_id == "shell.dangerous_command"
+
+
+def test_env_file_read_is_denied(tmp_path: Path):
+    call = ToolCall(tool_name="file.read", args={"path": ".env"})
+    decision = PolicyEngine().decide(call, PolicyContext(workspace_root=tmp_path, allowlist=[], interactive=True))
+    assert decision.decision == PolicyAction.DENY

@@ -816,7 +816,7 @@ git commit -m "feat: add config and credential foundations"
 - 产出：`PolicyEngine.decide(call: ToolCall, context: PolicyContext) -> PolicyDecision`。
 - 产出：`resolve_workspace_path(path: str, context: PolicyContext) -> Path`。
 
-- [ ] **步骤 1：编写失败的策略测试**
+- [x] **步骤 1：编写失败的策略测试**
 
 创建 `tests/test_policy.py`：
 
@@ -860,13 +860,13 @@ def test_env_file_read_is_denied(tmp_path: Path):
     assert decision.decision == PolicyAction.DENY
 ```
 
-- [ ] **步骤 2：运行失败的测试**
+- [x] **步骤 2：运行失败的测试**
 
 运行：`uv run pytest tests/test_policy.py -v`
 
 预期：FAIL，报缺少 policy 模块。
 
-- [ ] **步骤 3：实现策略**
+- [x] **步骤 3：实现策略**
 
 创建 `src/phycode/policy.py`：
 
@@ -966,13 +966,13 @@ class PolicyEngine:
         return PolicyDecision(tool_call_id=call.id, decision=PolicyAction.DENY, rule_id="tool.unknown", reason="Unknown tool")
 ```
 
-- [ ] **步骤 4：运行测试**
+- [x] **步骤 4：运行测试**
 
 运行：`uv run pytest tests/test_policy.py -v`
 
 预期：PASS。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add src/phycode/policy.py tests/test_policy.py
