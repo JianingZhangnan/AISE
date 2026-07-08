@@ -12,6 +12,7 @@ venv/
 .env.*
 *.log
 .superpowers/
+.worktrees/
 
 # OS/editor noise
 .DS_Store
