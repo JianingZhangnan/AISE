@@ -17,6 +17,17 @@ def test_echo_llm_returns_final_text():
     assert "hello" in events[0].payload["text"]
 
 
+def test_echo_llm_prefers_current_user_line_from_rendered_context():
+    rendered_context = (
+        "Workspace: demo\n"
+        "Recent events:\n"
+        "[{'type': 'assistant_final', 'payload': {'text': 'Echo: old turn'}}]\n"
+        "User: new turn"
+    )
+    events = EchoLLM().generate([{"role": "user", "content": rendered_context}], [])
+    assert events[0].payload["text"] == "Echo: new turn"
+
+
 def test_failing_llm_raises_provider_error():
     with pytest.raises(RuntimeError):
         FailingLLM("provider down").generate([], [])

@@ -42,6 +42,8 @@ class ScriptedLLM:
 class EchoLLM:
     def generate(self, messages: list[dict[str, object]], tools: list[ToolSpec]) -> list[AgentEvent]:
         last = str(messages[-1]["content"]) if messages else ""
+        if "\nUser: " in last:
+            last = last.rsplit("\nUser: ", 1)[1]
         return [AgentEvent(session_id="echo", type=AgentEventType.ASSISTANT_FINAL, payload={"text": f"Echo: {last}"})]
 
 
