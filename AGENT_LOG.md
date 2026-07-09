@@ -77,3 +77,12 @@
 - 用户填入真实 URL/key 测试失败。查 `<workspace>/.phycode/traces/*.jsonl` 见 `error` 事件：`'ascii' codec can't encode characters in position 7-30`。position 7 = `"Bearer "` 之后，即 `Authorization: Bearer <key>` 头里 key 含非 ASCII/不可见字符（常见于从网页复制 key 带入零宽空格/全角字符）。已用 httpx 复现同款报错。
 - 修复：新增 `_clean_api_key`——录入 key 时 strip 空白、拒绝空值、拒绝非 ASCII（含零宽空格），给出可读提示；`keys set` 与 chat 内 `/key` 均接入。TDD 覆盖非 ASCII 拒绝与前后空白裁剪。验证：`uv run pytest` 全绿、`uvx pyright` 0 errors。
 - 用户侧处理：`phycode keys clear openai-compatible` 后重新 `/key` 干净粘贴（或手打）即可。
+
+## 2026-07-09 真实测试改进：防兜圈子 + 上下文可读化 + 终端可视化
+
+- 真实供应商跑通后观察到模型在只读工具上兜圈子（同一 file.list/workspace.status 反复调用 6–17 次直到额度耗尽），且终端只在最后才显示错误、过程无任何提示。按用户要求做三项改进（均 TDD）：
+  1. 无进展重复调用护栏：`AgentLoop` 统计 `(tool, args)` 签名；成功的可变更工具（write/edit/shell/test 等）视为进展并清零，纯只读重复达 `max_repeated_calls`（默认 5）即以 `repeated_calls` 停机。合法的“编辑→重测”迭代不受影响（重测前有可变更成功会重置）。
+  2. 上下文可读化：`ContextBuilder` 不再把最近事件以 Python dict 的 `repr` 塞进 prompt，改为逐条 `[tool call]/[tool result]/[feedback]/[policy]/[assistant]/[error]` 文本，弱模型更易理解、更省 token。相应更新 `ReactiveLLM` 演示/测试触发词。
+  3. 终端实时可视化：`AgentLoop` 增加 `event_sink` 回调；CLI 用它把 commentary/思考、工具调用、ask/deny 策略、工具结果、错误逐条流式渲染（真终端下带 `thinking...` spinner）。适配器新增解析 `reasoning_content`，对 reasoning 模型显示“thinking”。
+- Windows 终端修复：渲染标记原用 `→/✓/✗` 和 braille spinner，在用户的 GBK(cp936) 控制台 `✓` 直接 `UnicodeEncodeError` 崩溃。改为纯 ASCII 标记（`->`/`[ok]`/`[!]`/`[error]`）+ ASCII `line` spinner，并加 `_safe_print`（遇到不可编码字符降级为 ascii replace）。已在 `PYTHONIOENCODING=gbk` 下复现并验证不再崩溃。
+- 验证：`uv run pytest` 全绿、`uvx pyright` 0 errors；GBK 模拟下活动流正常输出且护栏在第 5 次重复调用时以 `repeated_calls` 停机。

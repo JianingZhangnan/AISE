@@ -152,6 +152,42 @@ def test_run_command_uses_echo_agent_and_writes_redacted_trace(tmp_path, monkeyp
     assert "sk-live-SECRET1234567890" not in trace_text
 
 
+def test_render_agent_event_shows_activity_and_redacts(capsys):
+    from phycode.cli import _render_agent_event
+    from phycode.models import AgentEvent, AgentEventType
+
+    _render_agent_event(
+        AgentEvent(session_id="s", type=AgentEventType.TOOL_CALL_REQUESTED, payload={"tool_name": "file.read", "args": {"path": "a.txt"}})
+    )
+    _render_agent_event(
+        AgentEvent(session_id="s", type=AgentEventType.ERROR, payload={"message": "boom key=sk-secret1234567890"})
+    )
+    out = capsys.readouterr().out
+    assert "file.read" in out
+    assert "error" in out.lower()
+    assert "sk-secret1234567890" not in out  # redacted in the live display too
+
+
+def test_run_streams_tool_activity(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
+    from phycode.llm import ScriptedLLM
+
+    scripted = ScriptedLLM(
+        [
+            [{"type": "tool_call_requested", "payload": {"tool_name": "file.read", "args": {"path": "a.txt"}}}],
+            [{"type": "assistant_final", "payload": {"text": "all done"}}],
+        ]
+    )
+    monkeypatch.setattr("phycode.cli._build_llm", lambda *a, **k: scripted)
+
+    result = runner.invoke(app, ["run", "read it"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "file.read" in result.stdout  # tool activity is shown live
+    assert "all done" in result.stdout  # final answer is shown
+
+
 def test_run_command_exits_nonzero_when_agent_does_not_finish(monkeypatch):
     import phycode.cli as cli
     from phycode.agent import AgentRunResult

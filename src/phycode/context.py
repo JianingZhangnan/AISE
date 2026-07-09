@@ -47,6 +47,27 @@ class MemoryStore:
         return "\n".join(f"- {entry.category.value}: {entry.content}" for entry in self.entries())
 
 
+def _render_event(event: AgentEvent) -> str:
+    """Render one event as a compact, LLM-friendly line (not a raw dict dump)."""
+    kind = event.type.value
+    payload = event.payload
+    if kind == "tool_call_requested":
+        args = json.dumps(payload.get("args", {}), ensure_ascii=False, sort_keys=True)
+        return f"[tool call] {payload.get('tool_name', '')} {args}"
+    if kind == "tool_call_output":
+        body = (str(payload.get("stdout") or payload.get("stderr") or "")).strip()[:600]
+        return f"[tool result] status={payload.get('status', '')} {body}".rstrip()
+    if kind == "feedback_signal":
+        return f"[feedback] {payload.get('kind', '')}: {payload.get('summary', '')}".rstrip()
+    if kind == "policy_decision":
+        return f"[policy] {payload.get('decision', '')} ({payload.get('rule_id', '')})"
+    if kind in ("assistant_commentary", "assistant_final", "reasoning_summary"):
+        return f"[assistant] {payload.get('text', '')}"
+    if kind == "error":
+        return f"[error] {payload.get('message', '')}"
+    return f"[{kind}] {payload}"
+
+
 class ContextBuilder:
     def __init__(self, session_store: SessionStore, memory_store: MemoryStore, max_chars: int = 12000) -> None:
         self.session_store = session_store
@@ -56,13 +77,13 @@ class ContextBuilder:
     def build(self, current_input: str, tools: list[ToolSpec] | None = None) -> list[dict[str, object]]:
         system = "You are PhyCode, a CLI coding agent harness. Use tools safely and follow policy feedback."
         memory = self.memory_store.summary()
-        recent = [event.model_dump(mode="json") for event in self.session_store.recent_events()]
+        recent = "\n".join(_render_event(event) for event in self.session_store.recent_events())
         tool_lines = "\n".join(f"- {spec.name} ({spec.risk_level.value}): {spec.description}" for spec in (tools or []))
         content = (
             f"Workspace: {self.session_store.session.workspace_root}\n"
             f"Tools:\n{tool_lines}\n"
             f"Memory:\n{memory}\n"
-            f"Recent events:\n{recent}\n"
+            f"Recent activity:\n{recent}\n"
             f"User: {current_input}"
         )
         if len(content) > self.max_chars:

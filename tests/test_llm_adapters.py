@@ -90,6 +90,30 @@ def test_openai_compatible_adapter_maps_tool_calls():
     assert events[1].payload["args"] == {"path": "README.md"}
 
 
+class FakeReasoningMessage:
+    content = "the answer"
+    reasoning_content = "let me think step by step about this"
+    tool_calls = None
+
+
+class FakeReasoningClient:
+    class chat:
+        class completions:
+            @staticmethod
+            def create(**kwargs):
+                return type("R", (), {"choices": [type("C", (), {"message": FakeReasoningMessage()})()]})()
+
+
+def test_openai_adapter_emits_reasoning_summary():
+    from phycode.llm import OpenAICompatibleChatAdapter
+
+    adapter = OpenAICompatibleChatAdapter(base_url="http://x/v1", model="reasoner", api_key="k", client=FakeReasoningClient())
+    events = adapter.generate([{"role": "user", "content": "hi"}], [])
+    assert events[0].type == AgentEventType.REASONING_SUMMARY
+    assert "think" in events[0].payload["text"]
+    assert any(e.type == AgentEventType.ASSISTANT_FINAL for e in events)
+
+
 def test_openai_adapter_does_not_keep_api_key_attribute():
     from phycode.llm import OpenAICompatibleChatAdapter
 

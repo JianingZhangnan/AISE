@@ -118,6 +118,12 @@ class OpenAICompatibleChatAdapter:
         content = getattr(message, "content", None)
         tool_calls = getattr(message, "tool_calls", None)
 
+        reasoning = getattr(message, "reasoning_content", None)
+        if reasoning:  # reasoning models (e.g. deepseek-reasoner) expose a separate field
+            events.append(
+                AgentEvent(session_id="provider", type=AgentEventType.REASONING_SUMMARY, payload={"text": reasoning})
+            )
+
         if content:
             event_type = AgentEventType.ASSISTANT_COMMENTARY if tool_calls else AgentEventType.ASSISTANT_FINAL
             events.append(AgentEvent(session_id="provider", type=event_type, payload={"text": content}))

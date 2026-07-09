@@ -50,6 +50,37 @@ def test_context_redacts_current_input_before_llm_messages(tmp_path: Path):
     assert "REDACTED" in rendered
 
 
+def test_context_renders_events_as_readable_lines(tmp_path: Path):
+    session = Session(workspace_root=str(tmp_path), mode=SessionMode.INTERACTIVE)
+    store = SessionStore(session)
+    store.add_event(
+        AgentEvent(
+            session_id=session.id,
+            type=AgentEventType.TOOL_CALL_REQUESTED,
+            payload={"tool_name": "file.read", "args": {"path": "a.txt"}},
+        )
+    )
+    store.add_event(
+        AgentEvent(
+            session_id=session.id,
+            type=AgentEventType.TOOL_CALL_OUTPUT,
+            payload={"status": "ok", "stdout": "hello world"},
+        )
+    )
+    store.add_event(
+        AgentEvent(
+            session_id=session.id,
+            type=AgentEventType.FEEDBACK_SIGNAL,
+            payload={"kind": "success", "summary": "done"},
+        )
+    )
+    rendered = str(ContextBuilder(store, MemoryStore(tmp_path / "m.jsonl")).build("hi"))
+    assert "[tool call] file.read" in rendered
+    assert "[tool result] status=ok" in rendered
+    assert "[feedback] success" in rendered
+    assert "{'tool_name'" not in rendered  # no raw Python dict repr in the prompt
+
+
 def test_context_includes_recent_feedback_and_memory(tmp_path: Path):
     session = Session(workspace_root=str(tmp_path), mode=SessionMode.INTERACTIVE)
     session_store = SessionStore(session)

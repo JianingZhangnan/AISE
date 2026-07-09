@@ -86,9 +86,9 @@ def _feedback_loop(workspace_root: Path) -> AgentRunResult:
     # Rules are ordered; the model's next action depends on the feedback in context.
     llm = ReactiveLLM(
         rules=[
-            ("ALL_PASS", finish),          # tests now pass -> stop
-            ("return a + b", run_tests),   # fix applied -> re-run tests
-            ("'kind': 'test_failed'", fix_bug),  # failure observed -> change action
+            ("ALL_PASS", finish),              # tests now pass -> stop
+            ("return a + b", run_tests),       # fix applied -> re-run tests
+            ("[feedback] test_failed", fix_bug),  # failure observed -> change action
         ],
         default=run_tests,  # first action: run the tests
     )

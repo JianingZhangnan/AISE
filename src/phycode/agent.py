@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from typing import Callable
 
 from phycode.context import ContextBuilder, SessionStore
 from phycode.feedback import classify_feedback
@@ -10,8 +12,13 @@ from phycode.policy import PolicyContext
 from phycode.tools.base import ApprovalHandler, ToolRuntime
 from phycode.trace import TraceStore
 
+EventSink = Callable[[AgentEvent], None]
+
 # Feedback kinds that mean "the same corrective action is not making progress".
 _FAILURE_KINDS = {"command_failed", "test_failed", "tool_error", "timeout", "invalid_tool_args"}
+# Tools that change workspace/state; a successful one counts as real progress and
+# resets the no-progress loop guard so legitimate iteration (edit -> re-test) is allowed.
+_MUTATING_TOOLS = {"file.write", "file.edit", "memory.write", "config.write", "shell.run", "test.run"}
 # Provider events that should terminate the loop and defer to the stop controller.
 _TERMINAL_EVENT_REASONS = {
     AgentEventType.ERROR: "error",
@@ -39,6 +46,8 @@ class AgentLoop:
         max_steps: int = 50,
         approval_handler: ApprovalHandler | None = None,
         max_repeated_failures: int = 3,
+        max_repeated_calls: int = 5,
+        event_sink: EventSink | None = None,
     ) -> None:
         self.llm = llm
         self.context_builder = context_builder
@@ -49,6 +58,8 @@ class AgentLoop:
         self.max_steps = max_steps
         self.approval_handler = approval_handler
         self.max_repeated_failures = max_repeated_failures
+        self.max_repeated_calls = max_repeated_calls
+        self.event_sink = event_sink
 
     def run_once(self, user_input: str) -> AgentRunResult:
         return self.run(user_input)
@@ -60,6 +71,7 @@ class AgentLoop:
         specs = self.tool_runtime.registry.list_specs()
         failure_streak = 0
         last_failure_key: tuple[str, str] | None = None
+        call_counts: dict[tuple[str, str], int] = {}
 
         for _step in range(self.max_steps):
             messages = self.context_builder.build(current_input, specs)
@@ -95,8 +107,35 @@ class AgentLoop:
                         last_failure_key = failure_key
                         if failure_streak >= self.max_repeated_failures:
                             return AgentRunResult(final_text, all_events, "repeated_failure")
+
+                    # No-progress loop guard: a mutating tool that succeeds is progress
+                    # (reset); otherwise count repeats of the same (tool, args) and stop
+                    # if the model keeps re-issuing it without changing anything.
+                    if self._made_progress(normalized, tool_events):
+                        call_counts.clear()
+                    else:
+                        signature = self._call_signature(normalized)
+                        call_counts[signature] = call_counts.get(signature, 0) + 1
+                        if call_counts[signature] >= self.max_repeated_calls:
+                            return AgentRunResult(final_text, all_events, "repeated_calls")
             current_input = ""
         return AgentRunResult(final_text, all_events, "max_steps")
+
+    def _made_progress(self, request: AgentEvent, tool_events: list[AgentEvent]) -> bool:
+        if str(request.payload.get("tool_name", "")) not in _MUTATING_TOOLS:
+            return False
+        return any(
+            item.type == AgentEventType.FEEDBACK_SIGNAL and item.payload.get("kind") == "success"
+            for item in tool_events
+        )
+
+    def _call_signature(self, request: AgentEvent) -> tuple[str, str]:
+        tool_name = str(request.payload.get("tool_name", ""))
+        try:
+            args_key = json.dumps(request.payload.get("args", {}), sort_keys=True, default=str)
+        except TypeError:
+            args_key = str(request.payload.get("args", {}))
+        return (tool_name, args_key)
 
     def _handle_tool_event(self, event: AgentEvent) -> list[AgentEvent]:
         call = ToolCall(
@@ -138,3 +177,5 @@ class AgentLoop:
     def _record(self, event: AgentEvent) -> None:
         self.session_store.add_event(event)
         self.trace_store.append(event)
+        if self.event_sink is not None:
+            self.event_sink(event)

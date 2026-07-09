@@ -56,8 +56,8 @@ def _fix_bug_rules() -> list:
     failing = [{"type": "tool_call_requested", "payload": {"tool_name": "file.edit", "args": {"path": "bug.py", "old": "DOES_NOT_EXIST", "new": "x"}}}]
     done = [{"type": "assistant_final", "payload": {"text": "fixed"}}]
     return [
-        ("'kind': 'success'", done),
-        ("'kind': 'tool_error'", corrective),
+        ("[feedback] success", done),
+        ("[feedback] tool_error", corrective),
         ("__default__", failing),
     ]
 
@@ -74,7 +74,7 @@ def test_reactive_llm_output_depends_on_feedback():
     baseline = llm.generate([{"role": "user", "content": "please fix"}], [])
     assert baseline[0].payload["args"]["old"] == "DOES_NOT_EXIST"
     # Once a tool_error feedback appears the model changes its next action.
-    reacted = llm.generate([{"role": "user", "content": "recent events: 'kind': 'tool_error'"}], [])
+    reacted = llm.generate([{"role": "user", "content": "recent activity: [feedback] tool_error: nope"}], [])
     assert reacted[0].payload["args"]["old"] == "value = 0"
 
 
@@ -103,6 +103,23 @@ def test_agent_loop_stops_on_repeated_failure(tmp_path: Path):
     loop = build_loop(tmp_path, llm, approval_handler=AUTO_APPROVE, max_steps=20)
     result = loop.run("keep failing")
     assert result.stopped_reason == "repeated_failure"
+
+
+def test_agent_loop_stops_on_repeated_readonly_calls(tmp_path: Path):
+    (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
+    # A model that keeps re-reading the same file, making no progress.
+    spin = [{"type": "tool_call_requested", "payload": {"tool_name": "file.read", "args": {"path": "a.txt"}}}]
+    loop = build_loop(tmp_path, ReactiveLLM([], default=spin), max_steps=50)
+    result = loop.run("spin forever")
+    assert result.stopped_reason == "repeated_calls"
+
+
+def test_repeated_mutating_calls_do_not_trip_call_guard(tmp_path: Path):
+    # Repeated file.write with the SAME args is real progress each time -> never trips.
+    write = [{"type": "tool_call_requested", "payload": {"tool_name": "file.write", "args": {"path": "a.txt", "content": "x"}}}]
+    turns = [write for _ in range(7)] + [[{"type": "assistant_final", "payload": {"text": "done"}}]]
+    result = build_loop(tmp_path, ScriptedLLM(turns), approval_handler=AUTO_APPROVE, max_steps=30).run("go")
+    assert result.stopped_reason == "final"
 
 
 def test_agent_loop_passes_tool_specs_to_llm(tmp_path: Path):

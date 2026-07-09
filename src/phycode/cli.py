@@ -1,4 +1,6 @@
+import json
 import tempfile
+import tomllib
 from pathlib import Path
 
 import typer
@@ -6,14 +8,12 @@ from rich.console import Console
 
 from phycode import __version__
 from phycode.agent import AgentLoop
-import tomllib
-
 from phycode.config import ProjectConfig, load_project_config, write_config_value
 from phycode.context import ContextBuilder, MemoryStore, SessionStore
 from phycode.credentials import CredentialStore
 from phycode.demos import run_feedback_demo, run_guardrail_demo, run_policy_demo
 from phycode.llm import EchoLLM, LLMClient, OpenAICompatibleChatAdapter
-from phycode.models import PolicyDecision, Session, SessionMode, ToolCall
+from phycode.models import AgentEvent, AgentEventType, PolicyDecision, Session, SessionMode, ToolCall
 from phycode.policy import PolicyContext
 from phycode.redaction import redact_text
 from phycode.trace import TraceStore
@@ -92,7 +92,51 @@ def _interactive_approver(call: ToolCall, decision: PolicyDecision) -> bool:
     return typer.confirm("Approve this action?", default=False)
 
 
-def build_agent(mode: SessionMode, llm: LLMClient | None = None, approval_handler=None) -> AgentLoop:
+def _safe_print(text: str, **kwargs) -> None:
+    """console.print that never crashes on a legacy codepage (e.g. Windows GBK)."""
+    try:
+        console.print(text, **kwargs)
+    except UnicodeEncodeError:
+        console.print(str(text).encode("ascii", "replace").decode("ascii"), **kwargs)
+
+
+def _render_agent_event(event: AgentEvent) -> None:
+    """Render one loop event as a live activity line (final answer is printed by the caller).
+
+    Markers are ASCII-only so they render on any console codepage.
+    """
+    payload = event.payload
+    if event.type in (AgentEventType.ASSISTANT_COMMENTARY, AgentEventType.REASONING_SUMMARY):
+        text = redact_text(str(payload.get("text", ""))).strip()
+        if text:
+            label = "thinking" if event.type == AgentEventType.REASONING_SUMMARY else "assistant"
+            _safe_print(f"{label}: {text}", style="dim", markup=False)
+    elif event.type == AgentEventType.TOOL_CALL_REQUESTED:
+        args = json.dumps(payload.get("args", {}), ensure_ascii=False)
+        _safe_print(f"-> {payload.get('tool_name', '')} {args}"[:200], style="cyan", markup=False)
+    elif event.type == AgentEventType.POLICY_DECISION:
+        if payload.get("decision") != "allow":  # allow is the common case; only surface ask/deny
+            _safe_print(f"  policy: {payload.get('decision')} ({payload.get('rule_id')})", style="yellow", markup=False)
+    elif event.type == AgentEventType.TOOL_CALL_OUTPUT:
+        status = str(payload.get("status", ""))
+        if status == "ok":
+            _safe_print("  [ok]", style="green", markup=False)
+        else:
+            detail = redact_text(str(payload.get("stderr") or payload.get("stdout") or "")).strip().splitlines()
+            _safe_print(f"  [!] {status}: {detail[0][:200] if detail else ''}", style="red", markup=False)
+    elif event.type == AgentEventType.ERROR:
+        _safe_print(f"[error] {redact_text(str(payload.get('message', '')))}", style="red", markup=False)
+
+
+def _run_turn(loop: AgentLoop, text: str):
+    """Run one turn, showing an ASCII spinner while the model works (only on a real terminal)."""
+    if console.is_terminal:
+        with console.status("thinking...", spinner="line"):
+            return loop.run(text)
+    return loop.run(text)
+
+
+def build_agent(mode: SessionMode, llm: LLMClient | None = None, approval_handler=None, event_sink=None) -> AgentLoop:
     """Build the default local agent loop for CLI commands."""
     config = load_project_config(Path.cwd())
     root = config.workspace.root
@@ -113,6 +157,7 @@ def build_agent(mode: SessionMode, llm: LLMClient | None = None, approval_handle
         session_store=session_store,
         max_steps=config.agent.max_steps,
         approval_handler=approval_handler,
+        event_sink=event_sink,
     )
 
 
@@ -125,10 +170,12 @@ def version() -> None:
 @app.command()
 def run(task: str = typer.Argument(..., help="Task to run non-interactively")) -> None:
     """Run a task once. Uses the configured provider when a key is stored, else EchoLLM."""
-    result = build_agent(SessionMode.NON_INTERACTIVE).run(task)
+    loop = build_agent(SessionMode.NON_INTERACTIVE, event_sink=_render_agent_event)
+    result = _run_turn(loop, task)
     if result.final_text is not None:
-        console.print(redact_text(result.final_text), markup=False)
+        _safe_print(redact_text(result.final_text), markup=False)
     if result.stopped_reason != "final":
+        _safe_print(f"[stopped: {result.stopped_reason}]", markup=False)
         raise typer.Exit(code=1)
 
 
@@ -192,7 +239,7 @@ def _handle_slash(line: str) -> str | None:
 def chat() -> None:
     """Start an interactive session. Uses the configured provider when a key is stored, else EchoLLM."""
     console.print("PhyCode interactive session. Type /help for commands, /exit to leave.")
-    loop = build_agent(SessionMode.INTERACTIVE, approval_handler=_interactive_approver)
+    loop = build_agent(SessionMode.INTERACTIVE, approval_handler=_interactive_approver, event_sink=_render_agent_event)
     while True:
         user_input = typer.prompt("phycode")
         if user_input.startswith("/"):
@@ -200,14 +247,16 @@ def chat() -> None:
             if action == "exit":
                 return
             if action == "reload":
-                loop = build_agent(SessionMode.INTERACTIVE, approval_handler=_interactive_approver)
+                loop = build_agent(
+                    SessionMode.INTERACTIVE, approval_handler=_interactive_approver, event_sink=_render_agent_event
+                )
             continue
-        result = loop.run(user_input)
+        result = _run_turn(loop, user_input)
         if result.final_text is not None:
-            console.print(redact_text(result.final_text), markup=False)
+            _safe_print(redact_text(result.final_text), markup=False)
         if result.stopped_reason != "final":
             # Report and keep the session alive rather than killing it on one bad turn.
-            console.print(f"[stopped: {result.stopped_reason}]", markup=False)
+            _safe_print(f"[stopped: {result.stopped_reason}]", markup=False)
 
 
 @tools_app.command("list")
