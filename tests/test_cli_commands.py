@@ -77,6 +77,51 @@ def test_chat_survives_non_final_turn(monkeypatch):
     assert "done" in result.stdout  # a later turn still ran
 
 
+def test_chat_slash_model_sets_config_and_reloads(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _force_no_credentials(monkeypatch)
+    from phycode.config import load_project_config
+
+    result = runner.invoke(app, ["chat"], input="/model deepseek-v4-flash\n/exit\n")
+
+    assert result.exit_code == 0, result.stdout
+    assert load_project_config(tmp_path).llm.model == "deepseek-v4-flash"
+
+
+def test_chat_slash_url_sets_base_url(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _force_no_credentials(monkeypatch)
+    from phycode.config import load_project_config
+
+    result = runner.invoke(app, ["chat"], input="/url https://real.example/v1\n/exit\n")
+
+    assert result.exit_code == 0, result.stdout
+    assert load_project_config(tmp_path).llm.base_url == "https://real.example/v1"
+
+
+def test_chat_slash_help_lists_commands(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _force_no_credentials(monkeypatch)
+
+    result = runner.invoke(app, ["chat"], input="/help\n/exit\n")
+
+    assert result.exit_code == 0
+    assert "/model" in result.stdout
+    assert "/url" in result.stdout
+    assert "/exit" in result.stdout
+
+
+def test_chat_slash_unknown_is_reported_and_not_sent_to_agent(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _force_no_credentials(monkeypatch)
+
+    result = runner.invoke(app, ["chat"], input="/bogus\n/exit\n")
+
+    assert result.exit_code == 0
+    assert "unknown command" in result.stdout.lower()
+    assert "Echo:" not in result.stdout  # a slash line is never forwarded to the agent
+
+
 def test_interactive_approver_uses_confirm(monkeypatch):
     import phycode.cli as cli
     from phycode.models import PolicyAction, PolicyDecision, ToolCall

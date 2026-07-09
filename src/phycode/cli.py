@@ -114,15 +114,74 @@ def run(task: str = typer.Argument(..., help="Task to run non-interactively")) -
         raise typer.Exit(code=1)
 
 
+_CHAT_HELP = (
+    "Commands:\n"
+    "  /model <name>    set the LLM model\n"
+    "  /url <base_url>  set the provider base URL\n"
+    "  /key             set the API key for the current provider (hidden input)\n"
+    "  /config          show the current configuration\n"
+    "  /status          show credential status\n"
+    "  /help            show this help\n"
+    "  /exit            leave the session"
+)
+
+
+def _handle_slash(line: str) -> str | None:
+    """Handle a /command typed in the chat REPL. Returns 'exit', 'reload', or None."""
+    parts = line[1:].split(maxsplit=1)
+    cmd = parts[0].lower() if parts else ""
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    if cmd in ("exit", "quit"):
+        return "exit"
+    if cmd in ("help", "?", ""):
+        console.print(_CHAT_HELP, markup=False)
+        return None
+    if cmd in ("model", "url"):
+        if not arg:
+            console.print(f"usage: /{cmd} <value>", markup=False)
+            return None
+        key = "model" if cmd == "model" else "base_url"
+        try:
+            write_config_value(Path.cwd(), "llm", key, arg)
+        except (ValueError, TypeError, tomllib.TOMLDecodeError) as exc:
+            console.print(str(exc), markup=False)
+            return None
+        console.print(f"llm.{key} = {arg}", markup=False)
+        return "reload"
+    if cmd in ("key", "login"):
+        secret = typer.prompt("API key", hide_input=True)
+        if not secret.strip():
+            console.print("API key cannot be blank.", markup=False)
+            return None
+        provider = load_project_config(Path.cwd()).llm.provider
+        CredentialStore().set_key(provider, secret)
+        console.print(f"{provider} key stored", markup=False)
+        return "reload"
+    if cmd == "config":
+        config_read()
+        return None
+    if cmd == "status":
+        provider = load_project_config(Path.cwd()).llm.provider
+        console.print_json(CredentialStore().status(provider).model_dump_json())
+        return None
+    console.print(f"unknown command: /{cmd} (try /help)", markup=False)
+    return None
+
+
 @app.command()
 def chat() -> None:
     """Start an interactive session. Uses the configured provider when a key is stored, else EchoLLM."""
-    console.print("PhyCode interactive session. Type /exit to leave.")
+    console.print("PhyCode interactive session. Type /help for commands, /exit to leave.")
     loop = build_agent(SessionMode.INTERACTIVE, approval_handler=_interactive_approver)
     while True:
         user_input = typer.prompt("phycode")
-        if user_input == "/exit":
-            return
+        if user_input.startswith("/"):
+            action = _handle_slash(user_input)
+            if action == "exit":
+                return
+            if action == "reload":
+                loop = build_agent(SessionMode.INTERACTIVE, approval_handler=_interactive_approver)
+            continue
         result = loop.run(user_input)
         if result.final_text is not None:
             console.print(redact_text(result.final_text), markup=False)
