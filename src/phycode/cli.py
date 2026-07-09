@@ -1,3 +1,4 @@
+import tempfile
 from pathlib import Path
 
 import typer
@@ -6,6 +7,7 @@ from rich.console import Console
 from phycode import __version__
 from phycode.config import load_project_config
 from phycode.credentials import CredentialStore
+from phycode.demos import run_feedback_demo, run_guardrail_demo, run_policy_demo
 from phycode.tools import ToolRegistry
 from phycode.tools.file_tools import register_file_tools
 from phycode.tools.search_tools import register_search_tools
@@ -58,3 +60,19 @@ def keys_status(provider: str = typer.Argument("openai-compatible")) -> None:
     """Show credential status for a provider."""
     status = CredentialStore().status(provider)
     console.print_json(status.model_dump_json())
+
+
+@app.command()
+def demo(name: str = typer.Argument(..., help="guardrail | feedback | policy")) -> None:
+    """Run a deterministic mock-LLM mechanism demo in an isolated temp workspace."""
+    root = Path(tempfile.mkdtemp(prefix="phycode-demo-"))
+    demos = {
+        "guardrail": run_guardrail_demo,
+        "feedback": run_feedback_demo,
+        "policy": run_policy_demo,
+    }
+    runner = demos.get(name)
+    if runner is None:
+        console.print("Unknown demo. Use guardrail, feedback, or policy.")
+        raise typer.Exit(code=2)
+    console.print(runner(root))
