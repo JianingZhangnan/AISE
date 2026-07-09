@@ -6,7 +6,9 @@ from rich.console import Console
 
 from phycode import __version__
 from phycode.agent import AgentLoop
-from phycode.config import ProjectConfig, load_project_config
+import tomllib
+
+from phycode.config import ProjectConfig, load_project_config, write_config_value
 from phycode.context import ContextBuilder, MemoryStore, SessionStore
 from phycode.credentials import CredentialStore
 from phycode.demos import run_feedback_demo, run_guardrail_demo, run_policy_demo
@@ -142,6 +144,17 @@ def config_read() -> None:
     """Read project configuration."""
     config = load_project_config(Path.cwd())
     console.print_json(config.model_dump_json())
+
+
+@config_app.command("set")
+def config_set(section: str, key: str, value: str) -> None:
+    """Set a non-sensitive config value in ./phycode.toml (e.g. config set llm base_url <url>)."""
+    try:
+        write_config_value(Path.cwd(), section, key, value)
+    except (ValueError, TypeError, tomllib.TOMLDecodeError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+    console.print(f"set {section}.{key}", markup=False)
 
 
 @keys_app.command("status")

@@ -190,6 +190,22 @@ def test_config_read_reports_project_file_values(tmp_path, monkeypatch):
     assert payload["llm"]["model"] == "demo-model"
 
 
+def test_config_set_writes_value_read_back(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    set_result = runner.invoke(app, ["config", "set", "llm", "base_url", "https://real.example/v1"])
+    assert set_result.exit_code == 0, set_result.stdout
+    read_result = runner.invoke(app, ["config", "read"])
+    payload = _json_from_stdout(read_result.stdout)
+    assert payload["llm"]["base_url"] == "https://real.example/v1"
+
+
+def test_config_set_rejects_unknown_key(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["config", "set", "secrets", "api_key", "leak"])
+    assert result.exit_code != 0
+    assert not (tmp_path / "phycode.toml").exists()
+
+
 def test_keys_set_status_and_clear_do_not_leak_secret(monkeypatch):
     store = CredentialStore(backend=InMemoryCredentialBackend())
     monkeypatch.setattr("phycode.cli.CredentialStore", lambda: store)
