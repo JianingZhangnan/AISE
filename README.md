@@ -2,7 +2,7 @@
 
 PhyCode 是面向 AI4SE 期末项目的 CLI 优先 coding agent harness，核心是**策略感知工具运行时（Policy-Aware Tool Runtime）**：自研 agent 主循环、可注入 mock/stub 的 LLM 抽象层、确定性治理护栏、反馈闭环、记忆/上下文管理与凭据处理。核心机制在移除真实 LLM 后仍可由确定性单元测试验证。
 
-> 状态：Task 1–11 已完成（脚手架、模型/脱敏、配置/凭据、策略引擎、工具运行时、shell/反馈、trace/上下文/记忆、LLM 适配器、agent 循环、扩展工具、确定性演示）。`phycode run/chat` 交互入口与完整 README 收尾属 Task 10/12，仍在推进中。
+> 状态：Task 1–9 已完成；代码评审补充的扩展工具与确定性演示也已落地。`phycode run/chat` 交互入口与完整 README 收尾属 Task 10/12，仍在推进中。
 
 ## 快速开始
 

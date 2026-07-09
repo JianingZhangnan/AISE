@@ -60,5 +60,7 @@ def test_executor_exception_is_captured_as_tool_error(tmp_path: Path):
 def test_file_specs_declare_required_fields():
     registry = ToolRegistry()
     register_file_tools(registry)
-    schema = registry.spec_for("file.edit").input_schema
+    spec = registry.spec_for("file.edit")
+    assert spec is not None
+    schema = spec.input_schema
     assert set(schema.get("required", [])) == {"path", "old", "new"}
