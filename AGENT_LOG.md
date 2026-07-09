@@ -45,4 +45,9 @@
   4. `eb0391f` feat(agent)：新增 `ReactiveLLM`（输出取决于上下文中的反馈），使反馈闭环可在无真实 LLM 下确定性验证（P0）；loop 现在把已注册工具 spec 传给 LLM 并纳入上下文（P1-1）；接入可注入 `approval_handler`（P1-2）；停机控制器捕获 provider 异常为 `error` 事件、处理 `error/incomplete/user_interrupt` 终止事件、并在同一工具重复失败达阈值时以 `repeated_failure` 停机（P1-3）。
   5. `64d0b9c` feat(demos)：以真实 ToolRuntime/agent loop 实现 `run_guardrail_demo`/`run_policy_demo`/`run_feedback_demo`，替换 PLAN Task 11 中把「下一步动作」硬编码为 `"file.edit"` 字符串的占位实现（P0）；新增 `phycode demo guardrail|feedback|policy`（隔离临时工作区）。反馈 demo 的确定性坑：`-`→`+` 的修复不改变文件大小与 mtime 秒，CPython 会命中过期 `.pyc`，改用 `python -B` 运行测试子进程规避。
 - 验证：隔离 venv 中 `pytest` 全套 65 passed（起点 36）；policy↔registry 一致性脚本 both-way diff 为空；三个 demo 命令输出人工核验（guardrail 拒绝且未执行；policy 需审批；feedback 呈现 test_failed→file.edit→success→final）。
-- 代码评审（`requesting-code-review`）：对整分支 diff 运行 `/code-review`，结论与处理记录见 `SPEC_PROCESS.md`。
+- 代码评审（`requesting-code-review`）：对整分支 diff 运行 `/code-review`（xhigh，3 个独立 finder subagent）。**评审发现本批次新引入的真实缺陷，已逐项 TDD 修复**（commit `c62fc97`）：
+  1. 严重安全漏洞：`search.grep`（SAFE/自动放行）会返回 `.env`/私钥/`*.pem`/`*.key` 内容，绕过 `file.read` 的凭据拒绝；`search.glob` 可用 `../` 逃出工作区。修复：搜索工具跳过凭据文件、glob 限制在工作区内、grep 路径展示不再对 allowlist 目录崩溃。经复验漏洞已关闭且合法文件仍可搜。
+  2. 循环崩溃：`MemoryStore/TraceStore` 对「序列化后的 JSON 字符串」做正则脱敏，贪婪 secret 模式会吃掉结构字符产生非法 JSON，`entries()` 下次构建上下文时 `JSONDecodeError` 崩溃整个循环（经 `memory.write` 可触发）。修复：新增 `redact_obj`，在序列化「之前」对字符串叶子脱敏；读取端容忍坏行。
+  3. 数据损坏：`config.write` 的手写 TOML dumper 遇到换行值/浮点/子表/顶层非表会崩溃或静默损坏文件。修复：先渲染成字符串、成功才写入（失败不触碰文件），拒绝控制字符，处理浮点，非表顶层键 fail-safe。
+  4. 误报：`shutdown` 裸词、`.key`/`.pem` 子串会误拒 `grep shutdown`/`jq '.key'` 等常见命令；`rm` 规则漏掉 `-fr`/`~`/`.`。已收敛正则。
+- 评审结论与采纳/推翻记录另见 `SPEC_PROCESS.md`。此轮评审也印证了 harness 判定标准的价值：确定性测试 + 独立评审在合并前拦下了 secret 外泄与循环崩溃两个高危缺陷。
