@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from phycode.models import AgentEvent, MemoryEntry, Session
+from phycode.models import AgentEvent, MemoryEntry, Session, ToolSpec
 from phycode.redaction import redact_text
 
 
@@ -43,12 +43,14 @@ class ContextBuilder:
         self.memory_store = memory_store
         self.max_chars = max_chars
 
-    def build(self, current_input: str) -> list[dict[str, object]]:
+    def build(self, current_input: str, tools: list[ToolSpec] | None = None) -> list[dict[str, object]]:
         system = "You are PhyCode, a CLI coding agent harness. Use tools safely and follow policy feedback."
         memory = self.memory_store.summary()
         recent = [event.model_dump(mode="json") for event in self.session_store.recent_events()]
+        tool_lines = "\n".join(f"- {spec.name} ({spec.risk_level.value}): {spec.description}" for spec in (tools or []))
         content = (
             f"Workspace: {self.session_store.session.workspace_root}\n"
+            f"Tools:\n{tool_lines}\n"
             f"Memory:\n{memory}\n"
             f"Recent events:\n{recent}\n"
             f"User: {current_input}"

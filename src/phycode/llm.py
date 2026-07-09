@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from phycode.models import AgentEvent, AgentEventType, ToolSpec
+
+ReactiveTrigger = Callable[[str], bool]
 
 
 class LLMClient(Protocol):
@@ -41,6 +43,35 @@ class EchoLLM:
     def generate(self, messages: list[dict[str, object]], tools: list[ToolSpec]) -> list[AgentEvent]:
         last = str(messages[-1]["content"]) if messages else ""
         return [AgentEvent(session_id="echo", type=AgentEventType.ASSISTANT_FINAL, payload={"text": f"Echo: {last}"})]
+
+
+class ReactiveLLM:
+    """Deterministic mock whose output depends on the rendered context.
+
+    Rules are ``(trigger, events)`` pairs evaluated in order; the first trigger that
+    matches the concatenated message text produces that turn's events. A trigger is
+    either a substring or a predicate over the text. Because the returned action
+    depends on what feedback is present in the context, this mock lets the feedback
+    loop be verified end-to-end without a real model.
+    """
+
+    def __init__(
+        self,
+        rules: list[tuple[str | ReactiveTrigger, list[dict[str, Any]]]],
+        default: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.rules = rules
+        self.default = default if default is not None else [
+            {"type": "assistant_final", "payload": {"text": "no rule matched"}}
+        ]
+
+    def generate(self, messages: list[dict[str, object]], tools: list[ToolSpec]) -> list[AgentEvent]:
+        text = "\n".join(str(message.get("content", "")) for message in messages)
+        for trigger, events in self.rules:
+            matched = trigger(text) if callable(trigger) else (trigger in text)
+            if matched:
+                return [_event_from_dict(item) for item in events]
+        return [_event_from_dict(item) for item in self.default]
 
 
 class FailingLLM:

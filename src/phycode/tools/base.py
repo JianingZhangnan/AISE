@@ -7,6 +7,7 @@ from phycode.models import PolicyAction, PolicyDecision, ToolCall, ToolResult, T
 from phycode.policy import PolicyContext, PolicyEngine, WorkspaceViolation, resolve_workspace_path
 
 ToolExecutor = Callable[[ToolCall], ToolResult]
+ApprovalHandler = Callable[[ToolCall, PolicyDecision], bool]
 
 
 @dataclass(frozen=True)
@@ -39,18 +40,27 @@ class ToolRuntime:
         self.registry = registry
         self.policy = policy if policy is not None else PolicyEngine()
 
-    def run(self, call: ToolCall, context: PolicyContext, approved: bool = False) -> ToolRuntimeResult:
+    def run(
+        self,
+        call: ToolCall,
+        context: PolicyContext,
+        approved: bool = False,
+        approval_handler: ApprovalHandler | None = None,
+    ) -> ToolRuntimeResult:
         decision = self.policy.decide(call, context)
         if decision.decision == PolicyAction.DENY:
             return ToolRuntimeResult(
                 decision,
                 ToolResult(tool_call_id=call.id, status="policy_blocked", stderr=decision.reason),
             )
-        if decision.decision == PolicyAction.ASK and not approved:
-            return ToolRuntimeResult(
-                decision,
-                ToolResult(tool_call_id=call.id, status="policy_requires_approval", stderr=decision.reason),
-            )
+        if decision.decision == PolicyAction.ASK:
+            if not approved and approval_handler is not None:
+                approved = bool(approval_handler(call, decision))
+            if not approved:
+                return ToolRuntimeResult(
+                    decision,
+                    ToolResult(tool_call_id=call.id, status="policy_requires_approval", stderr=decision.reason),
+                )
 
         executor = self.registry.executor_for(call.tool_name)
         if executor is None:
