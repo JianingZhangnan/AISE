@@ -25,9 +25,17 @@ def _toml_value(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, float):
+        return repr(value)
     if isinstance(value, list):
         return "[" + ", ".join(_toml_value(item) for item in value) + "]"
-    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    if not isinstance(value, str):
+        # dict (subtable) / other shapes cannot be faithfully emitted here; refuse
+        # rather than silently coerce to a string.
+        raise TypeError(f"unsupported TOML value type: {type(value).__name__}")
+    if any(ord(ch) < 0x20 and ch != "\t" for ch in value):
+        raise ValueError("string value contains control characters")
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
 
 
@@ -89,11 +97,20 @@ def register_state_tools(
             except (TypeError, ValueError):
                 return ToolResult(tool_call_id=call.id, status="invalid_tool_args", stderr="max_steps must be an integer")
         config_path = root / "phycode.toml"
-        data: dict[str, dict[str, Any]] = {}
-        if config_path.exists():
-            data = {k: dict(v) for k, v in tomllib.loads(config_path.read_text(encoding="utf-8")).items()}
-        data.setdefault(section, {})[key] = value
-        config_path.write_text(_dump_toml(data), encoding="utf-8")
+        # Render to a string first; only write if the whole file serializes cleanly,
+        # so a bad value or an un-serializable existing file never corrupts config.
+        try:
+            existing = tomllib.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+            data: dict[str, dict[str, Any]] = {}
+            for existing_key, existing_value in existing.items():
+                if not isinstance(existing_value, dict):
+                    raise ValueError(f"cannot rewrite phycode.toml: top-level key {existing_key!r} is not a table")
+                data[existing_key] = dict(existing_value)
+            data.setdefault(section, {})[key] = value
+            rendered = _dump_toml(data)
+        except (ValueError, TypeError, tomllib.TOMLDecodeError) as exc:
+            return ToolResult(tool_call_id=call.id, status="invalid_tool_args", stderr=str(exc))
+        config_path.write_text(rendered, encoding="utf-8")
         return ToolResult(tool_call_id=call.id, status="ok", stdout=f"set {section}.{key}")
 
     def keys_status(call: ToolCall) -> ToolResult:

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from phycode.models import AgentEvent, MemoryEntry, Session, ToolSpec
-from phycode.redaction import redact_text
+from phycode.redaction import redact_obj, redact_text
 
 
 class SessionStore:
@@ -25,13 +25,23 @@ class MemoryStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def append(self, entry: MemoryEntry) -> None:
+        payload = redact_obj(entry.model_dump(mode="json"))
         with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(redact_text(entry.model_dump_json()) + "\n")
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def entries(self) -> list[MemoryEntry]:
         if not self.path.exists():
             return []
-        return [MemoryEntry.model_validate(json.loads(line)) for line in self.path.read_text(encoding="utf-8").splitlines()]
+        result: list[MemoryEntry] = []
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                result.append(MemoryEntry.model_validate(json.loads(line)))
+            except (json.JSONDecodeError, ValueError):
+                continue  # tolerate a legacy corrupt line rather than crash context build
+        return result
 
     def summary(self) -> str:
         return "\n".join(f"- {entry.category.value}: {entry.content}" for entry in self.entries())

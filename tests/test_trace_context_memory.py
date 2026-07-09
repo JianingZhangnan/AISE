@@ -22,6 +22,22 @@ def test_memory_store_redacts_before_write(tmp_path: Path):
     assert "REDACTED" in text
 
 
+def test_memory_store_secret_stays_valid_json(tmp_path: Path):
+    # Redacting the serialized JSON line used to eat structural chars and produce
+    # an unparseable line, crashing entries()/summary() on the next context build.
+    memory = MemoryStore(tmp_path / "memory.jsonl")
+    memory.append(
+        MemoryEntry(
+            category=MemoryCategory.PROJECT_FACT,
+            content="OPENAI_API_KEY=sk-abcdef1234567890",
+            source="user",
+        )
+    )
+    entries = memory.entries()  # must not raise json.JSONDecodeError
+    assert len(entries) == 1
+    assert "sk-abcdef1234567890" not in memory.summary()
+
+
 def test_context_redacts_current_input_before_llm_messages(tmp_path: Path):
     session = Session(workspace_root=str(tmp_path), mode=SessionMode.INTERACTIVE)
     messages = ContextBuilder(

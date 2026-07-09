@@ -73,3 +73,34 @@ def test_ordinary_shell_command_still_asks(tmp_path: Path):
     call = ToolCall(tool_name="shell.run", args={"command": "python --version"})
     decision = PolicyEngine().decide(call, PolicyContext(workspace_root=tmp_path, allowlist=[], interactive=True))
     assert decision.decision == PolicyAction.ASK
+
+
+@pytest.mark.parametrize("command", ["rm -fr /", "rm -rf ~", "rm -rf .", "rm -rf /var/log"])
+def test_rm_variants_are_denied(tmp_path: Path, command: str):
+    call = ToolCall(tool_name="shell.run", args={"command": command})
+    decision = PolicyEngine().decide(call, PolicyContext(workspace_root=tmp_path, allowlist=[], interactive=True))
+    assert decision.decision == PolicyAction.DENY
+    assert decision.rule_id == "shell.dangerous_command"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep -r shutdown .",
+        "echo graceful shutdown done",
+        "jq '.key' data.json",
+        "rm -rf build",
+        "python -c \"print(obj.key)\"",
+    ],
+)
+def test_common_commands_are_not_false_positives(tmp_path: Path, command: str):
+    call = ToolCall(tool_name="shell.run", args={"command": command})
+    decision = PolicyEngine().decide(call, PolicyContext(workspace_root=tmp_path, allowlist=[], interactive=True))
+    assert decision.decision == PolicyAction.ASK
+
+
+def test_reading_pem_with_read_command_is_denied(tmp_path: Path):
+    call = ToolCall(tool_name="shell.run", args={"command": "cat server.pem"})
+    decision = PolicyEngine().decide(call, PolicyContext(workspace_root=tmp_path, allowlist=[], interactive=True))
+    assert decision.decision == PolicyAction.DENY
+    assert decision.rule_id == "credential.shell_read_blocked"

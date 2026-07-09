@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"sk-[A-Za-z0-9_\-]{10,}"), "[REDACTED_SECRET]"),
@@ -16,3 +17,19 @@ def redact_text(text: str) -> str:
     for pattern, replacement in SECRET_PATTERNS:
         redacted = pattern.sub(replacement, redacted)
     return redacted
+
+
+def redact_obj(value: Any) -> Any:
+    """Redact every string leaf of a JSON-like structure.
+
+    Redacting each string *before* re-serializing keeps the output valid JSON,
+    unlike running redact_text over an already-serialized line (a greedy secret
+    pattern can otherwise eat the closing quote/brace and corrupt the record).
+    """
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, dict):
+        return {key: redact_obj(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_obj(item) for item in value]
+    return value

@@ -32,7 +32,8 @@ SAFE_TOOLS = {
 }
 RISKY_TOOLS = {"file.write", "file.edit", "memory.write", "config.write", "shell.run", "test.run"}
 DANGEROUS_SHELL_PATTERNS = [
-    re.compile(r"\brm\s+-rf\s+/", re.IGNORECASE),
+    # recursive/forced rm of a root-ish target (-rf, -fr, -r, -f ... / ~ * or bare .)
+    re.compile(r"\brm\s+-[a-z]*[rf][a-z]*\s+(?:/|~|\*|\.(?:\s|$))", re.IGNORECASE),
     re.compile(r"\bdel\s+/s\b", re.IGNORECASE),
     re.compile(r"\b(?:rmdir|rd)\s+/s\b", re.IGNORECASE),
     re.compile(r"\bformat\s+[A-Z]:", re.IGNORECASE),
@@ -43,17 +44,25 @@ DANGEROUS_SHELL_PATTERNS = [
     re.compile(r"\bmkfs\b", re.IGNORECASE),
     re.compile(r"\bdd\b.*\bof=/dev/", re.IGNORECASE),
     re.compile(r">\s*/dev/sd", re.IGNORECASE),
-    re.compile(r"\bshutdown\b", re.IGNORECASE),
+    # actual OS shutdown invocation, not the bare word appearing in other text
+    re.compile(r"\bshutdown\s+(?:/[a-z]|-[a-z]|now)\b", re.IGNORECASE),
     re.compile(r"\bchmod\s+-R\s+777\s+/", re.IGNORECASE),
     re.compile(r":\(\)\s*\{.*\|.*\}\s*;\s*:"),
 ]
+_CREDENTIAL_READ_COMMANDS = (
+    r"(?:cat|tac|type|more|less|head|tail|nl|strings|xxd|od|base64|Get-Content|gc|cp|copy|scp|rsync|curl|wget|openssl|sftp)"
+)
 # Credential-like references that must never be read back through a shell command.
+# Specific credential filenames are always blocked; the broad *.pem/*.key match only
+# fires alongside a file-reading command so it does not deny e.g. `jq '.key'`.
 CREDENTIAL_SHELL_PATTERNS = [
     re.compile(r"(?<![\w.])\.env(?:\.\w+)?(?![\w])", re.IGNORECASE),
     re.compile(r"\bid_rsa\b", re.IGNORECASE),
     re.compile(r"\bid_ed25519\b", re.IGNORECASE),
-    re.compile(r"[\w./\\-]*\.pem\b", re.IGNORECASE),
-    re.compile(r"[\w./\\-]*\.key\b", re.IGNORECASE),
+    re.compile(r"\.ssh[\\/]", re.IGNORECASE),
+    re.compile(r"\.aws[\\/]credentials\b", re.IGNORECASE),
+    re.compile(r"(?<![\w.])\.netrc\b", re.IGNORECASE),
+    re.compile(rf"\b{_CREDENTIAL_READ_COMMANDS}\b[^\n|]*?\.(?:pem|key)\b", re.IGNORECASE),
 ]
 
 
@@ -70,7 +79,7 @@ def resolve_workspace_path(path: str, context: PolicyContext) -> Path:
     raise WorkspaceViolation(f"path escapes workspace: {path}")
 
 
-def _is_credential_path(path: str) -> bool:
+def is_credential_path(path: str) -> bool:
     name = Path(path).name
     return name in CREDENTIAL_FILENAMES or name.endswith(".pem") or name.endswith(".key")
 
@@ -88,7 +97,7 @@ class PolicyEngine:
                     rule_id="workspace.path_escape",
                     reason="Path is outside the workspace allowlist",
                 )
-            if call.tool_name.startswith("file.") and _is_credential_path(path):
+            if call.tool_name.startswith("file.") and is_credential_path(path):
                 return PolicyDecision(
                     tool_call_id=call.id,
                     decision=PolicyAction.DENY,
