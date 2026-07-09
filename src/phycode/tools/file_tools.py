@@ -57,7 +57,15 @@ def register_file_tools(registry: ToolRegistry) -> None:
         ToolSpec(
             name="file.read",
             description="Read a file",
-            input_schema={"type": "object"},
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "offset": {"type": "integer"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["path"],
+            },
             risk_level=ToolRiskLevel.SAFE,
         ),
         _file_read,
@@ -66,7 +74,10 @@ def register_file_tools(registry: ToolRegistry) -> None:
         ToolSpec(
             name="file.list",
             description="List a directory",
-            input_schema={"type": "object"},
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+            },
             risk_level=ToolRiskLevel.SAFE,
         ),
         _file_list,
@@ -75,7 +86,11 @@ def register_file_tools(registry: ToolRegistry) -> None:
         ToolSpec(
             name="file.write",
             description="Write a file",
-            input_schema={"type": "object"},
+            input_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                "required": ["path", "content"],
+            },
             risk_level=ToolRiskLevel.RISKY,
         ),
         _file_write,
@@ -84,7 +99,15 @@ def register_file_tools(registry: ToolRegistry) -> None:
         ToolSpec(
             name="file.edit",
             description="Edit a file by exact replacement",
-            input_schema={"type": "object"},
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old": {"type": "string"},
+                    "new": {"type": "string"},
+                },
+                "required": ["path", "old", "new"],
+            },
             risk_level=ToolRiskLevel.RISKY,
         ),
         _file_edit,

@@ -30,6 +30,9 @@ class ToolRegistry:
     def executor_for(self, name: str) -> ToolExecutor | None:
         return self._executors.get(name)
 
+    def spec_for(self, name: str) -> ToolSpec | None:
+        return self._specs.get(name)
+
 
 class ToolRuntime:
     def __init__(self, registry: ToolRegistry, policy: PolicyEngine | None = None) -> None:
@@ -56,8 +59,30 @@ class ToolRuntime:
                 ToolResult(tool_call_id=call.id, status="tool_error", stderr=f"Tool not registered: {call.tool_name}"),
             )
 
+        missing = self._missing_required_args(call)
+        if missing:
+            return ToolRuntimeResult(
+                decision,
+                ToolResult(
+                    tool_call_id=call.id,
+                    status="invalid_tool_args",
+                    stderr=f"Missing required argument(s): {', '.join(missing)}",
+                ),
+            )
+
         normalized_call = self._normalize_call_paths(call, context)
-        return ToolRuntimeResult(decision, executor(normalized_call))
+        try:
+            tool_result = executor(normalized_call)
+        except Exception as exc:  # executors must never crash the loop
+            tool_result = ToolResult(tool_call_id=call.id, status="tool_error", stderr=str(exc))
+        return ToolRuntimeResult(decision, tool_result)
+
+    def _missing_required_args(self, call: ToolCall) -> list[str]:
+        spec = self.registry.spec_for(call.tool_name)
+        if spec is None:
+            return []
+        required = spec.input_schema.get("required", []) if isinstance(spec.input_schema, dict) else []
+        return [name for name in required if name not in call.args]
 
     def _normalize_call_paths(self, call: ToolCall, context: PolicyContext) -> ToolCall:
         if "path" not in call.args:

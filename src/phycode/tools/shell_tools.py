@@ -45,7 +45,11 @@ def register_shell_tools(registry: ToolRegistry, workspace_root: Path, test_comm
         ToolSpec(
             name="shell.run",
             description="Run a bounded shell command",
-            input_schema={"type": "object"},
+            input_schema={
+                "type": "object",
+                "properties": {"command": {"type": "string"}, "timeout": {"type": "integer"}},
+                "required": ["command"],
+            },
             risk_level=ToolRiskLevel.RISKY,
         ),
         shell_run,
@@ -54,7 +58,10 @@ def register_shell_tools(registry: ToolRegistry, workspace_root: Path, test_comm
         ToolSpec(
             name="test.run",
             description="Run configured tests",
-            input_schema={"type": "object"},
+            input_schema={
+                "type": "object",
+                "properties": {"command": {"type": "string"}, "timeout": {"type": "integer"}},
+            },
             risk_level=ToolRiskLevel.RISKY,
         ),
         test_run,
