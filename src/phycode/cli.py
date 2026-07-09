@@ -136,6 +136,23 @@ def _run_turn(loop: AgentLoop, text: str):
     return loop.run(text)
 
 
+def _print_models() -> bool:
+    """List the provider's available model ids. Returns False if unavailable."""
+    llm = _build_llm(load_project_config(Path.cwd()))
+    lister = getattr(llm, "list_models", None)
+    if lister is None:
+        console.print("No provider key configured. Run 'phycode keys set' (or /key in chat) first.", markup=False)
+        return False
+    try:
+        model_ids = lister()
+    except Exception as exc:
+        _safe_print(f"[error] {redact_text(str(exc))}", style="red", markup=False)
+        return False
+    for model_id in model_ids:
+        console.print(str(model_id), markup=False)
+    return True
+
+
 def build_agent(mode: SessionMode, llm: LLMClient | None = None, approval_handler=None, event_sink=None) -> AgentLoop:
     """Build the default local agent loop for CLI commands."""
     config = load_project_config(Path.cwd())
@@ -184,6 +201,7 @@ _CHAT_HELP = (
     "  /model <name>    set the LLM model\n"
     "  /url <base_url>  set the provider base URL\n"
     "  /key             set the API key for the current provider (hidden input)\n"
+    "  /models          list model ids the provider/token exposes\n"
     "  /config          show the current configuration\n"
     "  /status          show credential status\n"
     "  /help            show this help\n"
@@ -196,8 +214,13 @@ def _handle_slash(line: str) -> str | None:
     parts = line[1:].split(maxsplit=1)
     cmd = parts[0].lower() if parts else ""
     arg = parts[1].strip() if len(parts) > 1 else ""
+    if len(arg) >= 2 and arg[0] == arg[-1] and arg[0] in ("'", '"'):
+        arg = arg[1:-1]  # users often wrap values in quotes like the shell; strip them
     if cmd in ("exit", "quit"):
         return "exit"
+    if cmd == "models":
+        _print_models()
+        return None
     if cmd in ("help", "?", ""):
         console.print(_CHAT_HELP, markup=False)
         return None
@@ -310,6 +333,13 @@ def keys_clear(provider: str) -> None:
     """Clear an API key for a provider."""
     CredentialStore().clear_key(provider)
     console.print(f"{provider} cleared", markup=False)
+
+
+@app.command()
+def models() -> None:
+    """List the model ids your configured provider/token exposes (GET /v1/models)."""
+    if not _print_models():
+        raise typer.Exit(code=1)
 
 
 @app.command()

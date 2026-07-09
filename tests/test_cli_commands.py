@@ -99,6 +99,42 @@ def test_chat_slash_url_sets_base_url(tmp_path, monkeypatch):
     assert load_project_config(tmp_path).llm.base_url == "https://real.example/v1"
 
 
+def test_chat_slash_model_strips_surrounding_quotes(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _force_no_credentials(monkeypatch)
+    from phycode.config import load_project_config
+
+    result = runner.invoke(app, ["chat"], input='/model "kimi-2.7-code"\n/exit\n')
+
+    assert result.exit_code == 0, result.stdout
+    assert load_project_config(tmp_path).llm.model == "kimi-2.7-code"  # no literal quotes stored
+
+
+def test_models_command_lists_provider_models(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    class FakeAdapter:
+        def list_models(self):
+            return ["deepseek-chat", "kimi-k2"]
+
+    monkeypatch.setattr("phycode.cli._build_llm", lambda *a, **k: FakeAdapter())
+    result = runner.invoke(app, ["models"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "deepseek-chat" in result.stdout
+    assert "kimi-k2" in result.stdout
+
+
+def test_models_command_without_key_errors(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from phycode.llm import EchoLLM
+
+    monkeypatch.setattr("phycode.cli._build_llm", lambda *a, **k: EchoLLM())
+    result = runner.invoke(app, ["models"])
+
+    assert result.exit_code != 0
+
+
 def test_chat_slash_help_lists_commands(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _force_no_credentials(monkeypatch)

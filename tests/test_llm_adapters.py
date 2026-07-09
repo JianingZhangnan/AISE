@@ -114,6 +114,22 @@ def test_openai_adapter_emits_reasoning_summary():
     assert any(e.type == AgentEventType.ASSISTANT_FINAL for e in events)
 
 
+class FakeModelsClient:
+    class models:
+        @staticmethod
+        def list():
+            return type(
+                "R", (), {"data": [type("M", (), {"id": "deepseek-chat"})(), type("M", (), {"id": "kimi-k2"})()]}
+            )()
+
+
+def test_adapter_list_models_returns_ids():
+    from phycode.llm import OpenAICompatibleChatAdapter
+
+    adapter = OpenAICompatibleChatAdapter(base_url="http://x/v1", model="m", api_key="k", client=FakeModelsClient())
+    assert adapter.list_models() == ["deepseek-chat", "kimi-k2"]
+
+
 def test_openai_adapter_does_not_keep_api_key_attribute():
     from phycode.llm import OpenAICompatibleChatAdapter
 

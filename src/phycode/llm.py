@@ -96,6 +96,11 @@ class OpenAICompatibleChatAdapter:
 
         self.client = OpenAI(api_key=api_key, base_url=base_url)
 
+    def list_models(self) -> list[str]:
+        """Return the model ids the configured provider/token exposes (GET /v1/models)."""
+        response = self.client.models.list()
+        return [getattr(item, "id", str(item)) for item in getattr(response, "data", [])]
+
     def generate(self, messages: list[dict[str, object]], tools: list[ToolSpec]) -> list[AgentEvent]:
         tool_payload = [
             {
