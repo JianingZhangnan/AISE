@@ -111,6 +111,16 @@ Task 0–9 实现完成后，应用户要求对既有代码做一次全面评审
 
 过程偏离与验证方式记录于 `AGENT_LOG.md`（2026-07-09 条目）。
 
+## Task 10–12 收尾
+
+Task 10–12 的收尾目标是把已实现的 CLI 入口、确定性 demo 和课程过程证据整理到 review-ready 状态。当前收尾分支为 `codex/task-10-12`。
+
+- Task 10 使用严格 CLI 测试覆盖用户可见命令：`phycode run`、`phycode chat`、`phycode tools list`、`phycode config read`、`phycode keys set/status/clear`。测试文件为 `tests/test_cli_commands.py`，重点验证输出脱敏、trace 不泄露 secret、工具列表完整性、key 管理不回显明文，以及异常停机时返回非零退出码。
+- Task 11 保留代码评审后形成的真实机制 demo：guardrail 与 policy 走 `ToolRuntime`，feedback 走真实 agent loop + `ReactiveLLM`，不再使用硬编码字符串模拟下一步动作。
+- Task 12 增加严格文档测试 `tests/test_docs_process.py`，要求 README、PLAN、SPEC_PROCESS、AGENT_LOG 同步记录用户命令、安全边界、Task 10–12 完成状态、严格 CLI 测试策略和后续 review 流程。
+- 最终验证命令记录为 `uv run pytest` 和 `uvx pyright`；文档收尾阶段至少定向运行 `uv run pytest tests/test_docs_process.py -v`，完整验收仍以全套 pytest 和 pyright 为准。
+- review-ready 状态：`codex/task-10-12` 待 Claude 审核后再合并或提交课程最终交付。
+
 ## 仓库平台记录
 
 助教尚未最终确认期末项目应提交到 GitHub 还是 NJU Git。当前为了开发、提交、review 和过程记录顺畅，先使用 GitHub 仓库 `JianingZhangnan/AISE`。如课程后续明确要求 NJU Git，将以 GitHub 仓库完整历史为源迁移或镜像，并在本文件和 `AGENT_LOG.md` 中记录切换原因与关键操作。

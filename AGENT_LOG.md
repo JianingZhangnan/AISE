@@ -53,3 +53,12 @@
 - 评审结论与采纳/推翻记录另见 `SPEC_PROCESS.md`。此轮评审也印证了 harness 判定标准的价值：确定性测试 + 独立评审在合并前拦下了 secret 外泄与循环崩溃两个高危缺陷。
 - 标准流程验收（补充，撤销前述「uv 不可用」的临时偏离）：应用户要求先安装真正的 `uv`（官方脚本安装到 `C:\Users\Zhang\.local\bin`，uv 0.11.28），再在 `fix/review-findings` 分支上按标准流程验收：`uv sync --dev` 成功创建 `.venv`；`uv run pytest` 为 **81 passed**；`uv run phycode version/tools list` 正常（14 个工具带风险等级）；`uv run phycode demo guardrail|policy|feedback` 三个演示均按预期确定性复现（guardrail 拒绝未执行；policy 需审批；feedback 呈现 test_failed→file.edit→success→final）。`.venv` 已被 gitignore，`uv.lock` 无变化（本批次未新增依赖，仅用标准库 `re`/`tomllib`/`sys`/`tempfile`/`json`）。
 - Codex 复核记录：`origin/fix/review-findings` 已在本地 `main` 以 fast-forward 方式合并；复核时补跑 `uvx pyright` 发现 `tests/test_tool_registry.py` 中一处 optional member access 类型检查问题，随后追加本地修复并复验。当前尚未推送 `origin/main`。
+
+## 2026-07-09 Task 10–12 收尾
+
+- 执行方式：主 agent 在 `codex/task-10-12` 上收口 Task 10–12；使用 gpt-5.5 subagent 聚焦严格 CLI 行为与文档验收清单，随后由当前文档 worker 只修改 `README.md`、`PLAN.md`、`SPEC_PROCESS.md`、`AGENT_LOG.md`，不触碰 `src` 或 `tests`。
+- Task 10 记录：严格 CLI 测试文件为 `tests/test_cli_commands.py`，覆盖 `run`/`chat`、完整工具列表、`config read`、`keys set/status/clear`、trace 脱敏、key 明文不回显和非 final 退出码。实现提交为 `e858161`。测试策略是先用用户可见命令锁住行为，再由 README 逐条列出可运行命令，避免只记录内部 API。
+- Task 11 记录：确定性 demo 已按代码评审结论使用真实 `ToolRuntime` 和 `ReactiveLLM`，README 收尾列出 `uv run phycode demo guardrail`、`uv run phycode demo feedback`、`uv run phycode demo policy` 三个命令。
+- Task 12 记录：新增严格文档测试 `tests/test_docs_process.py`，要求 README 包含安装、运行、demo、key 管理、`uv run pytest`、`uvx pyright` 与安全边界；PLAN 标记 Task 10、Task 11、Task 12 完成；SPEC_PROCESS 记录 Task 10–12 收尾、严格 CLI 测试、最终验证命令和 review-ready 分支。
+- 主 agent 复核补充：在合并 subagent 产物后，发现 `chat` 为避免 EchoLLM 递归回显而改写 session event 的实现过绕，改为让 `EchoLLM` 在渲染后的上下文中优先 echo 当前 `User:` 行，并用 `tests/test_llm_adapters.py` 增加回归测试锁定该行为。
+- 验证范围：`uv run pytest tests/test_cli_commands.py tests/test_docs_process.py -v` 为 11 passed；`uv run pytest tests/test_cli_commands.py tests/test_llm_adapters.py tests/test_docs_process.py -v` 为 17 passed；`uv run pytest` 为 **93 passed**；`uvx pyright` 为 0 errors。真实 CLI smoke 覆盖 `phycode run "hello"`、`tools list`、`config read`、`demo guardrail|feedback|policy`、`keys status`。后续由 Claude 审核 `codex/task-10-12`，重点确认文档、CLI 测试和安全边界陈述一致。

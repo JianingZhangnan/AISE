@@ -1984,7 +1984,7 @@ git commit -m "feat: add mock-testable agent loop"
 
 ---
 
-### Task 10: CLI Run、Chat、Config、Keys 和工具列表
+### Task 10: CLI Run、Chat、Config、Keys 和工具列表 - ✅ 完成于 2026-07-09 - commit: `e858161`
 
 **文件：**
 - 修改：`src/phycode/cli.py`
@@ -1994,7 +1994,7 @@ git commit -m "feat: add mock-testable agent loop"
 - 消费：`AgentLoop`、`EchoLLM`、`ScriptedLLM`、stores、registry。
 - 产出命令：`phycode chat`、`phycode run`、`phycode tools list`、`phycode keys set/status/clear`、`phycode config read`。
 
-- [ ] **步骤 1：编写失败的 CLI 命令测试**
+- [x] **步骤 1：编写失败的 CLI 命令测试**
 
 创建 `tests/test_cli_commands.py`：
 
@@ -2026,13 +2026,13 @@ def test_tools_list_includes_shell_and_workspace():
     assert "workspace.status" in result.stdout
 ```
 
-- [ ] **步骤 2：运行失败的测试**
+- [x] **步骤 2：运行失败的测试**
 
 运行：`uv run pytest tests/test_cli_commands.py -v`
 
 预期：FAIL，直到 `run` 实现且工具注册表包含 shell/state 工具。
 
-- [ ] **步骤 3：实现 CLI run 命令**
+- [x] **步骤 3：实现 CLI run 命令**
 
 修改 `src/phycode/cli.py`：
 
@@ -2086,7 +2086,7 @@ def chat() -> None:
             console.print(result.final_text)
 ```
 
-- [ ] **步骤 4：实现 keys set 和 clear 命令**
+- [x] **步骤 4：实现 keys set 和 clear 命令**
 
 修改 `src/phycode/cli.py`：
 
@@ -2104,24 +2104,28 @@ def keys_clear(provider: str = "openai-compatible") -> None:
     console.print(f"{provider} key cleared")
 ```
 
-- [ ] **步骤 5：运行 CLI 测试**
+- [x] **步骤 5：运行 CLI 测试**
 
 运行：`uv run pytest tests/test_cli_commands.py tests/test_cli_smoke.py -v`
 
 预期：PASS。
 
-- [ ] **步骤 6：提交**
+- [x] **步骤 6：提交**
 
 ```bash
 git add src/phycode/cli.py tests/test_cli_commands.py
 git commit -m "feat: add cli run chat config and key commands"
 ```
 
+**收尾记录（2026-07-09）：** Task 10 的严格 CLI 行为由 `tests/test_cli_commands.py` 覆盖，包含 `run`/`chat`、完整默认工具列表、`config read`、`keys set/status/clear`、trace 脱敏和非 final 退出码。实现提交为 `e858161`，最终验证范围纳入 `uv run pytest` 与 `uvx pyright`，随 Task 12 文档收尾一起进入 `codex/task-10-12` review-ready 分支。
+
 ---
 
 ### Task 11: 确定性演示 - ✅ 完成于 2026-07-09 - commit: `64d0b9c`
 
 > **实现偏离说明（2026-07-09 代码评审后）：** 本任务下方步骤 3 的草案把反馈 demo 的「下一步动作」硬编码为字符串 `"file.edit"`，未真正驱动 agent loop，违反「移除真实 LLM 后核心机制仍应能确定性验证」。实际实现已推翻该草案：新增确定性的 `ReactiveLLM`（输出取决于上下文反馈），用真实 agent loop 呈现 `test.run` 失败 → 因反馈改选 `file.edit` 修复 → 重跑通过 → `assistant_final` 的完整闭环。`run_guardrail_demo`/`run_policy_demo` 亦改为驱动真实 `ToolRuntime`。相关支撑改动（reactive mock、审批接线、停机控制器、`validate_args`、缺失工具补齐、shell 凭据/危险模式加固）见 commits `dc8ca66`、`86af4d9`、`6aa2b6e`、`eb0391f`、`64d0b9c`，评审结论见 `SPEC_PROCESS.md`。下方步骤保留为历史草案，不代表最终实现。
+>
+> **收尾验证（2026-07-09）：** 三个 demo 命令 `uv run phycode demo guardrail`、`uv run phycode demo feedback`、`uv run phycode demo policy` 已纳入 README 用户命令；最终验证范围继续记录 `uv run pytest` 和 `uvx pyright`。
 
 **文件：**
 - 创建：`src/phycode/demos.py`
@@ -2261,7 +2265,7 @@ git commit -m "feat: add deterministic mechanism demos"
 
 ---
 
-### Task 12: README、过程记录收尾和最终验证
+### Task 12: README、过程记录收尾和最终验证 - ✅ 完成于 2026-07-09 - review-ready branch: `codex/task-10-12`
 
 **文件：**
 - 修改：`README.md`
@@ -2274,7 +2278,7 @@ git commit -m "feat: add deterministic mechanism demos"
 - 补全课程要求的过程证据文档。
 - 产出最终计划状态条目，包含已完成任务的 commit hash。
 
-- [ ] **步骤 1：编写包含确切命令的 README**
+- [x] **步骤 1：编写包含确切命令的 README**
 
 修改 `README.md`：
 
@@ -2310,6 +2314,7 @@ uv run phycode demo policy
 
 ```bash
 uv run pytest
+uvx pyright
 ```
 
 ## 安全 Key 配置
@@ -2329,7 +2334,7 @@ Key 默认通过操作系统钥匙串存储。`.env` 仅作为明文回退来源
 默认工作区根目录是当前项目目录。超出工作区的文件操作被阻止，除非显式加入白名单。交互模式下，危险写入和 shell 命令需要审批；非交互模式下则返回结构化策略信号并失败。
 ````
 
-- [ ] **步骤 2：补全过程证据**
+- [x] **步骤 2：补全过程证据**
 
 更新 `SPEC_PROCESS.md`，确保包含：
 
@@ -2344,22 +2349,28 @@ Key 默认通过操作系统钥匙串存储。`.env` 仅作为明文回退来源
 - subagent 或 inline 执行的关键输出摘要。
 - 人工干预、规范偏离、review 结论和修正记录。
 
-- [ ] **步骤 3：运行完整验证**
+- [x] **步骤 3：运行完整验证**
 
 运行：`uv run pytest`
 
 预期：所有测试 PASS。
 
+运行：`uvx pyright`
+
+预期：0 errors。
+
 运行：`git status --short`
 
 预期：提交前仅有刻意的文档变更。
 
-- [ ] **步骤 4：提交**
+- [x] **步骤 4：提交**
 
 ```bash
 git add README.md SPEC_PROCESS.md AGENT_LOG.md PLAN.md
 git commit -m "docs: add project process and usage documentation"
 ```
+
+**收尾记录（2026-07-09）：** 文档严格测试由 `tests/test_docs_process.py` 固化，要求 README 包含安装、运行、demo、key 管理、测试与类型检查命令，并要求 PLAN/SPEC_PROCESS/AGENT_LOG 明确 Task 10–12 完成状态、严格 CLI 测试策略、最终验证命令和 `codex/task-10-12` review-ready 分支。最终测试范围记录为 `uv run pytest` 与 `uvx pyright`。
 
 ---
 
