@@ -2119,7 +2119,9 @@ git commit -m "feat: add cli run chat config and key commands"
 
 ---
 
-### Task 11: 确定性演示
+### Task 11: 确定性演示 - ✅ 完成于 2026-07-09 - commit: `64d0b9c`
+
+> **实现偏离说明（2026-07-09 代码评审后）：** 本任务下方步骤 3 的草案把反馈 demo 的「下一步动作」硬编码为字符串 `"file.edit"`，未真正驱动 agent loop，违反「移除真实 LLM 后核心机制仍应能确定性验证」。实际实现已推翻该草案：新增确定性的 `ReactiveLLM`（输出取决于上下文反馈），用真实 agent loop 呈现 `test.run` 失败 → 因反馈改选 `file.edit` 修复 → 重跑通过 → `assistant_final` 的完整闭环。`run_guardrail_demo`/`run_policy_demo` 亦改为驱动真实 `ToolRuntime`。相关支撑改动（reactive mock、审批接线、停机控制器、`validate_args`、缺失工具补齐、shell 凭据/危险模式加固）见 commits `dc8ca66`、`86af4d9`、`6aa2b6e`、`eb0391f`、`64d0b9c`，评审结论见 `SPEC_PROCESS.md`。下方步骤保留为历史草案，不代表最终实现。
 
 **文件：**
 - 创建：`src/phycode/demos.py`

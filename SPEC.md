@@ -98,9 +98,10 @@ agent 主循环由 PhyCode 自身代码实现，执行以下步骤：
 
 支持以下适配器：
 
-- `ScriptedLLM`：确定性测试和演示用。
+- `ScriptedLLM`：按序返回预设 turns，确定性路由测试用。
+- `ReactiveLLM`：输出取决于上下文中出现的反馈（规则按序匹配消息文本），用于在无真实 LLM 下确定性验证「反馈闭环改变下一步动作」。
 - `EchoLLM`：冒烟测试用。
-- `FailingLLM`：供应商错误测试用。
+- `FailingLLM`：供应商错误测试用（异常被 loop 捕获为 `error` 事件）。
 - `OpenAICompatibleChatAdapter`：与 `/v1/chat/completions` 兼容供应商的真实交互。
 
 主要的真实供应商路径使用 OpenAI 兼容的 `tools` / `tool_calls`，不引入备用 JSON 解析器；不支持该 API 的供应商不在本项目支持范围内。产品核心不使用 OpenAI Agents SDK 作为循环运行器。
@@ -168,8 +169,8 @@ agent 主循环由 PhyCode 自身代码实现，执行以下步骤：
 - 所有路径在使用前解析，必须保持在工作区根目录或显式 allowlist 内。
 - 符号链接逃逸视为边界违规。
 - Shell 命令以配置的 `cwd`、超时和输出限制运行。
-- 危险命令模式由确定性代码阻止。
-- 凭据类文件（如 `.env`、私钥、token 存储）不可被模型可调用的文件工具读取。
+- 危险命令模式由确定性代码阻止（`rm -rf /`、`del/rmdir /s`、`format`、`mkfs`、`dd of=/dev/`、`shutdown`、`git push --force`、`curl|sh`、`chmod -R 777 /`、fork bomb、`DROP TABLE` 等）。
+- 凭据类文件（如 `.env`、私钥、token 存储）不可被模型可调用的文件工具读取；`shell.run`/`test.run` 中引用凭据类文件名（`.env`、`id_rsa`、`*.pem`、`*.key`）的命令由规则 `credential.shell_read_blocked` 直接拒绝，避免绕过文件工具拒绝列表。
 - 每个决策在 trace 中记录规则 ID 和原因。
 
 ### 5.7 反馈闭环
@@ -566,7 +567,7 @@ Python 标准测试框架，支持 fixture、参数化和插件生态，与 mock
 - 重复失败检测：连续 N 次相同工具+相似参数的失败触发停机建议。
 
 工具运行时流水线：
-- 统一入口：`validate_args → check_policy → execute → map_feedback → record_trace`。
+- 统一入口：`check_policy → validate_args → execute → map_feedback → record_trace`。策略在参数校验之前，确保被拒绝的调用不触碰执行器；`validate_args` 按工具 `input_schema.required` 校验，缺参产出 `invalid_tool_args` 而非崩溃；执行器异常统一兜底为 `tool_error`。
 - 每个阶段可独立 mock 测试。
 
 ## 11. 验收标准

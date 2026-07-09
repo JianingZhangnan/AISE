@@ -85,6 +85,32 @@
 - 处理结论：冷启动门禁解除，允许按 `PLAN.md` 从 Task 1 开始实现。
 - 后续要求：Task 1 必须继续遵守 TDD 红绿路径，不得在没有失败测试证据的情况下编写生产代码。
 
+## 代码评审与修订（2026-07-09）
+
+Task 0–9 实现完成后，应用户要求对既有代码做一次全面评审（对齐作业要求与 Superpowers 流程），再严格按结论修复、提交、合并。
+
+关键发现与处理：
+
+- **P0（最严重，触及判定标准）：反馈闭环无法在移除真实 LLM 后被确定性验证。**
+  `ScriptedLLM` 完全忽略 `messages`，只按序号返回预设 turns，因此「反馈回灌改变下一步动作」在 mock 下无法证明；更严重的是 `PLAN.md` Task 11 计划的 `run_feedback_demo` 把「下一步动作」硬编码为字符串 `"file.edit"`，对应测试只做字符串拼接断言。这正是 CLAUDE.md 禁止的「用提示词/配置代替代码机制」，且违反「移除真实 LLM 后核心机制仍应能通过确定性单元测试验证」。
+  处理：新增确定性的 `ReactiveLLM`（输出取决于上下文中出现的反馈），用真实 agent loop 重写反馈 demo，呈现 `test.run` 失败 → 因失败反馈改选 `file.edit` 修复 → 重跑测试通过 → `assistant_final` 的完整闭环；并补充直接单测证明同一 `ReactiveLLM` 在「有/无失败反馈」两种上下文下产出不同动作。**采纳并推翻了 PLAN 原定的占位实现。**
+- **P1：真实运行时缺陷（被 mock 掩盖）。** 工具 spec 从未传给 LLM、审批路径未接线、停机控制器只处理 final/max_steps、runtime 缺 `validate_args`（`invalid_tool_args` 为死路径且缺参会崩溃）。逐项以 TDD 修复。
+- **P2：安全与一致性。** shell 可绕过凭据文件拒绝、危险命令模式表偏薄、policy 集合与 registry 不同步。逐项修复：新增 `credential.shell_read_blocked`、扩充危险模式、补齐 7 个工具执行器使 both-way diff 为空。
+
+采纳/推翻记录：
+
+| 评审建议 | 处理 | 原因 |
+| --- | --- | --- |
+| 用 reactive mock LLM 让反馈真正改变动作 | 采纳 | 满足判定标准，替换硬编码占位 demo |
+| 把工具 schema 传给 LLM 并纳入上下文 | 采纳 | 否则真实供应商路径下模型无法发起 tool_call |
+| 接入可注入审批处理器 | 采纳 | 交互式审批与「安全自动审批模式」的确定性验证入口 |
+| 停机控制器补充 error/repeated_failure/interrupt | 采纳 | 对齐 SPEC §5.2/§5.7 |
+| runtime 增加 `validate_args` 与执行器异常兜底 | 采纳 | 对齐 SPEC §10 流水线，消除崩溃与死路径 |
+| shell 凭据读取拒绝 + 扩充危险模式 | 采纳 | 收敛威胁模型 §6.2 与深度维度承诺 §10 |
+| 实现缺失工具以对齐 policy/registry | 采纳 | 消除「policy 放行但 runtime 报 tool_error」的不一致 |
+
+过程偏离与验证方式记录于 `AGENT_LOG.md`（2026-07-09 条目）。
+
 ## 仓库平台记录
 
 助教尚未最终确认期末项目应提交到 GitHub 还是 NJU Git。当前为了开发、提交、review 和过程记录顺畅，先使用 GitHub 仓库 `JianingZhangnan/AISE`。如课程后续明确要求 NJU Git，将以 GitHub 仓库完整历史为源迁移或镜像，并在本文件和 `AGENT_LOG.md` 中记录切换原因与关键操作。
