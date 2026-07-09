@@ -68,6 +68,24 @@ def _build_llm(config: ProjectConfig, credential_store: CredentialStore | None =
     return EchoLLM()
 
 
+def _clean_api_key(secret: str) -> str:
+    """Validate/normalize an API key: strip surrounding whitespace, require non-empty ASCII.
+
+    Non-ASCII or invisible characters (e.g. a zero-width space pasted from a web page)
+    would otherwise crash later as an 'ascii' codec error when the Authorization header
+    is encoded, so reject them up front with a clear message.
+    """
+    cleaned = secret.strip()
+    if not cleaned:
+        raise ValueError("API key cannot be blank.")
+    if not cleaned.isascii():
+        raise ValueError(
+            "API key contains non-ASCII or invisible characters. Re-copy just the key "
+            "(no quotes, labels, or hidden spaces) and try again."
+        )
+    return cleaned
+
+
 def _interactive_approver(call: ToolCall, decision: PolicyDecision) -> bool:
     """Prompt the user to approve a risky tool call in an interactive session."""
     console.print(f"[approval needed] {call.tool_name}: {decision.reason}", markup=False)
@@ -150,11 +168,13 @@ def _handle_slash(line: str) -> str | None:
         return "reload"
     if cmd in ("key", "login"):
         secret = typer.prompt("API key", hide_input=True)
-        if not secret.strip():
-            console.print("API key cannot be blank.", markup=False)
+        try:
+            cleaned = _clean_api_key(secret)
+        except ValueError as exc:
+            console.print(str(exc), markup=False)
             return None
         provider = load_project_config(Path.cwd()).llm.provider
-        CredentialStore().set_key(provider, secret)
+        CredentialStore().set_key(provider, cleaned)
         console.print(f"{provider} key stored", markup=False)
         return "reload"
     if cmd == "config":
@@ -227,10 +247,12 @@ def keys_status(provider: str = typer.Argument("openai-compatible")) -> None:
 def keys_set(provider: str) -> None:
     """Store an API key for a provider."""
     secret = typer.prompt("API key", hide_input=True)
-    if not secret.strip():
-        typer.echo("API key cannot be blank.", err=True)
+    try:
+        cleaned = _clean_api_key(secret)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
         raise typer.Exit(code=1)
-    CredentialStore().set_key(provider, secret)
+    CredentialStore().set_key(provider, cleaned)
     console.print(f"{provider} stored", markup=False)
 
 

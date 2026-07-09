@@ -71,3 +71,9 @@
 - TDD：先加 4 个失败测试（`_build_llm` 无 key→Echo / 有 key→adapter、chat 非 final 存活、`_interactive_approver` 走 confirm），并给两个 echo 测试加 `_force_no_credentials`（monkeypatch `CredentialStore`）使其不受本机钥匙串状态影响；再实现变绿。
 - 验证：`uv run pytest` 为 **97 passed**；`uvx pyright` 为 0 errors；实机 `phycode run "hello again"` 无 key 时回退输出 `Echo: hello again`。
 - 合并：应用户要求，`codex/task-10-12` 以 fast-forward 合并到 `main` 并推送 `origin/main`（这批含全部评审修复 + Task 10–12 + 本次 run/chat 收口才首次落到主线）。
+
+## 2026-07-09 真实供应商测试反馈：API key 非 ASCII 崩溃
+
+- 用户填入真实 URL/key 测试失败。查 `<workspace>/.phycode/traces/*.jsonl` 见 `error` 事件：`'ascii' codec can't encode characters in position 7-30`。position 7 = `"Bearer "` 之后，即 `Authorization: Bearer <key>` 头里 key 含非 ASCII/不可见字符（常见于从网页复制 key 带入零宽空格/全角字符）。已用 httpx 复现同款报错。
+- 修复：新增 `_clean_api_key`——录入 key 时 strip 空白、拒绝空值、拒绝非 ASCII（含零宽空格），给出可读提示；`keys set` 与 chat 内 `/key` 均接入。TDD 覆盖非 ASCII 拒绝与前后空白裁剪。验证：`uv run pytest` 全绿、`uvx pyright` 0 errors。
+- 用户侧处理：`phycode keys clear openai-compatible` 后重新 `/key` 干净粘贴（或手打）即可。

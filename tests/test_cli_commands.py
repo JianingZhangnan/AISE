@@ -283,3 +283,37 @@ def test_keys_set_rejects_blank_secret(monkeypatch):
 
     assert result.exit_code != 0
     assert store.get_key("openai-compatible") is None
+
+
+def test_clean_api_key_rejects_non_ascii_and_blank_and_strips():
+    from phycode.cli import _clean_api_key
+
+    import pytest
+
+    assert _clean_api_key("  sk-abc123  ") == "sk-abc123"
+    with pytest.raises(ValueError):
+        _clean_api_key("   ")
+    with pytest.raises(ValueError):
+        _clean_api_key("sk-​hidden")  # zero-width space from a bad copy/paste
+    with pytest.raises(ValueError):
+        _clean_api_key("sk-密钥")
+
+
+def test_keys_set_rejects_non_ascii_key(monkeypatch):
+    store = CredentialStore(backend=InMemoryCredentialBackend())
+    monkeypatch.setattr("phycode.cli.CredentialStore", lambda: store)
+
+    result = runner.invoke(app, ["keys", "set", "openai-compatible"], input="sk-密钥示例值\n")
+
+    assert result.exit_code != 0
+    assert store.get_key("openai-compatible") is None
+
+
+def test_keys_set_strips_surrounding_whitespace(monkeypatch):
+    store = CredentialStore(backend=InMemoryCredentialBackend())
+    monkeypatch.setattr("phycode.cli.CredentialStore", lambda: store)
+
+    result = runner.invoke(app, ["keys", "set", "openai-compatible"], input="  sk-abc123  \n")
+
+    assert result.exit_code == 0
+    assert store.get_key("openai-compatible") == "sk-abc123"
