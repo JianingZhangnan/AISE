@@ -51,3 +51,5 @@
   3. 数据损坏：`config.write` 的手写 TOML dumper 遇到换行值/浮点/子表/顶层非表会崩溃或静默损坏文件。修复：先渲染成字符串、成功才写入（失败不触碰文件），拒绝控制字符，处理浮点，非表顶层键 fail-safe。
   4. 误报：`shutdown` 裸词、`.key`/`.pem` 子串会误拒 `grep shutdown`/`jq '.key'` 等常见命令；`rm` 规则漏掉 `-fr`/`~`/`.`。已收敛正则。
 - 评审结论与采纳/推翻记录另见 `SPEC_PROCESS.md`。此轮评审也印证了 harness 判定标准的价值：确定性测试 + 独立评审在合并前拦下了 secret 外泄与循环崩溃两个高危缺陷。
+- 标准流程验收（补充，撤销前述「uv 不可用」的临时偏离）：应用户要求先安装真正的 `uv`（官方脚本安装到 `C:\Users\Zhang\.local\bin`，uv 0.11.28），再在 `fix/review-findings` 分支上按标准流程验收：`uv sync --dev` 成功创建 `.venv`；`uv run pytest` 为 **81 passed**；`uv run phycode version/tools list` 正常（14 个工具带风险等级）；`uv run phycode demo guardrail|policy|feedback` 三个演示均按预期确定性复现（guardrail 拒绝未执行；policy 需审批；feedback 呈现 test_failed→file.edit→success→final）。`.venv` 已被 gitignore，`uv.lock` 无变化（本批次未新增依赖，仅用标准库 `re`/`tomllib`/`sys`/`tempfile`/`json`）。
+- 合并方式：应用户安排，本分支 `origin/fix/review-findings` 已推送，由 codex 端合并到 `main` 并推送；本地 `main` 保持在 `origin/main` 未改动。
