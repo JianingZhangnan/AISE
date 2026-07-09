@@ -19,6 +19,7 @@ class PolicyContext:
 
 
 CREDENTIAL_FILENAMES = {".env", ".env.local", "id_rsa", "id_ed25519"}
+SHELL_TOOLS = {"shell.run", "test.run"}
 SAFE_TOOLS = {
     "file.read",
     "file.list",
@@ -33,9 +34,26 @@ RISKY_TOOLS = {"file.write", "file.edit", "memory.write", "config.write", "shell
 DANGEROUS_SHELL_PATTERNS = [
     re.compile(r"\brm\s+-rf\s+/", re.IGNORECASE),
     re.compile(r"\bdel\s+/s\b", re.IGNORECASE),
+    re.compile(r"\b(?:rmdir|rd)\s+/s\b", re.IGNORECASE),
     re.compile(r"\bformat\s+[A-Z]:", re.IGNORECASE),
     re.compile(r"\bcurl\b.*\|\s*sh\b", re.IGNORECASE),
+    re.compile(r"\bwget\b.*\|\s*sh\b", re.IGNORECASE),
     re.compile(r"\bDROP\s+TABLE\b", re.IGNORECASE),
+    re.compile(r"\bgit\s+push\b.*\s(?:--force|-f)\b", re.IGNORECASE),
+    re.compile(r"\bmkfs\b", re.IGNORECASE),
+    re.compile(r"\bdd\b.*\bof=/dev/", re.IGNORECASE),
+    re.compile(r">\s*/dev/sd", re.IGNORECASE),
+    re.compile(r"\bshutdown\b", re.IGNORECASE),
+    re.compile(r"\bchmod\s+-R\s+777\s+/", re.IGNORECASE),
+    re.compile(r":\(\)\s*\{.*\|.*\}\s*;\s*:"),
+]
+# Credential-like references that must never be read back through a shell command.
+CREDENTIAL_SHELL_PATTERNS = [
+    re.compile(r"(?<![\w.])\.env(?:\.\w+)?(?![\w])", re.IGNORECASE),
+    re.compile(r"\bid_rsa\b", re.IGNORECASE),
+    re.compile(r"\bid_ed25519\b", re.IGNORECASE),
+    re.compile(r"[\w./\\-]*\.pem\b", re.IGNORECASE),
+    re.compile(r"[\w./\\-]*\.key\b", re.IGNORECASE),
 ]
 
 
@@ -78,7 +96,7 @@ class PolicyEngine:
                     reason="Credential-like files cannot be read by model-callable tools",
                 )
 
-        if call.tool_name == "shell.run":
+        if call.tool_name in SHELL_TOOLS:
             command = str(call.args.get("command", ""))
             for pattern in DANGEROUS_SHELL_PATTERNS:
                 if pattern.search(command):
@@ -87,6 +105,14 @@ class PolicyEngine:
                         decision=PolicyAction.DENY,
                         rule_id="shell.dangerous_command",
                         reason="Command matches a dangerous shell pattern",
+                    )
+            for pattern in CREDENTIAL_SHELL_PATTERNS:
+                if pattern.search(command):
+                    return PolicyDecision(
+                        tool_call_id=call.id,
+                        decision=PolicyAction.DENY,
+                        rule_id="credential.shell_read_blocked",
+                        reason="Shell command references a credential-like file",
                     )
 
         if call.tool_name in SAFE_TOOLS:
