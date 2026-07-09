@@ -16,8 +16,82 @@ def _json_from_stdout(stdout: str) -> dict:
     return json.loads(stdout)
 
 
+def _force_no_credentials(monkeypatch) -> None:
+    """Make build_agent resolve to EchoLLM regardless of the machine keyring."""
+    monkeypatch.setattr(
+        "phycode.cli.CredentialStore",
+        lambda *a, **k: CredentialStore(backend=InMemoryCredentialBackend()),
+    )
+
+
+def test_build_llm_falls_back_to_echo_without_credentials(tmp_path):
+    from phycode.cli import _build_llm
+    from phycode.config import LLMConfig, ProjectConfig, WorkspaceConfig
+    from phycode.llm import EchoLLM
+
+    config = ProjectConfig(
+        workspace=WorkspaceConfig(root=tmp_path),
+        llm=LLMConfig(provider="openai-compatible", base_url="https://x/v1", model="m"),
+    )
+    store = CredentialStore(backend=InMemoryCredentialBackend())
+    assert isinstance(_build_llm(config, store), EchoLLM)
+
+
+def test_build_llm_uses_openai_adapter_when_key_configured(tmp_path):
+    from phycode.cli import _build_llm
+    from phycode.config import LLMConfig, ProjectConfig, WorkspaceConfig
+    from phycode.llm import OpenAICompatibleChatAdapter
+
+    config = ProjectConfig(
+        workspace=WorkspaceConfig(root=tmp_path),
+        llm=LLMConfig(provider="openai-compatible", base_url="https://llm.example/v1", model="demo-model"),
+    )
+    store = CredentialStore(backend=InMemoryCredentialBackend())
+    store.set_key("openai-compatible", "sk-test-1234567890")
+    llm = _build_llm(config, store)
+    assert isinstance(llm, OpenAICompatibleChatAdapter)
+    assert llm.model == "demo-model"
+    assert llm.base_url == "https://llm.example/v1"
+
+
+def test_chat_survives_non_final_turn(monkeypatch):
+    import phycode.cli as cli
+    from phycode.agent import AgentRunResult
+
+    outcomes = iter(
+        [
+            AgentRunResult(final_text=None, events=[], stopped_reason="max_steps"),
+            AgentRunResult(final_text="done", events=[], stopped_reason="final"),
+        ]
+    )
+
+    class Loop:
+        def run(self, user_input: str) -> AgentRunResult:
+            return next(outcomes)
+
+    monkeypatch.setattr(cli, "build_agent", lambda *a, **k: Loop())
+    result = runner.invoke(app, ["chat"], input="one\ntwo\n/exit\n")
+
+    assert result.exit_code == 0, result.stdout
+    assert "max_steps" in result.stdout  # non-final turn reported, session kept alive
+    assert "done" in result.stdout  # a later turn still ran
+
+
+def test_interactive_approver_uses_confirm(monkeypatch):
+    import phycode.cli as cli
+    from phycode.models import PolicyAction, PolicyDecision, ToolCall
+
+    monkeypatch.setattr(cli.typer, "confirm", lambda *a, **k: True)
+    approved = cli._interactive_approver(
+        ToolCall(tool_name="file.write", args={"path": "x"}),
+        PolicyDecision(tool_call_id="1", decision=PolicyAction.ASK, rule_id="r", reason="why"),
+    )
+    assert approved is True
+
+
 def test_run_command_uses_echo_agent_and_writes_redacted_trace(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    _force_no_credentials(monkeypatch)
     Path(".env").write_text("OPENAI_API_KEY=sk-live-SECRET1234567890\n", encoding="utf-8")
 
     result = runner.invoke(app, ["run", "hello from cli sk-live-SECRET1234567890"])
@@ -50,6 +124,7 @@ def test_run_command_exits_nonzero_when_agent_does_not_finish(monkeypatch):
 
 def test_chat_echoes_multiple_turns_and_exits_cleanly(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    _force_no_credentials(monkeypatch)
     result = runner.invoke(app, ["chat"], input="first turn\nsecond turn\n/exit\n")
 
     assert result.exit_code == 0, result.stdout

@@ -6,12 +6,12 @@ from rich.console import Console
 
 from phycode import __version__
 from phycode.agent import AgentLoop
-from phycode.config import load_project_config
+from phycode.config import ProjectConfig, load_project_config
 from phycode.context import ContextBuilder, MemoryStore, SessionStore
 from phycode.credentials import CredentialStore
 from phycode.demos import run_feedback_demo, run_guardrail_demo, run_policy_demo
-from phycode.llm import EchoLLM
-from phycode.models import Session, SessionMode
+from phycode.llm import EchoLLM, LLMClient, OpenAICompatibleChatAdapter
+from phycode.models import PolicyDecision, Session, SessionMode, ToolCall
 from phycode.policy import PolicyContext
 from phycode.redaction import redact_text
 from phycode.trace import TraceStore
@@ -48,7 +48,31 @@ def build_default_registry(
     return registry
 
 
-def build_agent(mode: SessionMode) -> AgentLoop:
+def _build_llm(config: ProjectConfig, credential_store: CredentialStore | None = None) -> LLMClient:
+    """Use the configured OpenAI-compatible provider when a key is stored, else EchoLLM.
+
+    Keyring lookups are best-effort: any backend error (e.g. no keyring available)
+    is treated as "no credential" so the offline EchoLLM path always works.
+    """
+    store = credential_store if credential_store is not None else CredentialStore()
+    try:
+        api_key = store.get_key(config.llm.provider)
+    except Exception:
+        api_key = None
+    if api_key:
+        return OpenAICompatibleChatAdapter(
+            base_url=config.llm.base_url, model=config.llm.model, api_key=api_key
+        )
+    return EchoLLM()
+
+
+def _interactive_approver(call: ToolCall, decision: PolicyDecision) -> bool:
+    """Prompt the user to approve a risky tool call in an interactive session."""
+    console.print(f"[approval needed] {call.tool_name}: {decision.reason}", markup=False)
+    return typer.confirm("Approve this action?", default=False)
+
+
+def build_agent(mode: SessionMode, llm: LLMClient | None = None, approval_handler=None) -> AgentLoop:
     """Build the default local agent loop for CLI commands."""
     config = load_project_config(Path.cwd())
     root = config.workspace.root
@@ -57,7 +81,7 @@ def build_agent(mode: SessionMode) -> AgentLoop:
     memory_store = MemoryStore(phycode_dir / "memory.jsonl")
     registry = build_default_registry(root, config.test.command, memory_store)
     return AgentLoop(
-        llm=EchoLLM(),
+        llm=llm if llm is not None else _build_llm(config),
         context_builder=ContextBuilder(session_store, memory_store),
         tool_runtime=ToolRuntime(registry),
         policy_context=PolicyContext(
@@ -68,6 +92,7 @@ def build_agent(mode: SessionMode) -> AgentLoop:
         trace_store=TraceStore(phycode_dir / "traces"),
         session_store=session_store,
         max_steps=config.agent.max_steps,
+        approval_handler=approval_handler,
     )
 
 
@@ -79,7 +104,7 @@ def version() -> None:
 
 @app.command()
 def run(task: str = typer.Argument(..., help="Task to run non-interactively")) -> None:
-    """Run a task once with the local EchoLLM-backed agent."""
+    """Run a task once. Uses the configured provider when a key is stored, else EchoLLM."""
     result = build_agent(SessionMode.NON_INTERACTIVE).run(task)
     if result.final_text is not None:
         console.print(redact_text(result.final_text), markup=False)
@@ -89,9 +114,9 @@ def run(task: str = typer.Argument(..., help="Task to run non-interactively")) -
 
 @app.command()
 def chat() -> None:
-    """Start an interactive local EchoLLM-backed session."""
+    """Start an interactive session. Uses the configured provider when a key is stored, else EchoLLM."""
     console.print("PhyCode interactive session. Type /exit to leave.")
-    loop = build_agent(SessionMode.INTERACTIVE)
+    loop = build_agent(SessionMode.INTERACTIVE, approval_handler=_interactive_approver)
     while True:
         user_input = typer.prompt("phycode")
         if user_input == "/exit":
@@ -100,7 +125,8 @@ def chat() -> None:
         if result.final_text is not None:
             console.print(redact_text(result.final_text), markup=False)
         if result.stopped_reason != "final":
-            raise typer.Exit(code=1)
+            # Report and keep the session alive rather than killing it on one bad turn.
+            console.print(f"[stopped: {result.stopped_reason}]", markup=False)
 
 
 @tools_app.command("list")

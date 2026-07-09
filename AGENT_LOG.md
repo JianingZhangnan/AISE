@@ -62,3 +62,12 @@
 - Task 12 记录：新增严格文档测试 `tests/test_docs_process.py`，要求 README 包含安装、运行、demo、key 管理、`uv run pytest`、`uvx pyright` 与安全边界；PLAN 标记 Task 10、Task 11、Task 12 完成；SPEC_PROCESS 记录 Task 10–12 收尾、严格 CLI 测试、最终验证命令和 review-ready 分支。
 - 主 agent 复核补充：在合并 subagent 产物后，发现 `chat` 为避免 EchoLLM 递归回显而改写 session event 的实现过绕，改为让 `EchoLLM` 在渲染后的上下文中优先 echo 当前 `User:` 行，并用 `tests/test_llm_adapters.py` 增加回归测试锁定该行为。
 - 验证范围：`uv run pytest tests/test_cli_commands.py tests/test_docs_process.py -v` 为 11 passed；`uv run pytest tests/test_cli_commands.py tests/test_llm_adapters.py tests/test_docs_process.py -v` 为 17 passed；`uv run pytest` 为 **93 passed**；`uvx pyright` 为 0 errors。真实 CLI smoke 覆盖 `phycode run "hello"`、`tools list`、`config read`、`demo guardrail|feedback|policy`、`keys status`。后续由 Claude 审核 `codex/task-10-12`，重点确认文档、CLI 测试和安全边界陈述一致。
+
+## 2026-07-09 Claude review 后的 run/chat 收口
+
+- Claude 审核 `codex/task-10-12` 结论：基于关系正确（= `fix/review-findings` + Task 10–12），未回退任何安全修复；`uv run pytest` 93 passed、`uvx pyright` 0 errors、真实 CLI（run/chat/keys）行为与脱敏均经实机核验通过。审出两处非阻塞局限，应用户要求「顺手修复」：
+  1. `run`/`chat` 原固定用 `EchoLLM`，真实供应商适配器未接入。修复：新增 `_build_llm(config, credential_store)`——配置了 key 时返回 `OpenAICompatibleChatAdapter`（真实交互），否则回退 `EchoLLM`；keyring 查询 best-effort，后端异常按「无凭据」处理，保证离线/无 keyring 环境仍走 EchoLLM。
+  2. `chat` 原在任一非 final 轮 `raise Exit(1)` 会杀死整个会话。修复：改为打印 `[stopped: <reason>]` 并继续会话。同时为交互式 `chat` 接入 `_interactive_approver`（`typer.confirm`），使真实适配器下的风险动作可被用户审批。
+- TDD：先加 4 个失败测试（`_build_llm` 无 key→Echo / 有 key→adapter、chat 非 final 存活、`_interactive_approver` 走 confirm），并给两个 echo 测试加 `_force_no_credentials`（monkeypatch `CredentialStore`）使其不受本机钥匙串状态影响；再实现变绿。
+- 验证：`uv run pytest` 为 **97 passed**；`uvx pyright` 为 0 errors；实机 `phycode run "hello again"` 无 key 时回退输出 `Echo: hello again`。
+- 合并：应用户要求，`codex/task-10-12` 以 fast-forward 合并到 `main` 并推送 `origin/main`（这批含全部评审修复 + Task 10–12 + 本次 run/chat 收口才首次落到主线）。
