@@ -22,6 +22,7 @@ CREDENTIAL_FILENAMES = {".env", ".env.local", "id_rsa", "id_ed25519"}
 SHELL_TOOLS = {"shell.run", "test.run"}
 SAFE_TOOLS = {
     "file.read",
+    "file.inspect",
     "file.list",
     "search.grep",
     "search.glob",
@@ -29,8 +30,11 @@ SAFE_TOOLS = {
     "config.read",
     "workspace.status",
     "keys.status",
+    "web.search",
+    "web.fetch",
+    "calculator.calculate",
 }
-RISKY_TOOLS = {"file.write", "file.edit", "memory.write", "config.write", "shell.run", "test.run"}
+RISKY_TOOLS = {"file.write", "file.edit", "memory.write", "config.write", "shell.run", "test.run", "image.inspect"}
 DANGEROUS_SHELL_PATTERNS = [
     # recursive/forced rm of a root-ish target (-rf, -fr, -r, -f ... / ~ * or bare .)
     re.compile(r"\brm\s+-[a-z]*[rf][a-z]*\s+(?:/|~|\*|\.(?:\s|$))", re.IGNORECASE),

@@ -88,7 +88,7 @@ def _feedback_loop(workspace_root: Path) -> AgentRunResult:
         rules=[
             ("ALL_PASS", finish),          # tests now pass -> stop
             ("return a + b", run_tests),   # fix applied -> re-run tests
-            ("'kind': 'test_failed'", fix_bug),  # failure observed -> change action
+            ('"kind": "test_failed"', fix_bug),  # failure observed -> change action
         ],
         default=run_tests,  # first action: run the tests
     )

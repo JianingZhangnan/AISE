@@ -10,7 +10,13 @@ from phycode.tools.file_tools import register_file_tools
 from phycode.trace import TraceStore
 
 
-def build_loop(tmp_path: Path, llm, approval_handler=None, max_steps: int = 5) -> AgentLoop:
+def build_loop(
+    tmp_path: Path,
+    llm,
+    approval_handler=None,
+    max_steps: int = 5,
+    max_tool_calls: int = 40,
+) -> AgentLoop:
     session = Session(workspace_root=str(tmp_path), mode=SessionMode.NON_INTERACTIVE)
     session_store = SessionStore(session)
     memory = MemoryStore(tmp_path / ".phycode" / "memory.jsonl")
@@ -24,6 +30,7 @@ def build_loop(tmp_path: Path, llm, approval_handler=None, max_steps: int = 5) -
         trace_store=TraceStore(tmp_path / ".phycode" / "traces"),
         session_store=session_store,
         max_steps=max_steps,
+        max_tool_calls=max_tool_calls,
         approval_handler=approval_handler,
     )
 
@@ -48,6 +55,34 @@ def test_agent_routes_tool_call_and_then_final(tmp_path: Path):
     assert any(event.type == AgentEventType.FEEDBACK_SIGNAL for event in result.events)
 
 
+def test_agent_preserves_original_user_input_after_tool_turn(tmp_path: Path):
+    (tmp_path / "README.md").write_text("hello", encoding="utf-8")
+
+    class RecordingTwoTurnLLM:
+        def __init__(self) -> None:
+            self.messages = []
+
+        def generate(self, messages, tools):
+            del tools
+            self.messages.append(messages)
+            if len(self.messages) == 1:
+                return [
+                    AgentEvent(
+                        session_id="rec",
+                        type=AgentEventType.TOOL_CALL_REQUESTED,
+                        payload={"tool_name": "file.read", "args": {"path": "README.md"}},
+                    )
+                ]
+            return [AgentEvent(session_id="rec", type=AgentEventType.ASSISTANT_FINAL, payload={"text": "done"})]
+
+    llm = RecordingTwoTurnLLM()
+    result = build_loop(tmp_path, llm).run("original task")
+
+    assert result.stopped_reason == "final"
+    assert len(llm.messages) == 2
+    assert "User: original task" in str(llm.messages[1])
+
+
 AUTO_APPROVE = lambda call, decision: True  # noqa: E731
 
 
@@ -56,8 +91,8 @@ def _fix_bug_rules() -> list:
     failing = [{"type": "tool_call_requested", "payload": {"tool_name": "file.edit", "args": {"path": "bug.py", "old": "DOES_NOT_EXIST", "new": "x"}}}]
     done = [{"type": "assistant_final", "payload": {"text": "fixed"}}]
     return [
-        ("'kind': 'success'", done),
-        ("'kind': 'tool_error'", corrective),
+        ('"kind": "success"', done),
+        ('"kind": "tool_error"', corrective),
         ("__default__", failing),
     ]
 
@@ -74,7 +109,7 @@ def test_reactive_llm_output_depends_on_feedback():
     baseline = llm.generate([{"role": "user", "content": "please fix"}], [])
     assert baseline[0].payload["args"]["old"] == "DOES_NOT_EXIST"
     # Once a tool_error feedback appears the model changes its next action.
-    reacted = llm.generate([{"role": "user", "content": "recent events: 'kind': 'tool_error'"}], [])
+    reacted = llm.generate([{"role": "user", "content": 'recent events: "kind": "tool_error"'}], [])
     assert reacted[0].payload["args"]["old"] == "value = 0"
 
 
@@ -103,6 +138,67 @@ def test_agent_loop_stops_on_repeated_failure(tmp_path: Path):
     loop = build_loop(tmp_path, llm, approval_handler=AUTO_APPROVE, max_steps=20)
     result = loop.run("keep failing")
     assert result.stopped_reason == "repeated_failure"
+
+
+def test_agent_loop_finalizes_on_repeated_successful_action(tmp_path: Path):
+    (tmp_path / "README.md").write_text("same", encoding="utf-8")
+    repeated = [
+        {"type": "tool_call_requested", "payload": {"tool_name": "file.read", "args": {"path": "README.md"}}}
+    ]
+    final = [{"type": "assistant_final", "payload": {"text": "same"}}]
+    result = build_loop(tmp_path, ScriptedLLM([repeated, repeated, repeated, final]), max_steps=10).run("read")
+
+    assert result.stopped_reason == "final"
+    assert result.final_text == "same"
+    requests = [event for event in result.events if event.type == AgentEventType.TOOL_CALL_REQUESTED]
+    assert len(requests) == 3
+
+
+def test_agent_loop_warns_then_finalizes_without_tools_at_budget(tmp_path: Path):
+    (tmp_path / "README.md").write_text("abcdef", encoding="utf-8")
+    turns = [
+        [
+            {
+                "type": "tool_call_requested",
+                "payload": {"tool_name": "file.read", "args": {"path": "README.md", "offset": offset}},
+            }
+        ]
+        for offset in range(4)
+    ]
+    turns.append([{"type": "assistant_final", "payload": {"text": "best supported answer"}}])
+    result = build_loop(tmp_path, ScriptedLLM(turns), max_steps=10, max_tool_calls=4).run("research")
+
+    assert result.stopped_reason == "final"
+    assert result.final_text == "best supported answer"
+    requests = [event for event in result.events if event.type == AgentEventType.TOOL_CALL_REQUESTED]
+    assert len(requests) == 4
+    assert any(event.payload.get("kind") == "tool_budget_near_limit" for event in result.events)
+
+
+def test_tool_budget_finalization_prompt_disables_more_tool_calls(tmp_path: Path):
+    class RecordingBudgetLLM:
+        def __init__(self) -> None:
+            self.messages = []
+
+        def generate(self, messages, tools):
+            self.messages.append((messages, tools))
+            if len(self.messages) == 1:
+                return [
+                    AgentEvent(
+                        session_id="rec",
+                        type=AgentEventType.TOOL_CALL_REQUESTED,
+                        payload={"tool_name": "file.read", "args": {"path": "README.md"}},
+                    )
+                ]
+            return [AgentEvent(session_id="rec", type=AgentEventType.ASSISTANT_FINAL, payload={"text": "answer"})]
+
+    (tmp_path / "README.md").write_text("evidence", encoding="utf-8")
+    llm = RecordingBudgetLLM()
+    result = build_loop(tmp_path, llm, max_tool_calls=1).run("question")
+
+    assert result.final_text == "answer"
+    assert llm.messages[1][1] == []
+    assert "Tool use is now disabled" in str(llm.messages[1][0])
 
 
 def test_agent_loop_passes_tool_specs_to_llm(tmp_path: Path):

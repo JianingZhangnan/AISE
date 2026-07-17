@@ -62,6 +62,11 @@ class SessionMode(str, Enum):
     NON_INTERACTIVE = "non_interactive"
 
 
+class AgentProfile(str, Enum):
+    CODING = "coding"
+    GAIA = "gaia"
+
+
 class AgentEvent(BaseModel):
     id: str = Field(default_factory=lambda: new_id("evt"))
     session_id: str

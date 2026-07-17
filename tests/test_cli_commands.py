@@ -115,7 +115,7 @@ def test_run_command_exits_nonzero_when_agent_does_not_finish(monkeypatch):
         def run(self, user_input: str) -> AgentRunResult:
             return AgentRunResult(final_text=None, events=[], stopped_reason="max_steps")
 
-    monkeypatch.setattr(cli, "build_agent", lambda mode: NonFinalLoop())
+    monkeypatch.setattr(cli, "build_agent", lambda *a, **k: NonFinalLoop())
 
     result = runner.invoke(app, ["run", "unfinished"])
 
@@ -139,9 +139,11 @@ def test_tools_list_exposes_complete_default_registry():
 
     assert result.exit_code == 0
     expected_tools = {
+        "calculator.calculate",
         "config.read",
         "config.write",
         "file.edit",
+        "file.inspect",
         "file.list",
         "file.read",
         "file.write",
@@ -153,11 +155,34 @@ def test_tools_list_exposes_complete_default_registry():
         "shell.run",
         "test.run",
         "workspace.status",
+        "web.fetch",
+        "web.search",
     }
     listed = {line.split()[0] for line in result.stdout.splitlines() if line.strip()}
     assert expected_tools <= listed
     assert any(line.split()[:2] == ["shell.run", "risky"] for line in result.stdout.splitlines())
     assert any(line.split()[:2] == ["file.read", "safe"] for line in result.stdout.splitlines())
+
+
+def test_gaia_profile_only_exposes_research_tools(tmp_path, monkeypatch):
+    from phycode.cli import build_agent
+    from phycode.llm import EchoLLM
+    from phycode.models import AgentProfile, SessionMode
+
+    monkeypatch.chdir(tmp_path)
+    loop = build_agent(SessionMode.NON_INTERACTIVE, llm=EchoLLM(), profile=AgentProfile.GAIA)
+    names = {spec.name for spec in loop.tool_runtime.registry.list_specs()}
+
+    assert names == {
+        "calculator.calculate",
+        "file.inspect",
+        "file.list",
+        "file.read",
+        "web.fetch",
+        "web.search",
+    }
+    assert "shell.run" not in names
+    assert "file.write" not in names
 
 
 def test_config_read_reports_project_file_values(tmp_path, monkeypatch):

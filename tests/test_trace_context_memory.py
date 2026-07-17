@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from phycode.context import ContextBuilder, MemoryStore, SessionStore
+from phycode.context import GAIA_SYSTEM_PROMPT, ContextBuilder, MemoryStore, SessionStore
 from phycode.models import AgentEvent, AgentEventType, MemoryCategory, MemoryEntry, Session, SessionMode
 from phycode.trace import TraceStore
 
@@ -67,3 +67,46 @@ def test_context_includes_recent_feedback_and_memory(tmp_path: Path):
     assert "Use uv run pytest" in rendered
     assert "one test failed" in rendered
     assert "fix it" in rendered
+
+
+def test_context_preserves_question_and_both_ends_of_large_tool_output(tmp_path: Path):
+    session = Session(workspace_root=str(tmp_path), mode=SessionMode.NON_INTERACTIVE)
+    session_store = SessionStore(session)
+    session_store.add_event(
+        AgentEvent(
+            session_id=session.id,
+            type=AgentEventType.TOOL_CALL_OUTPUT,
+            payload={"status": "ok", "stdout": "IMPORTANT TABLE\n" + ("x" * 10_000) + "\nLATEST END"},
+        )
+    )
+    session_store.add_event(
+        AgentEvent(
+            session_id=session.id,
+            type=AgentEventType.FEEDBACK_SIGNAL,
+            payload={"kind": "success", "summary": "tool succeeded"},
+        )
+    )
+
+    messages = ContextBuilder(
+        session_store=session_store,
+        memory_store=MemoryStore(tmp_path / "memory.jsonl"),
+        max_chars=4_000,
+    ).build("ORIGINAL QUESTION")
+    rendered = str(messages[1]["content"])
+
+    assert "IMPORTANT TABLE" in rendered
+    assert "LATEST END" in rendered
+    assert "ORIGINAL QUESTION" in rendered
+    assert len(rendered) <= 4_000
+
+
+def test_context_accepts_gaia_system_prompt(tmp_path: Path):
+    session = Session(workspace_root=str(tmp_path), mode=SessionMode.NON_INTERACTIVE)
+    messages = ContextBuilder(
+        session_store=SessionStore(session),
+        memory_store=MemoryStore(tmp_path / "memory.jsonl"),
+        system_prompt=GAIA_SYSTEM_PROMPT,
+    ).build("research this")
+
+    assert messages[0]["content"] == GAIA_SYSTEM_PROMPT
+    assert "general AI assistant" in str(messages[0]["content"])

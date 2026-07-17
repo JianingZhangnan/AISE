@@ -23,6 +23,9 @@ class LLMConfig(BaseModel):
     provider: str = "openai-compatible"
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-4.1-mini"
+    vision_model: str | None = None
+    timeout_seconds: float = Field(default=120.0, gt=0)
+    max_retries: int = Field(default=2, ge=0)
 
 
 class ProjectConfig(BaseModel):

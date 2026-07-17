@@ -1,11 +1,34 @@
 from __future__ import annotations
 
+import base64
 import json
+import queue
+import re
+import threading
+from hashlib import sha256
+from io import BytesIO
+from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from phycode.models import AgentEvent, AgentEventType, ToolSpec
 
 ReactiveTrigger = Callable[[str], bool]
+_PROVIDER_TOOL_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9_-]")
+_MAX_PROVIDER_TOOL_NAME_LENGTH = 64
+
+
+def _provider_tool_aliases(tools: list[ToolSpec]) -> tuple[dict[str, str], dict[str, str]]:
+    original_to_alias: dict[str, str] = {}
+    alias_to_original: dict[str, str] = {}
+    for spec in tools:
+        base = _PROVIDER_TOOL_NAME_PATTERN.sub("_", spec.name) or "tool"
+        alias = base[:_MAX_PROVIDER_TOOL_NAME_LENGTH]
+        if alias in alias_to_original and alias_to_original[alias] != spec.name:
+            suffix = sha256(spec.name.encode("utf-8")).hexdigest()[:8]
+            alias = f"{base[:_MAX_PROVIDER_TOOL_NAME_LENGTH - len(suffix) - 1]}_{suffix}"
+        original_to_alias[spec.name] = alias
+        alias_to_original[alias] = spec.name
+    return original_to_alias, alias_to_original
 
 
 class LLMClient(Protocol):
@@ -85,23 +108,61 @@ class FailingLLM:
 
 
 class OpenAICompatibleChatAdapter:
-    def __init__(self, base_url: str, model: str, api_key: str, client: Any | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        api_key: str,
+        client: Any | None = None,
+        vision_model: str | None = None,
+        timeout_seconds: float = 120.0,
+        max_retries: int = 2,
+    ) -> None:
         self.base_url = base_url
         self.model = model
+        self.vision_model = vision_model
+        self.timeout_seconds = timeout_seconds
+        self.max_retries = max_retries
         if client is not None:
             self.client = client
             return
 
         from openai import OpenAI
 
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout_seconds,
+            max_retries=max_retries,
+        )
+
+    def _call_with_deadline(self, call: Callable[[], Any]) -> Any:
+        results: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+        def invoke() -> None:
+            try:
+                results.put((True, call()))
+            except Exception as exc:
+                results.put((False, exc))
+
+        threading.Thread(target=invoke, daemon=True, name="phycode-provider-call").start()
+        try:
+            succeeded, value = results.get(timeout=self.timeout_seconds)
+        except queue.Empty as exc:
+            raise TimeoutError(f"Provider call exceeded {self.timeout_seconds:g} seconds") from exc
+        if not succeeded:
+            if isinstance(value, BaseException):
+                raise value
+            raise RuntimeError(str(value))
+        return value
 
     def generate(self, messages: list[dict[str, object]], tools: list[ToolSpec]) -> list[AgentEvent]:
+        original_to_alias, alias_to_original = _provider_tool_aliases(tools)
         tool_payload = [
             {
                 "type": "function",
                 "function": {
-                    "name": spec.name,
+                    "name": original_to_alias[spec.name],
                     "description": spec.description,
                     "parameters": spec.input_schema,
                 },
@@ -112,7 +173,7 @@ class OpenAICompatibleChatAdapter:
         if tool_payload:
             kwargs["tools"] = tool_payload
 
-        response = self.client.chat.completions.create(**kwargs)
+        response = self._call_with_deadline(lambda: self.client.chat.completions.create(**kwargs))
         message = response.choices[0].message
         events: list[AgentEvent] = []
         content = getattr(message, "content", None)
@@ -129,10 +190,43 @@ class OpenAICompatibleChatAdapter:
                 AgentEvent(
                     session_id="provider",
                     type=AgentEventType.TOOL_CALL_REQUESTED,
-                    payload={"provider_call_id": tool_call.id, "tool_name": function.name, "args": args},
+                    payload={
+                        "provider_call_id": tool_call.id,
+                        "tool_name": alias_to_original.get(function.name, function.name),
+                        "args": args,
+                    },
                 )
             )
 
         if not events:
             return [AgentEvent(session_id="provider", type=AgentEventType.INCOMPLETE, payload={"reason": "empty provider response"})]
         return events
+
+    def inspect_image(self, path: Path, prompt: str) -> str:
+        from PIL import Image, ImageOps
+
+        with Image.open(path) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            image.thumbnail((1600, 1600))
+            buffer = BytesIO()
+            image.save(buffer, format="JPEG", quality=82, optimize=True)
+        data_url = "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+        response = self._call_with_deadline(
+            lambda: self.client.chat.completions.create(
+                model=self.vision_model or self.model,
+                max_tokens=2_000,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": data_url, "detail": "high"}},
+                        ],
+                    }
+                ],
+            )
+        )
+        content = getattr(response.choices[0].message, "content", None)
+        if not content:
+            raise RuntimeError("vision provider returned no text")
+        return str(content)

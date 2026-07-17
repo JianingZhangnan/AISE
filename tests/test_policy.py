@@ -19,6 +19,12 @@ def test_file_edit_requires_approval(tmp_path: Path):
     assert decision.requires_user is True
 
 
+def test_image_inspection_requires_approval(tmp_path: Path):
+    call = ToolCall(tool_name="image.inspect", args={"path": "photo.jpg"})
+    decision = PolicyEngine().decide(call, PolicyContext(workspace_root=tmp_path, allowlist=[], interactive=False))
+    assert decision.decision == PolicyAction.ASK
+
+
 def test_path_escape_is_rejected(tmp_path: Path):
     with pytest.raises(WorkspaceViolation):
         resolve_workspace_path("../secret.txt", PolicyContext(workspace_root=tmp_path, allowlist=[], interactive=True))
