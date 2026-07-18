@@ -45,6 +45,20 @@ def test_prbench_run_help_exposes_required_paths():
     assert "--approvals" in result.stdout
 
 
+def test_main_cli_mounts_the_single_prbench_eval_app():
+    import phycode.cli as cli
+    import phycode.prbench_eval as prbench_eval
+
+    assert cli.prbench_app is prbench_eval.prbench_app
+
+    module_help = runner.invoke(prbench_eval.prbench_app, ["run", "--help"])
+    main_help = runner.invoke(cli.app, ["prbench", "run", "--help"])
+    assert module_help.exit_code == main_help.exit_code == 0
+    for option in ("--workspace", "--contract", "--approvals", "--max-tool-calls"):
+        assert option in module_help.stdout
+        assert option in main_help.stdout
+
+
 def test_prbench_cli_prints_only_safe_summary_and_uses_result_exit_code(
     tmp_path, monkeypatch
 ):

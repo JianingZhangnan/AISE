@@ -478,13 +478,148 @@ def test_process_request_projection_hides_executable_args_and_workspace_from_tra
         path.read_text(encoding="utf-8")
         for path in (tmp_path / ".phycode/prbench/traces").glob("*.jsonl")
     )
-    combined = trace + json.dumps(llm.messages[1])
+    combined = (trace + json.dumps(llm.messages[1])).replace("\\\\", "\\")
     assert str(Path(sys.executable).resolve()) not in combined
     assert sensitive_arg not in combined
     assert str(tmp_path) not in combined
     assert Path(sys.executable).name in combined
     assert "reproduce.py" in combined
     assert "[REDACTED_ARG]" in combined
+
+
+def test_success_trace_and_context_recursively_project_workspace_paths(tmp_path: Path) -> None:
+    contract, approvals = write_public_task_files(tmp_path, approvals=False)
+    script = (
+        "from pathlib import Path\n"
+        "Path('result.csv').write_text('message\\nhello\\n', encoding='utf-8')\n"
+    )
+    argv = [sys.executable, "reproduce.py"]
+    absolute_cwd = str(tmp_path.resolve())
+    approvals.write_text(
+        json.dumps(
+            {
+                "grants": [
+                    {"tool_name": "file.write", "path": "reproduce.py"},
+                    {"tool_name": "process.run", "argv": argv, "cwd": absolute_cwd},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class SuccessfulRecorder:
+        def __init__(self) -> None:
+            self.messages = []
+
+        def generate(self, messages, tools):
+            del tools
+            self.messages.append(messages)
+            if len(self.messages) == 1:
+                events = [
+                    {
+                        "type": "tool_call_requested",
+                        "payload": {
+                            "tool_name": "file.write",
+                            "args": {"path": "reproduce.py", "content": script},
+                        },
+                    }
+                ]
+            elif len(self.messages) == 2:
+                events = [
+                    {
+                        "type": "tool_call_requested",
+                        "payload": {
+                            "tool_name": "process.run",
+                            "args": {"argv": argv, "cwd": absolute_cwd},
+                        },
+                    }
+                ]
+            else:
+                events = [{"type": "assistant_final", "payload": {"text": "done"}}]
+            return ScriptedLLM([events]).generate([], [])
+
+    llm = SuccessfulRecorder()
+
+    result = run_prbench(tmp_path, contract, approvals, llm=llm, max_tool_calls=4)
+
+    assert result.status == PRBenchRunStatus.COMPLETED
+    trace_events = [
+        json.loads(line)
+        for path in (tmp_path / ".phycode/prbench/traces").glob("*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    combined = (json.dumps(trace_events) + json.dumps(llm.messages)).replace("\\\\", "\\")
+    assert absolute_cwd not in combined
+    process_request = next(
+        event
+        for event in trace_events
+        if event["type"] == "tool_call_requested"
+        and event["payload"].get("tool_name") == "process.run"
+    )
+    assert process_request["payload"]["args"]["cwd"] == "."
+    file_output = next(
+        event
+        for event in trace_events
+        if event["type"] == "tool_call_output"
+        and str(event["payload"].get("stdout", "")).startswith("wrote ")
+    )
+    assert file_output["payload"]["stdout"] == "wrote reproduce.py"
+    file_feedback = next(
+        event
+        for event in trace_events
+        if event["type"] == "feedback_signal"
+        and str(event["payload"].get("evidence", {}).get("stdout", "")).startswith("wrote ")
+    )
+    assert file_feedback["payload"]["evidence"]["stdout"] == "wrote reproduce.py"
+
+
+def test_recursive_event_projection_redacts_external_absolute_path_fields(tmp_path: Path) -> None:
+    from phycode.event_projection import project_agent_event
+    from phycode.models import AgentEvent, AgentEventType
+
+    outside = (tmp_path.parent / "outside-secret.txt").resolve()
+    event = AgentEvent(
+        session_id="projection-test",
+        type=AgentEventType.ERROR,
+        payload={"nested": {"path": str(outside)}},
+    )
+
+    projected = project_agent_event(event, tmp_path.resolve())
+
+    assert projected.payload["nested"]["path"] == "[REDACTED_PATH]"
+
+
+def test_fatal_verifier_at_tool_budget_maps_to_artifact_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import phycode.prbench_eval as prbench_eval
+
+    contract, approvals = write_text_task_files(tmp_path)
+
+    def fail_verify(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("sk-fatal-verifier-secret-123456789")
+
+    monkeypatch.setattr(prbench_eval.ArtifactVerifier, "verify", fail_verify)
+    llm = ScriptedLLM(
+        [
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.read",
+                        "args": {"path": "instruction.md"},
+                    },
+                }
+            ]
+        ]
+    )
+
+    result = run_prbench(tmp_path, contract, approvals, llm=llm, max_tool_calls=1)
+
+    assert result.status == PRBenchRunStatus.ARTIFACT_VERIFICATION_FAILED
+    assert result.exit_code != 0
+    assert "fatal-verifier-secret" not in result.model_dump_json()
 
 
 def test_early_policy_failure_then_success_does_not_pollute_final_artifact_status(

@@ -264,6 +264,13 @@ class AgentLoop:
         assert verification.feedback_event is not None
         self._record(verification.feedback_event)
         all_events.append(verification.feedback_event)
+        if verification.fatal:
+            return AgentRunResult(
+                None,
+                all_events,
+                "artifact_verification_failed",
+                "artifact_verification_failed",
+            )
         return AgentRunResult(
             None,
             all_events,

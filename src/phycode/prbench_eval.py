@@ -422,16 +422,16 @@ def prbench_result_lines(result: PRBenchRunResult) -> tuple[str, ...]:
     return tuple(lines)
 
 
-module_app = typer.Typer(help="Run a verified public PRBench task")
+prbench_app = typer.Typer(help="Run a verified public PRBench task")
 
 
-@module_app.callback()
-def module_root() -> None:
+@prbench_app.callback()
+def prbench_root() -> None:
     """PRBench runner module entry point."""
 
 
-@module_app.command("run")
-def module_run(
+@prbench_app.command("run")
+def prbench_run(
     workspace: Path = typer.Option(..., help="PRBench task workspace"),
     contract: Path = typer.Option(..., help="Public task contract JSON"),
     approvals: Path = typer.Option(..., help="Exact one-time approval manifest JSON"),
@@ -449,4 +449,4 @@ def module_run(
 
 
 if __name__ == "__main__":
-    module_app()
+    prbench_app()

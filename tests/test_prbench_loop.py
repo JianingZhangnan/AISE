@@ -645,3 +645,34 @@ def test_repeated_policy_block_returns_structured_terminal_blocker(tmp_path: Pat
 
     assert result.stopped_reason == "repeated_failure"
     assert result.terminal_blocker == "policy_blocked"
+
+
+def test_fatal_verifier_overrides_tool_budget_blocker(tmp_path: Path) -> None:
+    (tmp_path / "instruction.md").write_text("public", encoding="utf-8")
+    llm = ScriptedLLM(
+        [
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.read",
+                        "args": {"path": "instruction.md"},
+                    },
+                }
+            ]
+        ]
+    )
+
+    def fatal_verifier() -> VerificationResult:
+        raise RuntimeError("verifier unavailable")
+
+    result = _build_loop(
+        tmp_path,
+        llm,
+        expected_files=("result.txt",),
+        completion_verifier=fatal_verifier,
+        max_tool_calls=1,
+    ).run("inspect public input")
+
+    assert result.stopped_reason == "artifact_verification_failed"
+    assert result.terminal_blocker == "artifact_verification_failed"

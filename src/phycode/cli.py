@@ -10,6 +10,7 @@ from phycode.config import load_project_config
 from phycode.credentials import CredentialStore
 from phycode.demos import run_feedback_demo, run_guardrail_demo, run_policy_demo
 from phycode.models import AgentProfile, PolicyDecision, SessionMode, ToolCall
+from phycode.prbench_eval import prbench_app
 from phycode.redaction import redact_text
 
 app = typer.Typer(help="PhyCode coding agent harness")
@@ -17,7 +18,6 @@ tools_app = typer.Typer(help="Inspect registered tools")
 app.add_typer(tools_app, name="tools")
 config_app = typer.Typer(help="Read and write non-sensitive configuration")
 keys_app = typer.Typer(help="Manage provider credentials")
-prbench_app = typer.Typer(help="Run verified public PRBench tasks")
 app.add_typer(config_app, name="config")
 app.add_typer(keys_app, name="keys")
 app.add_typer(prbench_app, name="prbench")
@@ -121,23 +121,3 @@ def demo(name: str = typer.Argument(..., help="guardrail | feedback | policy")) 
         console.print("Unknown demo. Use guardrail, feedback, or policy.")
         raise typer.Exit(code=2)
     console.print(runner(root))
-
-
-@prbench_app.command("run")
-def prbench_run(
-    workspace: Path = typer.Option(..., help="PRBench task workspace"),
-    contract: Path = typer.Option(..., help="Public task contract JSON"),
-    approvals: Path = typer.Option(..., help="Exact one-time approval manifest JSON"),
-    max_tool_calls: int | None = typer.Option(None, min=1, help="Tool-call budget override"),
-) -> None:
-    from phycode.prbench_eval import prbench_result_lines, run_prbench
-
-    result = run_prbench(
-        workspace,
-        contract,
-        approvals,
-        max_tool_calls=max_tool_calls,
-    )
-    for line in prbench_result_lines(result):
-        console.print(redact_text(line), markup=False)
-    raise typer.Exit(code=result.exit_code)
