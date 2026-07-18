@@ -98,7 +98,7 @@ class PolicyEngine:
         if "path" in call.args:
             path = str(call.args["path"])
             try:
-                context.visibility.resolve(path)
+                resolved_path = context.visibility.resolve(path)
             except VisibilityViolation as exc:
                 hidden_path = exc.hidden
                 return PolicyDecision(
@@ -111,7 +111,9 @@ class PolicyEngine:
                         else "Path is outside the workspace allowlist"
                     ),
                 )
-            if call.tool_name.startswith("file.") and is_credential_path(path):
+            if call.tool_name.startswith("file.") and (
+                is_credential_path(path) or is_credential_path(str(resolved_path))
+            ):
                 return PolicyDecision(
                     tool_call_id=call.id,
                     decision=PolicyAction.DENY,

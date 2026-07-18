@@ -49,6 +49,43 @@ def test_visibility_rejects_directory_symlink_during_search(tmp_path: Path) -> N
     assert not visibility.is_visible(link / "sentinel.txt")
 
 
+def test_policy_blocks_visible_symlink_alias_to_resolved_credential(tmp_path: Path) -> None:
+    credential = tmp_path / ".env"
+    credential.write_text("TEST_ONLY=value", encoding="utf-8")
+    alias = tmp_path / "public.txt"
+    try:
+        alias.symlink_to(credential)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+
+    decision = PolicyEngine().decide(
+        ToolCall(tool_name="file.read", args={"path": "public.txt"}),
+        PolicyContext(tmp_path, [], False),
+    )
+
+    assert decision.decision == PolicyAction.DENY
+    assert decision.rule_id == "credential.read_blocked"
+
+
+def test_policy_classifies_resolved_credential_target_at_visibility_boundary(tmp_path: Path, monkeypatch) -> None:
+    resolved_credential = tmp_path / ".env"
+    original_resolve = PathVisibilityPolicy.resolve
+
+    def resolve_alias(policy: PathVisibilityPolicy, path: str | Path) -> Path:
+        if str(path) == "public.txt":
+            return resolved_credential
+        return original_resolve(policy, path)
+
+    monkeypatch.setattr(PathVisibilityPolicy, "resolve", resolve_alias)
+    decision = PolicyEngine().decide(
+        ToolCall(tool_name="file.read", args={"path": "public.txt"}),
+        PolicyContext(tmp_path, [], False),
+    )
+
+    assert decision.decision == PolicyAction.DENY
+    assert decision.rule_id == "credential.read_blocked"
+
+
 def test_prbench_policy_denies_explicit_hidden_path(tmp_path: Path) -> None:
     context = PolicyContext(
         tmp_path,
