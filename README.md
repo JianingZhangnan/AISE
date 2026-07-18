@@ -98,11 +98,15 @@ uv run phycode prbench run `
 脚本不接收 key 文件路径，不创建 `.env`，也不回显 provider 值。白色 agent 使用
 `PHYCODE_*`；绿色 model-judge 通过临时 `OPENCODE_API_KEY`、
 `OPENCODE_BASE_URL` 和 `OPENCODE_MODEL=openai/<PHYCODE_MODEL>` 使用相同 endpoint，
-官方 resolver 会把 custom URL 的模型前缀转为 `openai_compat/`。adapter 提交
-`6f5d75d` 会把这些 green-only 值排除在共享容器 `Config.Env` 之外；白色阶段的
-容器进程看不到它们，直到白色 runner 结束后，绿色 grading child 才通过 name-only
-Docker 环境参数取得临时值。宿主脚本的 `finally` 会精确恢复调用前已有的
-`OPENCODE_*`；原本不存在的变量通过 `Remove-Item Env:` 真正删除，不留下空变量。
+官方 resolver 会把 custom URL 的模型前缀转为 `openai_compat/`。从 adapter 提交
+`6f5d75d` 延续的隔离机制会把这些 green-only 值排除在共享容器 `Config.Env`
+之外；白色阶段的容器进程
+看不到它们，直到白色 runner 结束后，绿色 grading child 才通过 name-only Docker
+环境参数取得临时值。custom provider registry 只通过 child-only
+`OPENCODE_CONFIG_CONTENT` 注入，key 使用 `{env:OPENAI_API_KEY}` 占位符，不进入
+JSON、argv 或持久配置；兼容 provider 包则在无凭据的 setup 阶段预装。宿主脚本的
+`finally` 会精确恢复调用前已有的 `OPENCODE_*`；原本不存在的变量通过
+`Remove-Item Env:` 真正删除，不留下空变量。
 
 初始审批 JSON **只**包含一个目标 reproduction 文件的 `file.write`：
 `reproduction/hello.py` 或 `reproduction/alphabet.py`。脚本生成前不会预授权

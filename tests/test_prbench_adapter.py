@@ -560,6 +560,7 @@ def test_official_phycode_setup_defers_green_credentials_until_grading(
 ) -> None:
     calls: list[str] = []
     instances: list[object] = []
+    opencode_install_options: list[bool] = []
 
     class FakeDockerEnvironment:
         def __init__(self, **kwargs: object) -> None:
@@ -578,7 +579,8 @@ def test_official_phycode_setup_defers_green_credentials_until_grading(
         def check_phycode_health(self) -> bool:
             return True
 
-        def install_opencode(self) -> bool:
+        def install_opencode(self, install_openai_compatible: bool = False) -> bool:
+            opencode_install_options.append(install_openai_compatible)
             return True
 
         def check_opencode_health(self) -> bool:
@@ -611,6 +613,7 @@ def test_official_phycode_setup_defers_green_credentials_until_grading(
 
     assert calls == []
     assert instances[-1].env_vars == {}  # type: ignore[attr-defined]
+    assert opencode_install_options[-1] is True
 
     setup(config, "task", "workspace", "claude", "opencode")  # type: ignore[operator]
 
@@ -619,6 +622,65 @@ def test_official_phycode_setup_defers_green_credentials_until_grading(
         "CLAUDE_TOKEN": "claude-secret",
         "OPENCODE_TOKEN": "opencode-secret",
     }
+    assert opencode_install_options[-1] is False
+
+
+@pytest.mark.parametrize(
+    ("adapter_exit", "expected_success"),
+    [(0, True), (23, False)],
+)
+def test_official_deferred_opencode_setup_installs_adapter_without_persistent_provider(
+    patched_official_evaluator: Path,
+    adapter_exit: int,
+    expected_success: bool,
+) -> None:
+    docker_environment = _load_class(
+        patched_official_evaluator / "src/my_util/docker_manager.py",
+        "DockerEnvironment",
+        {
+            "APIError": type("FakeAPIError", (Exception,), {}),
+            "docker": types.SimpleNamespace(from_env=lambda: None),
+            "json": json,
+            "logger": types.SimpleNamespace(
+                info=lambda *_: None,
+                warning=lambda *_: None,
+                error=lambda *_: None,
+            ),
+            "os": os,
+        },
+    )
+    environment = object.__new__(docker_environment)  # type: ignore[arg-type]
+    environment.container = object()
+    environment.env_vars = {}
+    environment.host_uid = 1000
+    environment.host_gid = 1000
+    commands: list[str] = []
+
+    def exec_command(command: str, timeout: int | None = None) -> dict[str, object]:
+        del timeout
+        commands.append(command)
+        exit_code = (
+            adapter_exit
+            if "npm install @ai-sdk/openai-compatible" in command
+            else 0
+        )
+        return {"exit_code": exit_code, "stdout": "opencode 1.18.3", "stderr": ""}
+
+    environment.exec_command = exec_command
+
+    assert (
+        environment.install_opencode(install_openai_compatible=True)
+        is expected_success
+    )
+
+    adapter_installs = [
+        command
+        for command in commands
+        if "npm install @ai-sdk/openai-compatible" in command
+    ]
+    assert len(adapter_installs) == 1
+    assert all("green-sensitive-value" not in command for command in commands)
+    assert not any("EOFCFG" in command for command in commands)
 
 
 @pytest.mark.parametrize(
@@ -1687,6 +1749,23 @@ def test_official_green_grading_uses_child_only_environment_and_always_clears_it
         assert child_env["OPENAI_API_KEY"] == "green-sensitive-value"
         assert child_env["OPENAI_BASE_URL"] == "https://green-sensitive.invalid/v1"
         assert child_env["OPENCODE_MODEL"] == "openai_compat/green-model"
+        inline_config = child_env["OPENCODE_CONFIG_CONTENT"]
+        assert isinstance(inline_config, str)
+        assert "green-sensitive-value" not in inline_config
+        assert json.loads(inline_config) == {
+            "model": "openai_compat/green-model",
+            "provider": {
+                "openai_compat": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "OpenAI Compatible",
+                    "options": {
+                        "baseURL": "https://green-sensitive.invalid/v1",
+                        "apiKey": "{env:OPENAI_API_KEY}",
+                    },
+                    "models": {"green-model": {}},
+                }
+            },
+        }
         if outcome == "oserror":
             raise OSError("docker spawn failed")
         if outcome == "timeout":
@@ -1729,15 +1808,20 @@ def test_official_green_grading_uses_child_only_environment_and_always_clears_it
     ]
     assert env_values
     assert all("=" not in value for value in env_values)
-    assert {"HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENCODE_MODEL"}.issubset(
-        env_values
-    )
+    assert env_values == [
+        "HOME",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENCODE_MODEL",
+        "OPENCODE_CONFIG_CONTENT",
+    ]
 
     child_env = captured["env"]
     assert isinstance(child_env, dict)
     assert "OPENAI_API_KEY" not in child_env
     assert "OPENAI_BASE_URL" not in child_env
     assert "OPENCODE_MODEL" not in child_env
+    assert "OPENCODE_CONFIG_CONTENT" not in child_env
     assert resolved_mappings
     assert all(mapping == {} for mapping in resolved_mappings)
 

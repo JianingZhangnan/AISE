@@ -262,14 +262,19 @@ index c705de8..49a4cb5 100644
 +                raise RuntimeError("PhyCode CLI verification failed in Docker")
 +            logger.info("Docker: PhyCode ready.")
 +        elif agent_type == "codex":
-@@ -322,0 +475,3 @@ async def launch_evaluation(
+@@ -295 +447,3 @@ def setup_docker_environment(
+-            success = docker_env.install_opencode()
++            success = docker_env.install_opencode(
++                install_openai_compatible=defer_green_env and agent_type == green_agent_type
++            )
+@@ -322,0 +477,3 @@ async def launch_evaluation(
 +    phycode_contract: str | None = None,
 +    phycode_approvals: str | None = None,
 +    approval_wait_seconds: int = 0,
-@@ -325 +480 @@ async def launch_evaluation(
+@@ -325 +482 @@ async def launch_evaluation(
 -):
 +) -> bool:
-@@ -337,0 +493,9 @@ async def launch_evaluation(
+@@ -337,0 +495,9 @@ async def launch_evaluation(
 +    if not 0 <= approval_wait_seconds <= 900:
 +        raise ValueError("approval wait seconds must be between 0 and 900")
 +    if effective_green_type == "phycode":
@@ -279,13 +284,13 @@ index c705de8..49a4cb5 100644
 +    phycode_provider_env = (
 +        resolve_env("phycode") if effective_white_type == "phycode" else {}
 +    )
-@@ -357 +521 @@ async def launch_evaluation(
+@@ -357 +523 @@ async def launch_evaluation(
 -        return
 +        return False
-@@ -362 +526 @@ async def launch_evaluation(
+@@ -362 +528 @@ async def launch_evaluation(
 -        return
 +        return False
-@@ -374,0 +539,10 @@ async def launch_evaluation(
+@@ -374,0 +541,10 @@ async def launch_evaluation(
 +    report_path = os.path.join(workspace_dir, "eval_logs", "eval_report.json")
 +    run_result_path = os.path.join(
 +        workspace_dir, ".phycode", "prbench", "run_result.json"
@@ -296,7 +301,7 @@ index c705de8..49a4cb5 100644
 +    if effective_white_type == "phycode":
 +        _remove_stale_output(workspace_dir, run_result_path)
 +
-@@ -393,0 +568,10 @@ async def launch_evaluation(
+@@ -393,0 +570,10 @@ async def launch_evaluation(
 +    if effective_white_type == "phycode":
 +        _copy_phycode_controls(
 +            task_config,
@@ -307,23 +312,23 @@ index c705de8..49a4cb5 100644
 +            code_only,
 +        )
 +
-@@ -397,0 +582 @@ async def launch_evaluation(
+@@ -397,0 +584 @@ async def launch_evaluation(
 +    evaluation_succeeded = False
-@@ -420 +605,2 @@ async def launch_evaluation(
+@@ -420 +607,2 @@ async def launch_evaluation(
 -            args=("prbench_green_agent", green_host, green_port, container_id, effective_green_type),
 +            args=("prbench_green_agent", green_host, green_port, container_id,
 +                  effective_green_type, effective_white_type == "phycode"),
-@@ -423 +609 @@ async def launch_evaluation(
+@@ -423 +611 @@ async def launch_evaluation(
 -        p_green.start()
 +        _start_without_phycode_environment(p_green)
-@@ -427 +613 @@ async def launch_evaluation(
+@@ -427 +615 @@ async def launch_evaluation(
 -            return
 +            return False
-@@ -436 +622,2 @@ async def launch_evaluation(
+@@ -436 +624,2 @@ async def launch_evaluation(
 -                  workspace_dir, container_id, effective_white_type),
 +                  workspace_dir, container_id, effective_white_type,
 +                  phycode_provider_env, approval_wait_seconds),
-@@ -439 +626,7 @@ async def launch_evaluation(
+@@ -439 +628,7 @@ async def launch_evaluation(
 -        p_white.start()
 +        if effective_white_type == "phycode":
 +            run_with_phycode_cleanup(
@@ -332,21 +337,21 @@ index c705de8..49a4cb5 100644
 +            )
 +        else:
 +            _start_without_phycode_environment(p_white)
-@@ -443 +636 @@ async def launch_evaluation(
+@@ -443 +638 @@ async def launch_evaluation(
 -            return
 +            return False
-@@ -466,0 +660 @@ async def launch_evaluation(
+@@ -466,0 +662 @@ async def launch_evaluation(
 +        send_succeeded = False
-@@ -469,0 +664 @@ async def launch_evaluation(
+@@ -469,0 +666 @@ async def launch_evaluation(
 +            send_succeeded = True
-@@ -478,4 +673,2 @@ async def launch_evaluation(
+@@ -478,4 +675,2 @@ async def launch_evaluation(
 -        report_path = os.path.join(workspace_dir, "eval_logs", "eval_report.json")
 -        if os.path.exists(report_path):
 -            with open(report_path, "r") as f:
 -                report = json.load(f)
 +        report_valid, report = _load_verified_json(workspace_dir, report_path)
 +        if report_valid:
-@@ -488,0 +682,17 @@ async def launch_evaluation(
+@@ -488,0 +684,17 @@ async def launch_evaluation(
 +        phycode_succeeded = True
 +        if effective_white_type == "phycode":
 +            run_result_valid, run_result = _load_verified_json(
@@ -364,12 +369,12 @@ index c705de8..49a4cb5 100644
 +            send_succeeded and report_valid and phycode_succeeded
 +        )
 +
-@@ -534,0 +745 @@ async def launch_evaluation(
+@@ -534,0 +747 @@ async def launch_evaluation(
 +    return evaluation_succeeded
-@@ -558 +769 @@ async def batch_evaluate(
+@@ -558 +771 @@ async def batch_evaluate(
 -                await launch_evaluation(
 +                succeeded = await launch_evaluation(
-@@ -569 +780,4 @@ async def batch_evaluate(
+@@ -569 +782,4 @@ async def batch_evaluate(
 -                print(f"[BATCH] Completed: {task_id}", flush=True)
 +                if succeeded:
 +                    print(f"[BATCH] Completed: {task_id}", flush=True)
@@ -379,7 +384,8 @@ diff --git a/src/my_util/agent_env.py b/src/my_util/agent_env.py
 index d0ae5f5..df5064b 100644
 --- a/src/my_util/agent_env.py
 +++ b/src/my_util/agent_env.py
-@@ -14,0 +15,7 @@ import os
+@@ -14,0 +15,8 @@ import os
++import json
 +PHYCODE_PROVIDER_NAMES = (
 +    "PHYCODE_API_KEY",
 +    "PHYCODE_BASE_URL",
@@ -387,7 +393,7 @@ index d0ae5f5..df5064b 100644
 +)
 +
 +
-@@ -134,0 +142,52 @@ def resolve_opencode_env() -> dict[str, str]:
+@@ -134,0 +143,81 @@ def resolve_opencode_env() -> dict[str, str]:
 +def resolve_phycode_env() -> dict[str, str]:
 +    """Resolve only the provider variables consumed by the PhyCode runner."""
 +    env: dict[str, str] = {}
@@ -417,11 +423,40 @@ index d0ae5f5..df5064b 100644
 +        clear_phycode_environment(provider_env, process_env)
 +
 +
++def _build_opencode_config_content(provider_env: dict[str, str]) -> str:
++    """Build a child-only OpenCode provider registry without embedding its key."""
++    model = provider_env.get("OPENCODE_MODEL", "")
++    base_url = provider_env.get("OPENAI_BASE_URL", "")
++    if not base_url or not model.startswith("openai_compat/"):
++        return ""
++    model_name = model.split("/", 1)[1]
++    if not model_name:
++        return ""
++    return json.dumps({
++        "model": model,
++        "provider": {
++            "openai_compat": {
++                "npm": "@ai-sdk/openai-compatible",
++                "name": "OpenAI Compatible",
++                "options": {
++                    "baseURL": base_url,
++                    "apiKey": "{env:OPENAI_API_KEY}",
++                },
++                "models": {model_name: {}},
++            }
++        },
++    })
++
++
 +def build_green_child_environment(
 +    agent_type: str,
 +) -> tuple[list[str], dict[str, str], dict[str, str]]:
 +    """Build name-only Docker flags and one transient green child environment."""
 +    provider_env = resolve_env(agent_type)
++    if agent_type == "opencode":
++        config_content = _build_opencode_config_content(provider_env)
++        if config_content:
++            provider_env["OPENCODE_CONFIG_CONTENT"] = config_content
 +    process_env = os.environ.copy()
 +    process_env.update(provider_env)
 +    process_env["HOME"] = "/home/agent"
@@ -440,10 +475,10 @@ index d0ae5f5..df5064b 100644
 +    process_env.clear()
 +
 +
-@@ -138,0 +198,2 @@ def resolve_env(agent_type: str) -> dict[str, str]:
+@@ -138,0 +227,2 @@ def resolve_env(agent_type: str) -> dict[str, str]:
 +    if agent_type == "phycode":
 +        return resolve_phycode_env()
-@@ -149,0 +211,6 @@ def build_docker_exec_env_flags(agent_type: str) -> list[str]:
+@@ -149,0 +240,6 @@ def build_docker_exec_env_flags(agent_type: str) -> list[str]:
 +    if agent_type == "phycode":
 +        # Values are supplied only in the docker CLI child environment. They
 +        # never enter the host subprocess argv or the persistent container env.
@@ -581,7 +616,7 @@ index 9c1f2b4..3a0112a 100644
 +        result = self.exec_command(
 +            "uv pip install --system /tmp/phycode-0.1.0-py3-none-any.whl",
 +            timeout=300,
-@@ -114,0 +180,7 @@ class DockerEnvironment:
+@@ -114,0 +180,8 @@ class DockerEnvironment:
 +        return result["exit_code"] == 0
 +
 +    def check_phycode_health(self) -> bool:
@@ -590,6 +625,25 @@ index 9c1f2b4..3a0112a 100644
 +            return False
 +        return self.exec_command("phycode prbench run --help")["exit_code"] == 0
 +
+@@ -243 +317 @@ class DockerEnvironment:
+-    def install_opencode(self) -> bool:
++    def install_opencode(self, install_openai_compatible: bool = False) -> bool:
+@@ -333,8 +407,12 @@ class DockerEnvironment:
+-        # Pre-install @ai-sdk/openai-compatible if a custom provider is registered
+-        if "openai_compat" in providers:
++        # A deferred green provider has no credentials/config during setup, but
++        # its runtime-only OPENCODE_CONFIG_CONTENT still needs this adapter.
++        if install_openai_compatible or "openai_compat" in providers:
+             logger.info("  Installing @ai-sdk/openai-compatible...")
+-            self.exec_command(
++            adapter_install = self.exec_command(
+                 "cd /home/agent/.config/opencode && "
+                 "npm init -y > /dev/null 2>&1 && "
+                 "npm install @ai-sdk/openai-compatible > /dev/null 2>&1"
+             )
++            if install_openai_compatible and adapter_install["exit_code"] != 0:
++                logger.error("  Failed to install OpenCode compatible provider adapter")
++                return False
 diff --git a/src/white_agent/agent.py b/src/white_agent/agent.py
 index a1b41ff..db7a67e 100644
 --- a/src/white_agent/agent.py
