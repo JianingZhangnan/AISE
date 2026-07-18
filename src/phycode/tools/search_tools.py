@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
 from phycode.models import ToolCall, ToolResult, ToolRiskLevel, ToolSpec
 from phycode.policy import is_credential_path
 from phycode.tools.base import ToolRegistry
+from phycode.visibility import PathVisibilityPolicy, VisibilityViolation
 
 _SKIP_DIRS = {".git", ".phycode", ".venv", "__pycache__", "node_modules"}
 _MAX_MATCHES = 200
@@ -18,40 +20,51 @@ def _display(path: Path, root: Path) -> str:
         return str(path)
 
 
-def _within(path: Path, root: Path) -> bool:
-    return path == root or root in path.parents
-
-
-def _iter_files(base: Path) -> list[Path]:
+def _iter_files(base: Path, visibility: PathVisibilityPolicy) -> list[Path]:
     files: list[Path] = []
-    for path in sorted(base.rglob("*")):
-        if not path.is_file():
-            continue
-        if any(part in _SKIP_DIRS for part in path.relative_to(base).parts):
-            continue
-        if is_credential_path(str(path)):  # never read secrets back through grep
-            continue
-        files.append(path)
-    return files
+    for current, directory_names, file_names in os.walk(base):
+        current_path = Path(current)
+        directory_names[:] = sorted(
+            name
+            for name in directory_names
+            if name not in _SKIP_DIRS and visibility.is_visible(current_path / name)
+        )
+        for name in sorted(file_names):
+            path = current_path / name
+            if not visibility.is_visible(path):
+                continue
+            if not path.is_file() or is_credential_path(str(path)):
+                continue
+            files.append(path)
+    return sorted(files)
 
 
-def register_search_tools(registry: ToolRegistry, workspace_root: Path) -> None:
+def register_search_tools(
+    registry: ToolRegistry,
+    workspace_root: Path,
+    visibility: PathVisibilityPolicy | None = None,
+) -> None:
     root = workspace_root.resolve()
+    path_visibility = visibility if visibility is not None else PathVisibilityPolicy(root)
 
     def search_grep(call: ToolCall) -> ToolResult:
         try:
             pattern = re.compile(str(call.args["pattern"]))
         except re.error as exc:
             return ToolResult(tool_call_id=call.id, status="invalid_tool_args", stderr=f"bad regex: {exc}")
-        base = Path(call.args["path"]) if "path" in call.args else root
-        base = (base if base.is_absolute() else root / base).resolve()
+        try:
+            base = path_visibility.resolve(str(call.args["path"])) if "path" in call.args else root
+        except VisibilityViolation as exc:
+            return ToolResult(tool_call_id=call.id, status="policy_blocked", stderr=str(exc))
         if base.is_file():
-            files = [] if is_credential_path(str(base)) else [base]
+            files = [] if is_credential_path(str(base)) or not path_visibility.is_visible(base) else [base]
         else:
-            files = _iter_files(base)
+            files = _iter_files(base, path_visibility)
         matches: list[str] = []
         truncated = False
         for file in files:
+            if not path_visibility.is_visible(file):
+                continue
             try:
                 lines = file.read_text(encoding="utf-8").splitlines()
             except (UnicodeDecodeError, OSError):
@@ -71,10 +84,11 @@ def register_search_tools(registry: ToolRegistry, workspace_root: Path) -> None:
         pattern = str(call.args["pattern"])
         results: list[str] = []
         for match in root.glob(pattern):
-            if not match.is_file():
+            try:
+                resolved = path_visibility.resolve(match)
+            except VisibilityViolation:
                 continue
-            resolved = match.resolve()
-            if not _within(resolved, root):  # confine to the workspace, no ../ escape
+            if not resolved.is_file():
                 continue
             if is_credential_path(str(resolved)):
                 continue

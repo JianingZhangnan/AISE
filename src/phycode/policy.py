@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from phycode.models import PolicyAction, PolicyDecision, ToolCall
+from phycode.models import AgentProfile, PolicyAction, PolicyDecision, ToolCall
+from phycode.profiles import ProfileSpec, profile_spec
+from phycode.visibility import PathVisibilityPolicy, VisibilityViolation
 
 
 class WorkspaceViolation(ValueError):
@@ -16,6 +18,15 @@ class PolicyContext:
     workspace_root: Path
     allowlist: list[Path]
     interactive: bool
+    profile_spec: ProfileSpec = field(default_factory=lambda: profile_spec(AgentProfile.CODING))
+
+    @property
+    def visibility(self) -> PathVisibilityPolicy:
+        return PathVisibilityPolicy(
+            self.workspace_root,
+            self.allowlist,
+            self.profile_spec.hidden_path_components,
+        )
 
 
 CREDENTIAL_FILENAMES = {".env", ".env.local", "id_rsa", "id_ed25519"}
@@ -70,17 +81,11 @@ CREDENTIAL_SHELL_PATTERNS = [
 ]
 
 
-def _allowed_roots(context: PolicyContext) -> list[Path]:
-    return [context.workspace_root.resolve(), *[path.resolve() for path in context.allowlist]]
-
-
 def resolve_workspace_path(path: str, context: PolicyContext) -> Path:
-    raw_path = Path(path).expanduser()
-    candidate = raw_path.resolve() if raw_path.is_absolute() else (context.workspace_root / raw_path).resolve()
-    for root in _allowed_roots(context):
-        if candidate == root or root in candidate.parents:
-            return candidate
-    raise WorkspaceViolation(f"path escapes workspace: {path}")
+    try:
+        return context.visibility.resolve(path)
+    except VisibilityViolation as exc:
+        raise WorkspaceViolation(str(exc)) from exc
 
 
 def is_credential_path(path: str) -> bool:
@@ -93,13 +98,18 @@ class PolicyEngine:
         if "path" in call.args:
             path = str(call.args["path"])
             try:
-                resolve_workspace_path(path, context)
-            except WorkspaceViolation:
+                context.visibility.resolve(path)
+            except VisibilityViolation as exc:
+                hidden_path = exc.hidden
                 return PolicyDecision(
                     tool_call_id=call.id,
                     decision=PolicyAction.DENY,
-                    rule_id="workspace.path_escape",
-                    reason="Path is outside the workspace allowlist",
+                    rule_id="prbench.hidden_path_blocked" if hidden_path else "workspace.path_escape",
+                    reason=(
+                        "Path is hidden from the active profile"
+                        if hidden_path
+                        else "Path is outside the workspace allowlist"
+                    ),
                 )
             if call.tool_name.startswith("file.") and is_credential_path(path):
                 return PolicyDecision(

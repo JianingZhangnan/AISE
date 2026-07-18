@@ -65,6 +65,7 @@ class SessionMode(str, Enum):
 class AgentProfile(str, Enum):
     CODING = "coding"
     GAIA = "gaia"
+    PRBENCH = "prbench"
 
 
 class AgentEvent(BaseModel):

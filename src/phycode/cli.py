@@ -7,12 +7,13 @@ from rich.console import Console
 from phycode import __version__
 from phycode.agent import AgentLoop
 from phycode.config import ProjectConfig, load_project_config
-from phycode.context import CODING_SYSTEM_PROMPT, GAIA_SYSTEM_PROMPT, ContextBuilder, MemoryStore, SessionStore
+from phycode.context import ContextBuilder, MemoryStore, SessionStore
 from phycode.credentials import CredentialStore
 from phycode.demos import run_feedback_demo, run_guardrail_demo, run_policy_demo
 from phycode.llm import EchoLLM, LLMClient, OpenAICompatibleChatAdapter
 from phycode.models import AgentProfile, PolicyDecision, Session, SessionMode, ToolCall
 from phycode.policy import PolicyContext
+from phycode.profiles import profile_spec
 from phycode.redaction import redact_text
 from phycode.trace import TraceStore
 from phycode.tools import ToolRegistry
@@ -24,6 +25,7 @@ from phycode.tools.search_tools import register_search_tools
 from phycode.tools.shell_tools import register_shell_tools
 from phycode.tools.state_tools import register_state_tools
 from phycode.tools.web_tools import register_web_tools
+from phycode.visibility import PathVisibilityPolicy
 
 app = typer.Typer(help="PhyCode coding agent harness")
 tools_app = typer.Typer(help="Inspect registered tools")
@@ -33,17 +35,6 @@ keys_app = typer.Typer(help="Manage provider credentials")
 app.add_typer(config_app, name="config")
 app.add_typer(keys_app, name="keys")
 console = Console()
-GAIA_TOOL_NAMES = frozenset(
-    {
-        "calculator.calculate",
-        "file.inspect",
-        "file.list",
-        "file.read",
-        "image.inspect",
-        "web.fetch",
-        "web.search",
-    }
-)
 
 
 def build_default_registry(
@@ -51,6 +42,7 @@ def build_default_registry(
     test_command: str | None = None,
     memory_store: MemoryStore | None = None,
     vision_inspector=None,
+    visibility: PathVisibilityPolicy | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
     config = load_project_config(Path.cwd())
@@ -58,7 +50,7 @@ def build_default_registry(
     configured_test_command = test_command if test_command is not None else config.test.command
     register_file_tools(registry)
     register_calculator_tools(registry)
-    register_search_tools(registry, workspace_root=root)
+    register_search_tools(registry, workspace_root=root, visibility=visibility)
     register_shell_tools(registry, workspace_root=root, test_command=configured_test_command)
     register_state_tools(registry, workspace_root=root, memory_store=memory_store)
     register_web_tools(registry)
@@ -115,6 +107,7 @@ def build_agent(
     vision_inspector=None,
 ) -> AgentLoop:
     """Build the default local agent loop for CLI commands."""
+    spec = profile_spec(profile)
     config = load_project_config(Path.cwd())
     root = config.workspace.root
     phycode_dir = root / ".phycode"
@@ -124,27 +117,34 @@ def build_agent(
     configured_vision = vision_inspector
     if configured_vision is None and getattr(resolved_llm, "vision_model", None):
         configured_vision = getattr(resolved_llm, "inspect_image", None)
-    registry = build_default_registry(root, config.test.command, memory_store, configured_vision)
-    if profile == AgentProfile.GAIA:
-        registry = _registry_subset(registry, GAIA_TOOL_NAMES)
+    policy_context = PolicyContext(
+        workspace_root=root,
+        allowlist=config.workspace.allowlist,
+        interactive=mode == SessionMode.INTERACTIVE,
+        profile_spec=spec,
+    )
+    registry = build_default_registry(
+        root,
+        config.test.command,
+        memory_store,
+        configured_vision,
+        visibility=policy_context.visibility,
+    )
+    registry = _registry_subset(registry, spec.tool_names)
     return AgentLoop(
         llm=resolved_llm,
         context_builder=ContextBuilder(
             session_store,
             memory_store,
-            max_chars=24_000 if profile == AgentProfile.GAIA else 12_000,
-            system_prompt=GAIA_SYSTEM_PROMPT if profile == AgentProfile.GAIA else CODING_SYSTEM_PROMPT,
+            max_chars=spec.max_context_chars,
+            system_prompt=spec.system_prompt,
         ),
         tool_runtime=ToolRuntime(registry),
-        policy_context=PolicyContext(
-            workspace_root=root,
-            allowlist=config.workspace.allowlist,
-            interactive=mode == SessionMode.INTERACTIVE,
-        ),
+        policy_context=policy_context,
         trace_store=TraceStore(phycode_dir / "traces"),
         session_store=session_store,
         max_steps=config.agent.max_steps,
-        max_tool_calls=max_tool_calls if max_tool_calls is not None else (12 if profile == AgentProfile.GAIA else 40),
+        max_tool_calls=max_tool_calls if max_tool_calls is not None else spec.max_tool_calls,
         approval_handler=approval_handler,
     )
 
