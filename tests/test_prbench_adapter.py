@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import ast
+import importlib.util
 import json
 import os
 import subprocess
 import sys
+import types
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -100,6 +104,65 @@ def _added_hunks(path: str) -> tuple[str, ...]:
     if current:
         hunks.append("\n".join(current) + "\n")
     return tuple(hunks)
+
+
+@pytest.fixture
+def patched_official_evaluator(tmp_path: Path) -> Path:
+    """Apply the real adapter to a fresh fixed-commit evaluator checkout."""
+    source_value = os.environ.get("PHYCODE_PRBENCH_EVALUATOR_SOURCE")
+    if not source_value:
+        pytest.skip("set PHYCODE_PRBENCH_EVALUATOR_SOURCE for the official probe")
+
+    source = Path(source_value).resolve(strict=True)
+    repository = tmp_path / "official-evaluator"
+    subprocess.run(
+        ["git", "clone", "--quiet", str(source), str(repository)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheel = tmp_path / "phycode-0.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"dynamic-adapter-probe")
+    apply_adapter(repository, wheel)
+    return repository
+
+
+def _load_function(
+    source: Path, function_name: str, globals_: dict[str, object]
+) -> Callable[..., object]:
+    """Load one real function without importing the evaluator's optional stack."""
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == function_name
+    )
+    module = ast.Module(
+        body=[
+            ast.ImportFrom(
+                module="__future__",
+                names=[ast.alias(name="annotations")],
+                level=0,
+            ),
+            function,
+        ],
+        type_ignores=[],
+    )
+    ast.fix_missing_locations(module)
+    namespace = dict(globals_)
+    exec(compile(module, str(source), "exec"), namespace)
+    loaded = namespace[function_name]
+    assert callable(loaded)
+    return loaded
+
+
+def _load_agent_env(source: Path) -> types.ModuleType:
+    spec = importlib.util.spec_from_file_location("patched_agent_env", source)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_adapter_rejects_wrong_evaluator_commit(tmp_path: Path) -> None:
@@ -404,7 +467,7 @@ def test_patch_does_not_change_ground_truth_copy_order() -> None:
     assert "phycode prbench run" in patch
 
 
-def test_patch_changes_only_white_runtime_files() -> None:
+def test_patch_changes_only_required_runtime_files() -> None:
     patch = Path("integrations/prbench/phycode-evaluator.patch").read_text(
         encoding="utf-8"
     )
@@ -417,11 +480,229 @@ def test_patch_changes_only_white_runtime_files() -> None:
     assert changed_paths == {
         "main.py",
         "src/launcher.py",
+        "src/green_agent/agent.py",
         "src/my_util/agent_env.py",
         "src/my_util/docker_manager.py",
         "src/white_agent/agent.py",
     }
-    assert "src/green_agent/" not in patch
+
+
+def test_official_phycode_setup_defers_green_credentials_until_grading(
+    patched_official_evaluator: Path,
+) -> None:
+    calls: list[str] = []
+    instances: list[object] = []
+
+    class FakeDockerEnvironment:
+        def __init__(self, **kwargs: object) -> None:
+            self.env_vars = kwargs["env_vars"]
+            instances.append(self)
+
+        def start(self) -> None:
+            pass
+
+        def check_health(self) -> bool:
+            return True
+
+        def install_phycode(self) -> bool:
+            return True
+
+        def check_phycode_health(self) -> bool:
+            return True
+
+        def install_opencode(self) -> bool:
+            return True
+
+        def check_opencode_health(self) -> bool:
+            return True
+
+        def install_claude_code(self) -> bool:
+            return True
+
+        def check_claude_health(self) -> bool:
+            return True
+
+    def resolve_env(agent_type: str) -> dict[str, str]:
+        calls.append(agent_type)
+        return {f"{agent_type.upper()}_TOKEN": f"{agent_type}-secret"}
+
+    setup = _load_function(
+        patched_official_evaluator / "src/launcher.py",
+        "setup_docker_environment",
+        {
+            "DockerEnvironment": FakeDockerEnvironment,
+            "PROJECT_ROOT": str(patched_official_evaluator),
+            "logger": types.SimpleNamespace(info=lambda *_: None),
+            "os": os,
+            "resolve_env": resolve_env,
+        },
+    )
+    config = {"docker": {}}
+
+    setup(config, "task", "workspace", "phycode", "opencode")  # type: ignore[operator]
+
+    assert calls == []
+    assert instances[-1].env_vars == {}  # type: ignore[attr-defined]
+
+    setup(config, "task", "workspace", "claude", "opencode")  # type: ignore[operator]
+
+    assert set(calls) == {"claude", "opencode"}
+    assert instances[-1].env_vars == {  # type: ignore[attr-defined]
+        "CLAUDE_TOKEN": "claude-secret",
+        "OPENCODE_TOKEN": "opencode-secret",
+    }
+
+
+@pytest.mark.parametrize("outcome", ["success", "nonzero", "oserror", "timeout"])
+def test_official_green_grading_uses_child_only_environment_and_always_clears_it(
+    patched_official_evaluator: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    outcome: str,
+) -> None:
+    agent_env = _load_agent_env(
+        patched_official_evaluator / "src/my_util/agent_env.py"
+    )
+    resolved_mappings: list[dict[str, str]] = []
+    original_resolve = agent_env.resolve_env
+
+    def tracked_resolve(agent_type: str) -> dict[str, str]:
+        resolved = original_resolve(agent_type)
+        resolved_mappings.append(resolved)
+        return resolved
+
+    monkeypatch.setattr(agent_env, "resolve_env", tracked_resolve)
+    monkeypatch.setenv("OPENCODE_API_KEY", "green-sensitive-value")
+    monkeypatch.setenv("OPENCODE_BASE_URL", "https://green-sensitive.invalid/v1")
+    monkeypatch.setenv("OPENCODE_MODEL", "openai/green-model")
+
+    src_module = types.ModuleType("src")
+    src_module.__path__ = []  # type: ignore[attr-defined]
+    util_module = types.ModuleType("src.my_util")
+    util_module.__path__ = []  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "src", src_module)
+    monkeypatch.setitem(sys.modules, "src.my_util", util_module)
+    monkeypatch.setitem(sys.modules, "src.my_util.agent_env", agent_env)
+
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd: list[str], **kwargs: object) -> types.SimpleNamespace:
+        captured["cmd"] = cmd
+        captured["env"] = kwargs["env"]
+        child_env = kwargs["env"]
+        assert isinstance(child_env, dict)
+        assert child_env["OPENAI_API_KEY"] == "green-sensitive-value"
+        assert child_env["OPENAI_BASE_URL"] == "https://green-sensitive.invalid/v1"
+        assert child_env["OPENCODE_MODEL"] == "openai_compat/green-model"
+        if outcome == "oserror":
+            raise OSError("docker spawn failed")
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired(cmd, 600)
+        return types.SimpleNamespace(
+            returncode=17 if outcome == "nonzero" else 0,
+            stdout='{"overall_score": 1.0}',
+            stderr="nonzero" if outcome == "nonzero" else "",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    run_grading = _load_function(
+        patched_official_evaluator / "src/green_agent/agent.py",
+        "_run_grading",
+        {
+            "logger": types.SimpleNamespace(
+                info=lambda *_: None,
+                warning=lambda *_: None,
+                error=lambda *_: None,
+            ),
+            "os": os,
+            "_parse_grading_json": json.loads,
+        },
+    )
+    method = types.MethodType(run_grading, object())
+
+    if outcome == "oserror":
+        with pytest.raises(OSError, match="docker spawn failed"):
+            method("grade this", "container-id", str(tmp_path), "opencode", True)
+    else:
+        method("grade this", "container-id", str(tmp_path), "opencode", True)
+
+    command = captured["cmd"]
+    assert isinstance(command, list)
+    assert "green-sensitive-value" not in str(command)
+    env_values = [
+        command[index + 1]
+        for index, value in enumerate(command)
+        if value == "-e"
+    ]
+    assert env_values
+    assert all("=" not in value for value in env_values)
+    assert {"HOME", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENCODE_MODEL"}.issubset(
+        env_values
+    )
+
+    child_env = captured["env"]
+    assert isinstance(child_env, dict)
+    assert "OPENAI_API_KEY" not in child_env
+    assert "OPENAI_BASE_URL" not in child_env
+    assert "OPENCODE_MODEL" not in child_env
+    assert resolved_mappings
+    assert all(mapping == {} for mapping in resolved_mappings)
+
+
+def test_official_non_phycode_green_grading_retains_upstream_transport(
+    patched_official_evaluator: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    agent_env = _load_agent_env(
+        patched_official_evaluator / "src/my_util/agent_env.py"
+    )
+    monkeypatch.setenv("OPENCODE_API_KEY", "ordinary-combination-value")
+    monkeypatch.setenv("OPENCODE_MODEL", "openai/ordinary-model")
+
+    src_module = types.ModuleType("src")
+    src_module.__path__ = []  # type: ignore[attr-defined]
+    util_module = types.ModuleType("src.my_util")
+    util_module.__path__ = []  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "src", src_module)
+    monkeypatch.setitem(sys.modules, "src.my_util", util_module)
+    monkeypatch.setitem(sys.modules, "src.my_util.agent_env", agent_env)
+
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd: list[str], **kwargs: object) -> types.SimpleNamespace:
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout='{"overall_score": 1.0}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    run_grading = _load_function(
+        patched_official_evaluator / "src/green_agent/agent.py",
+        "_run_grading",
+        {
+            "logger": types.SimpleNamespace(
+                info=lambda *_: None,
+                warning=lambda *_: None,
+                error=lambda *_: None,
+            ),
+            "os": os,
+            "_parse_grading_json": json.loads,
+        },
+    )
+    method = types.MethodType(run_grading, object())
+
+    method("grade this", "container-id", str(tmp_path), "opencode", False)
+
+    command = captured["cmd"]
+    kwargs = captured["kwargs"]
+    assert isinstance(command, list)
+    assert isinstance(kwargs, dict)
+    assert "env" not in kwargs
+    assert "OPENAI_API_KEY=ordinary-combination-value" in command
 
 
 def test_patch_uses_explicit_controls_and_minimal_provider_environment() -> None:
@@ -472,13 +753,30 @@ def test_patch_does_not_persist_white_credentials_for_green() -> None:
         if line.startswith("+") and not line.startswith("+++")
     )
 
-    assert 'if t != "phycode":' in added
+    assert 'defer_green_env = white_agent_type == "phycode"' in added
+    assert 'defer_green_env and t == green_agent_type' in added
     assert "_start_without_phycode_environment" in added
     assert "process_env.update(self._provider_env)" in added
     assert "run_with_phycode_cleanup" in added
     assert "clear_phycode_environment" in added
     assert 'os.environ.pop(name, None)' in added
     assert 'env_vars.update(resolve_env("phycode"))' not in added
+
+
+def test_patch_green_environment_is_name_only_and_finally_cleared() -> None:
+    green = _patch_section("src/green_agent/agent.py")
+    helper = _patch_section("src/my_util/agent_env.py")
+
+    assert "build_green_child_environment" in green
+    assert 'run_env = {"env": green_process_env} if defer_provider_env else {}' in green
+    assert "**run_env" in green
+    assert "finally:" in green
+    assert "clear_green_child_environment" in green
+    assert 'effective_green_type, effective_white_type == "phycode"' in _patch_section(
+        "src/launcher.py"
+    )
+    assert 'env_flags.extend(["-e", name])' in helper
+    assert 'f"{key}={val}"' not in green
 
 
 def test_patch_cleanup_wrapper_clears_credentials_when_spawn_raises(

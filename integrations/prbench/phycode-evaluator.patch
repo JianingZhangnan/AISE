@@ -14,6 +14,67 @@ index 922d52e..2968a26 100644
 @@ -65,0 +68,2 @@ def launch(
 +        phycode_contract=phycode_contract,
 +        phycode_approvals=phycode_approvals,
+diff --git a/src/green_agent/agent.py b/src/green_agent/agent.py
+index 3874429..1bfd98b 100644
+--- a/src/green_agent/agent.py
++++ b/src/green_agent/agent.py
+@@ -450 +450,2 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+-    def __init__(self, docker_container_id: str | None = None, agent_type: str = "claude"):
++    def __init__(self, docker_container_id: str | None = None,
++                 agent_type: str = "claude", defer_provider_env: bool = False):
+@@ -452,0 +454 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
++        self.defer_provider_env = defer_provider_env
+@@ -597 +599,2 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+-                self._run_grading, grading_prompt, container_id, log_dir, self.agent_type
++                self._run_grading, grading_prompt, container_id, log_dir,
++                self.agent_type, self.defer_provider_env,
+@@ -636 +639,2 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+-                     log_dir: str, agent_type: str = "claude") -> dict:
++                     log_dir: str, agent_type: str = "claude",
++                     defer_provider_env: bool = False) -> dict:
+@@ -655,0 +660,8 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
++        green_provider_env: dict[str, str] = {}
++        green_process_env: dict[str, str] = {}
++        if defer_provider_env:
++            from src.my_util.agent_env import build_green_child_environment
++            env_flags, green_provider_env, green_process_env = (
++                build_green_child_environment(agent_type)
++            )
++
+@@ -657,2 +669,3 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+-            from src.my_util.agent_env import build_docker_exec_env_flags, resolve_env
+-            env_flags = build_docker_exec_env_flags(agent_type)
++            if not defer_provider_env:
++                from src.my_util.agent_env import build_docker_exec_env_flags
++                env_flags = build_docker_exec_env_flags(agent_type)
+@@ -680 +693,5 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+-                model = resolve_env("opencode").get("OPENCODE_MODEL", "")
++                if defer_provider_env:
++                    model = green_provider_env.get("OPENCODE_MODEL", "")
++                else:
++                    from src.my_util.agent_env import resolve_env
++                    model = resolve_env("opencode").get("OPENCODE_MODEL", "")
+@@ -723,2 +740,5 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+-                from src.my_util.agent_env import resolve_env as _resolve
+-                model = _resolve("opencode").get("OPENCODE_MODEL", "")
++                if defer_provider_env:
++                    model = green_provider_env.get("OPENCODE_MODEL", "")
++                else:
++                    from src.my_util.agent_env import resolve_env as _resolve
++                    model = _resolve("opencode").get("OPENCODE_MODEL", "")
+@@ -742,0 +763 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
++            run_env = {"env": green_process_env} if defer_provider_env else {}
+@@ -748,0 +770 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
++                **run_env,
+@@ -776,0 +799,4 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
++        finally:
++            if defer_provider_env:
++                from src.my_util.agent_env import clear_green_child_environment
++                clear_green_child_environment(green_provider_env, green_process_env)
+@@ -797,0 +824 @@ def start_green_agent(
++    defer_provider_env: bool = False,
+@@ -820,0 +848 @@ def start_green_agent(
++            defer_provider_env=defer_provider_env,
 diff --git a/src/launcher.py b/src/launcher.py
 index c705de8..b7417d5 100644
 --- a/src/launcher.py
@@ -115,17 +176,22 @@ index c705de8..b7417d5 100644
 +    if agent_type == "phycode":
 +        # Already persisted inside workspace/.phycode/prbench.
 +        return
-@@ -264 +355,2 @@ def setup_docker_environment(
+@@ -261 +352,3 @@ def setup_docker_environment(
+-    # Collect credentials for all needed agent types via centralized resolver
++    # A PhyCode white run must not expose green credentials to the shared
++    # container. The green child receives them only when grading begins.
++    defer_green_env = white_agent_type == "phycode"
+@@ -264 +357,2 @@ def setup_docker_environment(
 -        env_vars.update(resolve_env(t))
-+        if t != "phycode":
++        if t != "phycode" and not (defer_green_env and t == green_agent_type):
 +            env_vars.update(resolve_env(t))
-@@ -273,0 +366,5 @@ def setup_docker_environment(
+@@ -273,0 +368,5 @@ def setup_docker_environment(
 +        phycode_wheel=(
 +            os.path.join(PROJECT_ROOT, ".phycode-adapter", "phycode.whl")
 +            if "phycode" in needed_types
 +            else None
 +        ),
-@@ -285 +382,8 @@ def setup_docker_environment(
+@@ -285 +384,8 @@ def setup_docker_environment(
 -        if agent_type == "codex":
 +        if agent_type == "phycode":
 +            logger.info("Docker: Installing PhyCode wheel...")
@@ -135,10 +201,10 @@ index c705de8..b7417d5 100644
 +                raise RuntimeError("PhyCode CLI verification failed in Docker")
 +            logger.info("Docker: PhyCode ready.")
 +        elif agent_type == "codex":
-@@ -322,0 +427,2 @@ async def launch_evaluation(
+@@ -322,0 +429,2 @@ async def launch_evaluation(
 +    phycode_contract: str | None = None,
 +    phycode_approvals: str | None = None,
-@@ -337,0 +444,7 @@ async def launch_evaluation(
+@@ -337,0 +446,7 @@ async def launch_evaluation(
 +    if effective_green_type == "phycode":
 +        raise ValueError("PhyCode is supported only as the white task-solving agent")
 +    if effective_white_type == "phycode" and code_only:
@@ -146,7 +212,7 @@ index c705de8..b7417d5 100644
 +    phycode_provider_env = (
 +        resolve_env("phycode") if effective_white_type == "phycode" else {}
 +    )
-@@ -393,0 +507,10 @@ async def launch_evaluation(
+@@ -393,0 +509,10 @@ async def launch_evaluation(
 +    if effective_white_type == "phycode":
 +        _copy_phycode_controls(
 +            task_config,
@@ -157,14 +223,18 @@ index c705de8..b7417d5 100644
 +            code_only,
 +        )
 +
-@@ -423 +546 @@ async def launch_evaluation(
+@@ -420 +545,2 @@ async def launch_evaluation(
+-            args=("prbench_green_agent", green_host, green_port, container_id, effective_green_type),
++            args=("prbench_green_agent", green_host, green_port, container_id,
++                  effective_green_type, effective_white_type == "phycode"),
+@@ -423 +549 @@ async def launch_evaluation(
 -        p_green.start()
 +        _start_without_phycode_environment(p_green)
-@@ -436 +559,2 @@ async def launch_evaluation(
+@@ -436 +562,2 @@ async def launch_evaluation(
 -                  workspace_dir, container_id, effective_white_type),
 +                  workspace_dir, container_id, effective_white_type,
 +                  phycode_provider_env),
-@@ -439 +563,7 @@ async def launch_evaluation(
+@@ -439 +566,7 @@ async def launch_evaluation(
 -        p_white.start()
 +        if effective_white_type == "phycode":
 +            run_with_phycode_cleanup(
@@ -174,7 +244,7 @@ index c705de8..b7417d5 100644
 +        else:
 +            _start_without_phycode_environment(p_white)
 diff --git a/src/my_util/agent_env.py b/src/my_util/agent_env.py
-index d0ae5f5..be5ce69 100644
+index d0ae5f5..df5064b 100644
 --- a/src/my_util/agent_env.py
 +++ b/src/my_util/agent_env.py
 @@ -14,0 +15,7 @@ import os
@@ -185,7 +255,7 @@ index d0ae5f5..be5ce69 100644
 +)
 +
 +
-@@ -134,0 +142,29 @@ def resolve_opencode_env() -> dict[str, str]:
+@@ -134,0 +142,52 @@ def resolve_opencode_env() -> dict[str, str]:
 +def resolve_phycode_env() -> dict[str, str]:
 +    """Resolve only the provider variables consumed by the PhyCode runner."""
 +    env: dict[str, str] = {}
@@ -215,10 +285,33 @@ index d0ae5f5..be5ce69 100644
 +        clear_phycode_environment(provider_env, process_env)
 +
 +
-@@ -138,0 +175,2 @@ def resolve_env(agent_type: str) -> dict[str, str]:
++def build_green_child_environment(
++    agent_type: str,
++) -> tuple[list[str], dict[str, str], dict[str, str]]:
++    """Build name-only Docker flags and one transient green child environment."""
++    provider_env = resolve_env(agent_type)
++    process_env = os.environ.copy()
++    process_env.update(provider_env)
++    process_env["HOME"] = "/home/agent"
++
++    env_flags: list[str] = []
++    for name in ("HOME", *provider_env):
++        env_flags.extend(["-e", name])
++    return env_flags, provider_env, process_env
++
++
++def clear_green_child_environment(
++    provider_env: dict[str, str], process_env: dict[str, str],
++) -> None:
++    """Clear every mapping that temporarily held green-provider values."""
++    provider_env.clear()
++    process_env.clear()
++
++
+@@ -138,0 +198,2 @@ def resolve_env(agent_type: str) -> dict[str, str]:
 +    if agent_type == "phycode":
 +        return resolve_phycode_env()
-@@ -149,0 +188,6 @@ def build_docker_exec_env_flags(agent_type: str) -> list[str]:
+@@ -149,0 +211,6 @@ def build_docker_exec_env_flags(agent_type: str) -> list[str]:
 +    if agent_type == "phycode":
 +        # Values are supplied only in the docker CLI child environment. They
 +        # never enter the host subprocess argv or the persistent container env.

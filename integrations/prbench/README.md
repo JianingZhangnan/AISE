@@ -2,7 +2,8 @@
 
 该目录保存面向 `HET-AGI/PRBench-Eval-Handson` 固定提交
 `3e5bee4545cad2138832f06302e9c98bd81f5216` 的最小适配层。它只接入
-PhyCode 白色 agent，不修改绿色 grader、ground truth 复制时序或评分规则。
+PhyCode 白色 agent。对绿色 grader 的唯一改动是凭据传递生命周期；ground truth
+复制时序、评分提示、评分算法和结果解析均保持不变。
 
 应用器先精确核对 evaluator HEAD 和 wheel，再依次执行 `git apply --check`、
 `git apply`，最后把 wheel 放到 evaluator 的
@@ -37,11 +38,18 @@ adapter 在白色 agent 启动前把 contract、审批清单、公开 instructio
 `PHYCODE_BASE_URL` 与 `PHYCODE_MODEL`，白色运行结束后由官方流程继续评分。
 这些值不写入共享容器的持久环境，也不进入 `docker exec` argv；green 与 white
 子进程启动时均先从继承环境移除三项变量，只有 white 的 Docker CLI 子进程
-通过 name-only `-e` 临时取得值。启动后 host/provider 字典立即清空，green
-阶段只能看到官方 grader 自己的环境。
+通过 name-only `-e` 临时取得值。启动后 host/provider 字典立即清空。
 `multiprocessing.Process.start()` 或 `subprocess.Popen()` 抛错时也走同一个
 `finally` 清理路径，异常不会让 provider dict、child environment 或父进程
 `PHYCODE_*` 残留。
+
+当 white 为 PhyCode 时，green provider 的值同样不会写入共享容器的
+`Config.Env`，因此 white 阶段和容器内 `/proc/1/environ` 都不可见。只有 white
+结束且官方流程复制 ground truth 后，green 的 `_run_grading` 才解析一次 grader
+凭据，放入专属 `subprocess.run(..., env=...)` 临时映射；`docker exec` 只携带
+`-e NAME`，不携带 `NAME=value`。成功、非零退出、启动 `OSError` 和超时都会在
+`finally` 中清空 provider 与 child-environment 映射。非 PhyCode white/green
+组合仍沿用官方 evaluator 原有的共享环境行为。
 
 `public_contracts/` 中的两个 JSON 只服务公开最小 smoke；其他任务默认使用
 官方 `task.yaml` 的公开文件字段构造无数值约束 contract，最终数值准确度仍由
