@@ -40,6 +40,7 @@ class PolicyAction(str, Enum):
 
 class FeedbackKind(str, Enum):
     SUCCESS = "success"
+    ARTIFACT_VERIFICATION_FAILED = "artifact_verification_failed"
     COMMAND_FAILED = "command_failed"
     TEST_FAILED = "test_failed"
     POLICY_BLOCKED = "policy_blocked"

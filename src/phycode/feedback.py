@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from typing import Any
+
 from phycode.models import FeedbackKind, FeedbackSignal, ToolResult
+from phycode.redaction import redact_obj
 
 STATUS_TO_KIND = {
     "ok": FeedbackKind.SUCCESS,
@@ -35,6 +38,17 @@ def classify_feedback(result: ToolResult) -> list[FeedbackSignal]:
             )
         )
     return signals
+
+
+def artifact_verification_feedback(issues: list[dict[str, Any]]) -> FeedbackSignal:
+    evidence = redact_obj({"issues": issues})
+    return FeedbackSignal(
+        kind=FeedbackKind.ARTIFACT_VERIFICATION_FAILED,
+        summary="Required artifacts are incomplete or unverifiable",
+        evidence=evidence,
+        retryable=True,
+        suggested_next_step="Create, run, and inspect the missing reproduction artifacts",
+    )
 
 
 def _summary_for(kind: FeedbackKind, result: ToolResult) -> str:

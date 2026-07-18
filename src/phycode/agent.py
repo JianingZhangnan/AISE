@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 from phycode.context import ContextBuilder, SessionStore
-from phycode.feedback import classify_feedback
+from phycode.feedback import artifact_verification_feedback, classify_feedback
 from phycode.llm import LLMClient
 from phycode.models import AgentEvent, AgentEventType, ToolCall
 from phycode.policy import PolicyContext
@@ -29,6 +31,21 @@ class AgentRunResult:
     stopped_reason: str
 
 
+@dataclass(frozen=True)
+class _VerificationOutcome:
+    ok: bool
+    feedback_event: AgentEvent | None = None
+    fatal: bool = False
+
+
+class CompletionVerification(Protocol):
+    @property
+    def ok(self) -> bool: ...
+
+    @property
+    def issues(self) -> Sequence[Any]: ...
+
+
 class AgentLoop:
     def __init__(
         self,
@@ -43,6 +60,8 @@ class AgentLoop:
         max_repeated_failures: int = 3,
         max_repeated_actions: int = 3,
         max_tool_calls: int = 40,
+        completion_verifier: Callable[[], CompletionVerification] | None = None,
+        progress_fingerprint: Callable[[], str] | None = None,
     ) -> None:
         self.llm = llm
         self.context_builder = context_builder
@@ -55,6 +74,8 @@ class AgentLoop:
         self.max_repeated_failures = max_repeated_failures
         self.max_repeated_actions = max_repeated_actions
         self.max_tool_calls = max_tool_calls
+        self.completion_verifier = completion_verifier
+        self.progress_fingerprint = progress_fingerprint
 
     def run_once(self, user_input: str) -> AgentRunResult:
         return self.run(user_input)
@@ -65,7 +86,9 @@ class AgentLoop:
         specs = self.tool_runtime.registry.list_specs()
         failure_streak = 0
         last_failure_key: tuple[str, str] | None = None
-        action_result_counts: dict[str, int] = {}
+        last_action_result_key: str | None = None
+        consecutive_repeat_count = 0
+        last_progress_fingerprint: str | None = None
         tool_call_count = 0
         tool_budget_warning_at = max(1, self.max_tool_calls - 2)
 
@@ -85,8 +108,24 @@ class AgentLoop:
                 all_events.append(normalized)
 
                 if normalized.type == AgentEventType.ASSISTANT_FINAL:
-                    final_text = str(normalized.payload.get("text", ""))
-                    return AgentRunResult(final_text, all_events, "final")
+                    candidate_text = str(normalized.payload.get("text", ""))
+                    if self.completion_verifier is None:
+                        return AgentRunResult(candidate_text, all_events, "final")
+                    verification = self._verify_completion()
+                    if verification.ok:
+                        return AgentRunResult(candidate_text, all_events, "completed")
+                    assert verification.feedback_event is not None
+                    feedback_event = verification.feedback_event
+                    self._record(feedback_event)
+                    all_events.append(feedback_event)
+                    if verification.fatal:
+                        return AgentRunResult(None, all_events, "artifact_verification_failed")
+                    if _step + 1 >= self.max_steps:
+                        return AgentRunResult(None, all_events, "artifact_verification_failed")
+                    last_action_result_key = None
+                    consecutive_repeat_count = 0
+                    last_progress_fingerprint = None
+                    break
 
                 if normalized.type in _TERMINAL_EVENT_REASONS:
                     return AgentRunResult(final_text, all_events, _TERMINAL_EVENT_REASONS[normalized.type])
@@ -109,12 +148,47 @@ class AgentLoop:
                         self._record(budget_event)
                         all_events.append(budget_event)
                     if tool_call_count >= self.max_tool_calls:
+                        if self.completion_verifier is not None:
+                            verification = self._verify_completion()
+                            if verification.ok:
+                                return AgentRunResult(None, all_events, "completed")
+                            assert verification.feedback_event is not None
+                            feedback_event = verification.feedback_event
+                            self._record(feedback_event)
+                            all_events.append(feedback_event)
+                            return AgentRunResult(None, all_events, "artifact_verification_failed")
                         return self._finalize_from_evidence(user_input, all_events)
                     action_result_key = self._successful_action_result_key(normalized, tool_events)
                     if action_result_key is not None:
-                        action_result_counts[action_result_key] = action_result_counts.get(action_result_key, 0) + 1
-                        if action_result_counts[action_result_key] >= self.max_repeated_actions:
-                            return self._finalize_from_evidence(user_input, all_events)
+                        try:
+                            progress_fingerprint = (
+                                self.progress_fingerprint() if self.progress_fingerprint is not None else None
+                            )
+                        except Exception:
+                            error_event = self._new_event(
+                                AgentEventType.ERROR,
+                                {"message": "Progress fingerprint failed"},
+                            )
+                            self._record(error_event)
+                            all_events.append(error_event)
+                            return AgentRunResult(None, all_events, "error")
+                        if (
+                            action_result_key == last_action_result_key
+                            and progress_fingerprint == last_progress_fingerprint
+                        ):
+                            consecutive_repeat_count += 1
+                        else:
+                            consecutive_repeat_count = 1
+                        last_action_result_key = action_result_key
+                        last_progress_fingerprint = progress_fingerprint
+                        if consecutive_repeat_count >= self.max_repeated_actions:
+                            if self.progress_fingerprint is None:
+                                return self._finalize_from_evidence(user_input, all_events)
+                            return AgentRunResult(None, all_events, "repeated_no_progress")
+                    else:
+                        last_action_result_key = None
+                        consecutive_repeat_count = 0
+                        last_progress_fingerprint = None
                     failure_key = self._failure_key(normalized, tool_events)
                     if failure_key is None:
                         failure_streak = 0
@@ -124,7 +198,37 @@ class AgentLoop:
                         last_failure_key = failure_key
                         if failure_streak >= self.max_repeated_failures:
                             return AgentRunResult(final_text, all_events, "repeated_failure")
+        if self.completion_verifier is not None:
+            verification = self._verify_completion()
+            if verification.ok:
+                return AgentRunResult(None, all_events, "completed")
+            assert verification.feedback_event is not None
+            self._record(verification.feedback_event)
+            all_events.append(verification.feedback_event)
+            return AgentRunResult(None, all_events, "artifact_verification_failed")
         return AgentRunResult(final_text, all_events, "max_steps")
+
+    def _verify_completion(self) -> _VerificationOutcome:
+        assert self.completion_verifier is not None
+        try:
+            verification = self.completion_verifier()
+            if verification.ok:
+                return _VerificationOutcome(ok=True)
+            issues = [issue.model_dump(mode="json") for issue in verification.issues]
+        except Exception:
+            issues = [
+                {
+                    "code": "verifier_error",
+                    "path": "",
+                    "message": "Artifact verification could not be completed safely",
+                }
+            ]
+            signal = artifact_verification_feedback(issues)
+            event = self._new_event(AgentEventType.FEEDBACK_SIGNAL, signal.model_dump(mode="json"))
+            return _VerificationOutcome(ok=False, feedback_event=event, fatal=True)
+        signal = artifact_verification_feedback(issues)
+        event = self._new_event(AgentEventType.FEEDBACK_SIGNAL, signal.model_dump(mode="json"))
+        return _VerificationOutcome(ok=False, feedback_event=event)
 
     def _finalize_from_evidence(self, user_input: str, all_events: list[AgentEvent]) -> AgentRunResult:
         finalization_input = (
@@ -158,8 +262,11 @@ class AgentLoop:
         payload = {
             "tool_name": request.payload.get("tool_name"),
             "args": request.payload.get("args", {}),
-            "stdout": output.payload.get("stdout", ""),
-            "stderr": output.payload.get("stderr", ""),
+            "result": {
+                key: value
+                for key, value in output.payload.items()
+                if key != "tool_call_id"
+            },
         }
         encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
