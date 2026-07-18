@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ast
 import importlib.util
 import json
@@ -11,6 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+import typer
 
 # `integrations/` is intentionally not part of the distributable PhyCode wheel.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -138,6 +140,7 @@ def _load_function(
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.name == function_name
     )
+    function.decorator_list = []
     module = ast.Module(
         body=[
             ast.ImportFrom(
@@ -551,6 +554,176 @@ def test_official_phycode_setup_defers_green_credentials_until_grading(
         "CLAUDE_TOKEN": "claude-secret",
         "OPENCODE_TOKEN": "opencode-secret",
     }
+
+
+def test_official_launch_cli_exposes_and_bounds_approval_wait(
+    patched_official_evaluator: Path,
+) -> None:
+    main = patched_official_evaluator / "main.py"
+    cli_env = {
+        name: os.environ[name]
+        for name in ("PATH", "SYSTEMROOT", "TEMP", "TMP", "WINDIR")
+        if name in os.environ
+    }
+    cli_env["COLUMNS"] = "200"
+    help_result = subprocess.run(
+        [sys.executable, str(main), "launch", "--help"],
+        cwd=patched_official_evaluator,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=cli_env,
+    )
+
+    assert help_result.returncode == 0
+    assert "--approval-wait-seconds" in help_result.stdout
+
+    invalid_result = subprocess.run(
+        [sys.executable, str(main), "launch", "--approval-wait-seconds", "901"],
+        cwd=patched_official_evaluator,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=cli_env,
+    )
+
+    assert invalid_result.returncode != 0
+    assert "900" in invalid_result.stderr
+
+
+@pytest.mark.parametrize("approval_wait_seconds", [-1, 901])
+def test_official_launcher_rejects_invalid_approval_wait_before_container_setup(
+    patched_official_evaluator: Path,
+    approval_wait_seconds: int,
+) -> None:
+    launch_evaluation = _load_function(
+        patched_official_evaluator / "src/launcher.py",
+        "launch_evaluation",
+        {},
+    )
+
+    with pytest.raises(ValueError, match="approval wait"):
+        asyncio.run(
+            launch_evaluation(approval_wait_seconds=approval_wait_seconds)  # type: ignore[arg-type]
+        )
+
+
+def test_official_main_and_white_runner_pass_approval_wait_only_to_phycode(
+    patched_official_evaluator: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    launch_calls: list[dict[str, object]] = []
+
+    async def fake_launch_evaluation(**kwargs: object) -> None:
+        launch_calls.append(kwargs)
+
+    src_module = types.ModuleType("src")
+    src_module.__path__ = []  # type: ignore[attr-defined]
+    launcher_module = types.ModuleType("src.launcher")
+    launcher_module.launch_evaluation = fake_launch_evaluation  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "src", src_module)
+    monkeypatch.setitem(sys.modules, "src.launcher", launcher_module)
+
+    launch = _load_function(
+        patched_official_evaluator / "main.py",
+        "launch",
+        {"asyncio": asyncio, "typer": typer},
+    )
+    launch(
+        task_id="public-task",
+        green_port=0,
+        white_port=0,
+        code_only=False,
+        agent_type="claude",
+        white_agent_type="phycode",
+        green_agent_type="opencode",
+        phycode_contract="contract.json",
+        phycode_approvals="approvals.json",
+        approval_wait_seconds=900,
+        no_archive=True,
+        results_subdir=None,
+    )
+
+    assert launch_calls[0]["approval_wait_seconds"] == 900
+
+    agent_env_module = types.ModuleType("src.my_util.agent_env")
+    agent_env_module.build_docker_exec_env_flags = (  # type: ignore[attr-defined]
+        lambda _agent_type: ["-e", "HOME=/home/agent"]
+    )
+    agent_env_module.resolve_env = lambda _agent_type: {}  # type: ignore[attr-defined]
+
+    def run_with_cleanup(
+        action: Callable[[], object],
+        provider_env: dict[str, str],
+        process_env: dict[str, str],
+    ) -> object:
+        try:
+            return action()
+        finally:
+            provider_env.clear()
+            process_env.clear()
+
+    agent_env_module.run_with_phycode_cleanup = run_with_cleanup  # type: ignore[attr-defined]
+    util_module = types.ModuleType("src.my_util")
+    util_module.__path__ = []  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "src.my_util", util_module)
+    monkeypatch.setitem(sys.modules, "src.my_util.agent_env", agent_env_module)
+
+    commands: list[list[str]] = []
+
+    def fake_popen(cmd: list[str], **_kwargs: object) -> types.SimpleNamespace:
+        commands.append(cmd)
+        return types.SimpleNamespace(pid=1234)
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    class FakeEventQueue:
+        async def enqueue_event(self, _event: object) -> None:
+            pass
+
+    class FakeContext:
+        context_id = None
+
+        def get_user_input(self) -> str:
+            return "perform the public task"
+
+    class FakeRunningTask:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+    safe_os = types.SimpleNamespace(path=os.path, environ={}, makedirs=os.makedirs)
+    execute = _load_function(
+        patched_official_evaluator / "src/white_agent/agent.py",
+        "execute",
+        {
+            "RunningTask": FakeRunningTask,
+            "json": json,
+            "logger": types.SimpleNamespace(info=lambda *_: None, error=lambda *_: None),
+            "new_agent_text_message": lambda *args, **kwargs: (args, kwargs),
+            "os": safe_os,
+            "uuid": types.SimpleNamespace(
+                uuid4=lambda: types.SimpleNamespace(hex="12345678abcdef")
+            ),
+        },
+    )
+
+    for agent_type in ("phycode", "codex"):
+        executor = types.SimpleNamespace(
+            workspace_base=str(tmp_path),
+            docker_container_id="container-id",
+            agent_type=agent_type,
+            approval_wait_seconds=900,
+            _provider_env={"PHYCODE_API_KEY": "synthetic-value"},
+            _tasks={},
+        )
+        asyncio.run(
+            execute(executor, FakeContext(), FakeEventQueue())  # type: ignore[arg-type]
+        )
+
+    assert "--approval-wait-seconds 900" in commands[0][-1]
+    assert "synthetic-value" not in str(commands[0])
+    assert "--approval-wait-seconds" not in str(commands[1])
 
 
 @pytest.mark.parametrize("outcome", ["success", "nonzero", "oserror", "timeout"])

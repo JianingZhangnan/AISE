@@ -28,6 +28,10 @@ symlink，应用器同样 fail closed，不覆盖或解析旧目标。
 本次运行经人工审定的精确审批清单。未提供审批文件时，adapter 会写入
 `{"grants": []}`，使所有风险动作 fail closed；它不会根据 expected outputs
 自动生成授权，也不会假定模型采用某个脚本名。
+`--approval-wait-seconds` 控制 PhyCode 等待运行时审批的时间，默认 `0`，仅接受
+`0..900`；超界值会在创建容器前 fail closed。该数值经 launcher 和 white
+executor 原样传给容器内 `phycode prbench run`，不会追加到其他 white agent
+命令。需要人工处理动态审批的官方 smoke 使用 `900`。
 PhyCode 只注册为 full evaluation 的 white task-solving agent；把它选作 green
 agent 或与 `--code-only` 组合会在容器创建前 fail closed。
 
