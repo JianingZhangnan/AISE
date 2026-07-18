@@ -128,3 +128,38 @@
   `bbbtest_alphabet`。必须同时看到 runner `completed`、expected outputs、官方
   evaluator 报告且 trace/result 无 key/URL，才可记录为真实验收成功；mock、直接
   runner 或 adapter apply 成功均不能冒充官方结果。
+
+## 2026-07-18 Task 8 smoke 审批与环境恢复修复
+
+- Task 7 独立审查推翻了两项 smoke 编排假设。第一，reproduction 脚本尚未生成时
+  静态预授权 `process.run`，主 agent 无法履行“先读脚本再批准”的安全责任；初始
+  manifest 现只保留精确 `file.write`。第二，在 Windows/.NET 实测
+  `SetEnvironmentVariable(name, $null, 'Process')` 后 `Test-Path Env:name` 仍为
+  true，值变成空字符串而非变量消失；这会让后续 provider 解析误判配置存在。
+- 本轮使用 `systematic-debugging` 先复现根因：独立 probe 得到
+  `exists_after_null=True`、`value_is_null=False`。随后按 TDD 增加 fake-uv 动态测试，
+  覆盖 evaluator 成功/失败 × 调用前 OPENCODE 环境存在/不存在四种组合；RED 为
+  3 failed/8 passed，其中两个动态负例均以退出码 85 证明空变量残留。
+- 修复范围只包含 smoke 脚本、文档与 `tests/test_docs_process.py`，没有读取真实凭据、
+  没有调用真实 API/evaluator，也没有修改 adapter/core。原本不存在的
+  `OPENCODE_*` 现在用 `Remove-Item -LiteralPath Env:<name>` 真正删除；已有值精确
+  恢复，fake provider 值不进入 stdout/stderr。
+- 初始审批只允许一次 `reproduction/hello.py` 或
+  `reproduction/alphabet.py` 的 `file.write`。official launch 使用
+  `--approval-wait-seconds 900`；runner 写出
+  `.phycode/prbench/approval-request.json` 后，主 agent 必须读取脚本并核对
+  argv/cwd/`script_sha256`，再向 active workspace 的 `phycode-approvals.json` 写入
+  hash-bound 一次性 `process.run` grant。smoke 脚本不生成 process grant、不计算
+  hash，也不自动批准。
+- green 凭据生命周期由 adapter `6f5d75d` 保证：宿主别名不会进入共享容器
+  `Config.Env`，白色阶段不可见；白色结束后才为绿色 grading child 以 name-only
+  Docker 环境参数延迟注入并清理。
+- adapter wait 透传提交 `21ae28e` 已把 official
+  `main.py launch --approval-wait-seconds 900` 依次传入 launcher、white executor 和
+  容器内 `phycode prbench run --approval-wait-seconds 900`，边界校验为 0..900。
+- GREEN 验证：`uv run pytest tests/test_docs_process.py -v` 为 11 passed，其中
+  fake-uv 四组合全部通过；PowerShell AST 通过；共享 worktree 当时的全量
+  `uv run pytest` 为 399 passed/24 skipped，`uvx pyright` 为 0 errors；Task 8 五个
+  smoke/doc 文件的 diff check 通过，tracked credential scan 无输出。全量结果包含
+  core agent 尚未提交但测试已 GREEN 的 hash-guard 工作，最终整分支仍由主 agent
+  在 core 提交后统一复跑。

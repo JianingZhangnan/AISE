@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -123,20 +128,144 @@ def test_public_smoke_script_has_closed_credential_and_approval_contract():
         "opencode",
         "--phycode-contract",
         "--phycode-approvals",
+        "--approval-wait-seconds",
+        "900",
     ):
         assert argument in script
-    for exact_target in (
-        "reproduction/hello.py",
-        "reproduction/alphabet.py",
-        "/usr/local/bin/python",
-    ):
+    for exact_target in ("reproduction/hello.py", "reproduction/alphabet.py"):
         assert exact_target in script
     assert "expected_files" not in script
+    assert "process.run" not in script
+    assert "/usr/local/bin/python" not in script
+    assert "script_sha256" not in script
+    assert "Get-FileHash" not in script
     for variable in ("OPENCODE_API_KEY", "OPENCODE_BASE_URL", "OPENCODE_MODEL"):
         assert variable in script
     assert "$env:OPENCODE_API_KEY = $env:PHYCODE_API_KEY" in script
     assert "$env:OPENCODE_BASE_URL = $env:PHYCODE_BASE_URL" in script
     assert "$env:OPENCODE_MODEL = 'openai/' + $env:PHYCODE_MODEL" in script
-    assert "[Environment]::SetEnvironmentVariable($name, $null, 'Process')" in script
+    assert "Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue" in script
+    assert "[Environment]::SetEnvironmentVariable($name, $null, 'Process')" not in script
     assert not re.search(r"Write-(?:Host|Output).*\$env:", script, flags=re.IGNORECASE)
-    assert 'a2a-sdk[http-server]==0.3.8' in _read("README.md")
+    readme = _read("README.md")
+    assert 'a2a-sdk[http-server]==0.3.8' in readme
+    for runtime_approval_term in (
+        ".phycode/prbench/approval-request.json",
+        "script_sha256",
+        "phycode-approvals.json",
+        "Config.Env",
+        "6f5d75d",
+    ):
+        assert runtime_approval_term in readme
+
+
+@pytest.mark.parametrize("fake_uv_failure", [False, True])
+@pytest.mark.parametrize("preexisting_opencode", [False, True])
+def test_public_smoke_restores_or_removes_opencode_environment_with_fake_uv(
+    tmp_path: Path,
+    fake_uv_failure: bool,
+    preexisting_opencode: bool,
+) -> None:
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell is unavailable")
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "uv.cmd").write_text(
+        "@echo off\r\n"
+        "echo %* | findstr /C:\"apply_adapter.py\" >nul\r\n"
+        "if not errorlevel 1 exit /b 0\r\n"
+        "if not \"%OPENCODE_API_KEY%\"==\"fake-phycode-key\" exit /b 71\r\n"
+        "if not \"%OPENCODE_BASE_URL%\"==\"https://fake.invalid/v1\" exit /b 72\r\n"
+        "if not \"%OPENCODE_MODEL%\"==\"openai/fake-model\" exit /b 73\r\n"
+        "if \"%FAKE_UV_FAIL%\"==\"1\" exit /b 23\r\n"
+        "exit /b 0\r\n",
+        encoding="utf-8",
+    )
+    evaluator = tmp_path / "evaluator"
+    evaluator.mkdir()
+    wheel = tmp_path / "phycode-0.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"fake wheel")
+    wrapper = tmp_path / "invoke-smoke.ps1"
+    wrapper.write_text(
+        "param(\n"
+        "  [string]$SmokeScript, [string]$EvaluatorRoot, [string]$WheelPath,\n"
+        "  [string]$ExpectFailure, [string]$HadOriginal\n"
+        ")\n"
+        "$failed = $false\n"
+        "try {\n"
+        "  & $SmokeScript -EvaluatorRoot $EvaluatorRoot -WheelPath $WheelPath "
+        "-TaskIds aaatest_helloworld\n"
+        "}\n"
+        "catch { $failed = $true }\n"
+        "if ($failed -ne ($ExpectFailure -eq '1')) { exit 81 }\n"
+        "$names = @('OPENCODE_API_KEY','OPENCODE_BASE_URL','OPENCODE_MODEL')\n"
+        "if ($HadOriginal -eq '1') {\n"
+        "  if ($env:OPENCODE_API_KEY -ne 'original-key') { exit 82 }\n"
+        "  if ($env:OPENCODE_BASE_URL -ne 'https://original.invalid') { exit 83 }\n"
+        "  if ($env:OPENCODE_MODEL -ne 'openai/original-model') { exit 84 }\n"
+        "}\n"
+        "else {\n"
+        "  foreach ($name in $names) {\n"
+        "    if (Test-Path -LiteralPath ('Env:' + $name)) { exit 85 }\n"
+        "  }\n"
+        "}\n"
+        "Write-Output 'environment-restored'\n",
+        encoding="utf-8",
+    )
+
+    environment = os.environ.copy()
+    environment["PATH"] = str(fake_bin) + os.pathsep + environment["PATH"]
+    environment.update(
+        {
+            "PHYCODE_API_KEY": "fake-phycode-key",
+            "PHYCODE_BASE_URL": "https://fake.invalid/v1",
+            "PHYCODE_MODEL": "fake-model",
+            "FAKE_UV_FAIL": "1" if fake_uv_failure else "0",
+        }
+    )
+    originals = {
+        "OPENCODE_API_KEY": "original-key",
+        "OPENCODE_BASE_URL": "https://original.invalid",
+        "OPENCODE_MODEL": "openai/original-model",
+    }
+    for name, value in originals.items():
+        if preexisting_opencode:
+            environment[name] = value
+        else:
+            environment.pop(name, None)
+
+    completed = subprocess.run(
+        [
+            pwsh,
+            "-NoProfile",
+            "-File",
+            str(wrapper),
+            "-SmokeScript",
+            str(ROOT / "integrations/prbench/run_public_smoke.ps1"),
+            "-EvaluatorRoot",
+            str(evaluator),
+            "-WheelPath",
+            str(wheel),
+            "-ExpectFailure",
+            "1" if fake_uv_failure else "0",
+            "-HadOriginal",
+            "1" if preexisting_opencode else "0",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+    assert completed.returncode == 0, (completed.stdout, completed.stderr)
+    assert "environment-restored" in completed.stdout
+    for secret in (
+        "fake-phycode-key",
+        "https://fake.invalid/v1",
+        "original-key",
+        "https://original.invalid",
+    ):
+        assert secret not in completed.stdout
+        assert secret not in completed.stderr

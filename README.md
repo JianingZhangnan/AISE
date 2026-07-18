@@ -71,7 +71,7 @@ expected outputs 存在且 artifact verifier 通过时，runner 才返回 `compl
 3. **官方 Docker evaluator**：把固定 adapter 应用到官方 evaluator，由白色
    PhyCode 完成任务，再由官方绿色 grader 生成报告。Docker daemon 必须已运行，
    smoke 脚本把同一组三项 provider 值临时映射给官方 OpenCode 绿色 agent；映射
-   只存在于 evaluator 子进程期间，随后恢复或清除。
+   只存在于 evaluator 子进程期间，随后精确恢复或真正删除。
 
 直接 runner 的命令形态如下；三个 provider 值只从当前进程环境或安全凭据后端
 取得，不要写入仓库、命令参数或 `.env`：
@@ -98,13 +98,34 @@ uv run phycode prbench run `
 脚本不接收 key 文件路径，不创建 `.env`，也不回显 provider 值。白色 agent 使用
 `PHYCODE_*`；绿色 model-judge 通过临时 `OPENCODE_API_KEY`、
 `OPENCODE_BASE_URL` 和 `OPENCODE_MODEL=openai/<PHYCODE_MODEL>` 使用相同 endpoint，
-官方 resolver 会把 custom URL 的模型前缀转为 `openai_compat/`。`finally` 会恢复
-调用前已有的 `OPENCODE_*`，否则清除临时映射。脚本只生成临时、用后删除的审批
-JSON。两项人工清单都只授权一次目标脚本写入和一次精确执行：
-`reproduction/hello.py` 或 `reproduction/alphabet.py`，以及
-`/usr/local/bin/python <对应脚本>`（`cwd="."`）；不会从 `expected_files`
-推导通配授权，也不授权直接写入 CSV。任何不同路径、argv、cwd 或重复调用都
-fail closed。
+官方 resolver 会把 custom URL 的模型前缀转为 `openai_compat/`。adapter 提交
+`6f5d75d` 会把这些 green-only 值排除在共享容器 `Config.Env` 之外；白色阶段的
+容器进程看不到它们，直到白色 runner 结束后，绿色 grading child 才通过 name-only
+Docker 环境参数取得临时值。宿主脚本的 `finally` 会精确恢复调用前已有的
+`OPENCODE_*`；原本不存在的变量通过 `Remove-Item Env:` 真正删除，不留下空变量。
+
+初始审批 JSON **只**包含一个目标 reproduction 文件的 `file.write`：
+`reproduction/hello.py` 或 `reproduction/alphabet.py`。脚本生成前不会预授权
+`process.run`，smoke 脚本本身也不会计算 hash 或自动批准执行。官方命令传入
+`--approval-wait-seconds 900`；模型写完脚本并首次请求执行时，runner 会原子写入
+workspace 内的 `.phycode/prbench/approval-request.json` 并暂停等待。
+在该固定 evaluator 中，active workspace 通常位于
+`<EvaluatorRoot>\data\tasks\<TaskId>\workspace`；以 launcher 日志公布的实际路径为
+准。运行中应修改这里的 `phycode-approvals.json`，而不是脚本最初创建并已被 adapter
+复制的临时 manifest。
+
+此时主 agent 必须人工完成以下门禁：
+
+1. 读取待执行 reproduction 脚本，确认它只实现公开任务且没有越界行为。
+2. 读取 `approval-request.json`，逐项核对规范化 `argv`、`cwd`、脚本路径和
+   `script_sha256`；独立计算脚本 SHA-256 并确认与请求一致。
+3. 把完全相同的 `argv`、`cwd` 和 `script_sha256` 作为一次性 `process.run` grant
+   写入该 active workspace 的 `phycode-approvals.json`。不得批准不同参数，不得
+   使用通配符，也不得让外部脚本替 agent 运行 reproduction。
+
+清单刷新后 runner 会再次校验脚本内容；等待期间脚本变化、hash 不匹配、畸形
+清单、重复消费或 900 秒超时都会 fail closed。CSV 只能由已审核脚本执行生成，
+不会从 `expected_files` 推导授权，也不允许直接 `file.write` CSV。
 
 固定 upstream 的 `pyproject.toml` 对 `a2a-sdk` 只有下界；2026-07-18 在 fresh
 环境执行普通解析会选到 `a2a-sdk 1.1.1`，与该 commit 的 import API 不兼容。

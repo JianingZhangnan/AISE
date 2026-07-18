@@ -26,20 +26,10 @@ if (-not $TaskIds -or $TaskIds.Count -eq 0) {
 
 $approvalGrants = @{
     aaatest_helloworld = @(
-        @{ tool_name = 'file.write'; path = 'reproduction/hello.py' },
-        @{
-            tool_name = 'process.run'
-            argv = @('/usr/local/bin/python', 'reproduction/hello.py')
-            cwd = '.'
-        }
+        @{ tool_name = 'file.write'; path = 'reproduction/hello.py' }
     )
     bbbtest_alphabet = @(
-        @{ tool_name = 'file.write'; path = 'reproduction/alphabet.py' },
-        @{
-            tool_name = 'process.run'
-            argv = @('/usr/local/bin/python', 'reproduction/alphabet.py')
-            cwd = '.'
-        }
+        @{ tool_name = 'file.write'; path = 'reproduction/alphabet.py' }
     )
 }
 
@@ -63,7 +53,7 @@ function Restore-OpenCodeEnvironment {
             [Environment]::SetEnvironmentVariable($name, $saved.value, 'Process')
         }
         else {
-            [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+            Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue
         }
     }
 }
@@ -105,7 +95,8 @@ try {
                 --white-agent-type phycode `
                 --green-agent-type opencode `
                 --phycode-contract $ContractPath `
-                --phycode-approvals $ApprovalPath
+                --phycode-approvals $ApprovalPath `
+                --approval-wait-seconds 900
             if ($LASTEXITCODE -ne 0) {
                 throw "Official PRBench evaluator failed for task $TaskId."
             }
