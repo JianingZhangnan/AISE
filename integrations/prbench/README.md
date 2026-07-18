@@ -83,7 +83,10 @@ environment 映射。
 事务边界。health check、PhyCode/OpenCode 安装或其他 setup 步骤一旦失败，只对本次
 刚构造的 `DockerEnvironment` 调用一次 `stop()`，由它按精确 container 对象执行
 force remove 并清空 `container` / `container_id`；cleanup 自身失败不会遮蔽原始
-setup 异常，也不会把异常文本或 provider 值写入日志。由于失败调用不会完成外层
+setup 异常。`stop()` 会先快照 owned container，权限修复、stop、force remove
+分别以 `BaseException` 安全的 best-effort 阶段运行；前一阶段失败不会跳过后一阶段，
+最终状态始终在 `finally` 清空。各阶段只写静态分类 warning，不会把异常文本或
+provider 值写入日志。由于失败调用不会完成外层
 `docker_env = setup_docker_environment(...)` 赋值，evaluation 的外层 `finally`
 只会看到 `container_id=None`，不会再次删除该容器或触碰其他容器。
 

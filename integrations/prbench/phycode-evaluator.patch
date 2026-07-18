@@ -718,6 +718,43 @@ index 9c1f2b4..3a0112a 100644
 +            if install_openai_compatible and adapter_install["exit_code"] != 0:
 +                logger.error("  Failed to install OpenCode compatible provider adapter")
 +                return False
+@@ -593,21 +670,24 @@ class DockerEnvironment:
+     def stop(self) -> None:
+         """Stop and remove the container. Fix workspace permissions first."""
+-        if self.container:
+-            # Make workspace world-writable so host user can clean up
++        container = self.container
++        try:
++            if container is None:
++                return
+             if self.workspace_dir:
+                 try:
+                     self.exec_command("chmod -R 777 /workspace")
+-                except Exception:
+-                    pass
++                except BaseException:
++                    logger.warning("Workspace permission cleanup failed")
+             try:
+-                self.container.stop(timeout=10)
+-                logger.info(f"Container {self.container.short_id} stopped.")
+-            except Exception as e:
+-                logger.warning(f"Error stopping container: {e}")
++                container.stop(timeout=10)
++                logger.info(f"Container {container.short_id} stopped.")
++            except BaseException:
++                logger.warning("Container stop failed during cleanup")
+             try:
+-                self.container.remove(force=True)
+-                logger.info(f"Container {self.container.short_id} removed.")
+-            except Exception as e:
+-                logger.warning(f"Error removing container: {e}")
++                container.remove(force=True)
++                logger.info(f"Container {container.short_id} removed.")
++            except BaseException:
++                logger.warning("Container force-remove failed during cleanup")
++        finally:
+             self.container = None
+             self.container_id = None
 diff --git a/src/white_agent/agent.py b/src/white_agent/agent.py
 index a1b41ff..db7a67e 100644
 --- a/src/white_agent/agent.py

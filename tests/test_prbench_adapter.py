@@ -1022,6 +1022,162 @@ def test_official_docker_start_cleans_post_create_failures_without_masking_error
     assert "synthetic-secret" not in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("failure_stage", "failure_kind"),
+    [
+        (None, None),
+        ("stop", "exception"),
+        ("stop", "base_exception"),
+        ("remove", "exception"),
+        ("remove", "base_exception"),
+    ],
+)
+def test_official_docker_stop_is_secret_safe_and_base_exception_safe(
+    patched_official_evaluator: Path,
+    caplog: pytest.LogCaptureFixture,
+    failure_stage: str | None,
+    failure_kind: str | None,
+) -> None:
+    secret = "cleanup-provider-synthetic-secret"
+    events: list[tuple[str, object]] = []
+    unrelated_events: list[tuple[str, object]] = []
+
+    def failure() -> BaseException:
+        if failure_kind == "base_exception":
+            if failure_stage == "remove":
+                return SystemExit(secret)
+            return KeyboardInterrupt(secret)
+        return RuntimeError(secret)
+
+    class FakeContainer:
+        short_id = "owned-short-id"
+
+        def stop(self, timeout: int) -> None:
+            events.append(("stop", timeout))
+            if failure_stage == "stop":
+                raise failure()
+
+        def remove(self, force: bool = False) -> None:
+            events.append(("remove", force))
+            if failure_stage == "remove":
+                raise failure()
+
+    class UnrelatedContainer:
+        def stop(self, timeout: int) -> None:
+            unrelated_events.append(("stop", timeout))
+
+        def remove(self, force: bool = False) -> None:
+            unrelated_events.append(("remove", force))
+
+    unrelated_container = UnrelatedContainer()
+    logger = logging.getLogger("test.patched.docker-stop")
+    docker_environment = _load_class(
+        patched_official_evaluator / "src/my_util/docker_manager.py",
+        "DockerEnvironment",
+        {
+            "APIError": type("FakeAPIError", (Exception,), {}),
+            "docker": types.SimpleNamespace(from_env=lambda: None),
+            "logger": logger,
+            "os": os,
+        },
+    )
+    environment = object.__new__(docker_environment)  # type: ignore[arg-type]
+    environment.container = FakeContainer()
+    environment.container_id = "owned-container-id"
+    environment.workspace_dir = None
+    caplog.set_level(logging.INFO, logger="test.patched.docker-stop")
+
+    leaked_error: BaseException | None = None
+    try:
+        environment.stop()
+    except BaseException as error:
+        leaked_error = error
+
+    assert leaked_error is None
+    assert events[0] == ("stop", 10)
+    assert events.count(("stop", 10)) == 1
+    assert events.count(("remove", True)) == 1
+    assert unrelated_events == []
+    assert unrelated_container is not environment.container
+    assert environment.container is None
+    assert environment.container_id is None
+    assert secret not in caplog.text
+
+
+def test_official_setup_preserves_original_error_when_real_stop_hits_base_exception(
+    patched_official_evaluator: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "cleanup-provider-synthetic-secret"
+    original_error = RuntimeError("original setup failure")
+    events: list[tuple[str, object]] = []
+    unrelated_events: list[tuple[str, object]] = []
+    instances: list[object] = []
+    logger = logging.getLogger("test.patched.real-stop-setup")
+    docker_environment = _load_class(
+        patched_official_evaluator / "src/my_util/docker_manager.py",
+        "DockerEnvironment",
+        {
+            "APIError": type("FakeAPIError", (Exception,), {}),
+            "docker": types.SimpleNamespace(from_env=lambda: None),
+            "logger": logger,
+            "os": os,
+        },
+    )
+    real_stop = docker_environment.stop  # type: ignore[attr-defined]
+
+    class FakeContainer:
+        short_id = "owned-short-id"
+
+        def stop(self, timeout: int) -> None:
+            events.append(("stop", timeout))
+            raise KeyboardInterrupt(secret)
+
+        def remove(self, force: bool = False) -> None:
+            events.append(("remove", force))
+
+    class FakeDockerEnvironment:
+        def __init__(self, **_kwargs: object) -> None:
+            self.container = FakeContainer()
+            self.container_id: str | None = "owned-container-id"
+            self.workspace_dir = None
+            instances.append(self)
+
+        def start(self) -> None:
+            pass
+
+        def check_health(self) -> bool:
+            raise original_error
+
+        def stop(self) -> None:
+            real_stop(self)
+
+    unrelated_container = types.SimpleNamespace(events=unrelated_events)
+    setup = _load_function(
+        patched_official_evaluator / "src/launcher.py",
+        "setup_docker_environment",
+        {
+            "DockerEnvironment": FakeDockerEnvironment,
+            "PROJECT_ROOT": str(patched_official_evaluator),
+            "logger": logger,
+            "os": os,
+            "resolve_env": lambda _agent_type: {},
+        },
+    )
+    caplog.set_level(logging.INFO, logger="test.patched.real-stop-setup")
+
+    with pytest.raises(RuntimeError) as raised:
+        setup({"docker": {}}, "task", "workspace", "phycode", "opencode")
+
+    assert raised.value is original_error
+    assert events == [("stop", 10), ("remove", True)]
+    assert unrelated_container.events == []
+    assert len(instances) == 1
+    assert instances[0].container is None  # type: ignore[attr-defined]
+    assert instances[0].container_id is None  # type: ignore[attr-defined]
+    assert secret not in caplog.text
+
+
 def test_official_launch_cli_exposes_and_bounds_approval_wait(
     patched_official_evaluator: Path,
 ) -> None:
