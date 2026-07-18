@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -17,6 +18,17 @@ from phycode.profiles import profile_spec
 from phycode.tools import ToolRegistry, ToolRuntime
 from phycode.tools.process_tools import register_process_tools
 from phycode.visibility import PathVisibilityPolicy
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
 def _prbench_context(workspace_root: Path) -> PolicyContext:
@@ -391,6 +403,463 @@ def test_exact_approval_is_consumed_once(tmp_path: Path) -> None:
     assert decision.decision == PolicyAction.ASK
     assert manifest(call, decision)
     assert not manifest(call, decision)
+
+
+def test_dynamic_process_approval_writes_hash_bound_request_and_refreshes(
+    tmp_path: Path,
+) -> None:
+    reproduction = tmp_path / "reproduction"
+    reproduction.mkdir()
+    script = reproduction / "a.py"
+    script.write_text("print('approved')\n", encoding="utf-8")
+    expected_hash = hashlib.sha256(script.read_bytes()).hexdigest()
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    request_path = tmp_path / ".phycode" / "prbench" / "approval-request.json"
+    clock = _FakeClock()
+    observed_request: dict[str, object] = {}
+
+    def approve_after_request(seconds: float) -> None:
+        nonlocal observed_request
+        observed_request = json.loads(request_path.read_text(encoding="utf-8"))
+        approvals.write_text(
+            json.dumps(
+                {
+                    "grants": [
+                        {
+                            "tool_name": "process.run",
+                            "argv": observed_request["argv"],
+                            "cwd": observed_request["cwd"],
+                            "script_sha256": observed_request["script_sha256"],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        clock.advance(seconds)
+
+    manifest = ApprovalManifest.from_json(
+        approvals,
+        tmp_path,
+        approval_wait_seconds=1,
+        clock=clock,
+        sleeper=approve_after_request,
+        poll_interval_seconds=0.01,
+    )
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "./reproduction/a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert manifest(call, decision)
+    assert observed_request == {
+        "tool_name": "process.run",
+        "argv": [os.path.normcase(str(Path(sys.executable).resolve())), "reproduction/a.py"],
+        "cwd": ".",
+        "script_path": "reproduction/a.py",
+        "script_sha256": expected_hash,
+    }
+    assert str(tmp_path) not in json.dumps(observed_request)
+    assert not request_path.exists()
+
+
+def test_dynamic_request_argv_round_trips_when_process_cwd_is_not_workspace_root(
+    tmp_path: Path,
+) -> None:
+    reproduction = tmp_path / "reproduction"
+    reproduction.mkdir()
+    (reproduction / "a.py").write_text("print('approved')\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    request_path = tmp_path / ".phycode/prbench/approval-request.json"
+    clock = _FakeClock()
+    observed_argv: list[str] = []
+
+    def approve_after_request(seconds: float) -> None:
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        observed_argv.extend(request["argv"])
+        approvals.write_text(
+            json.dumps(
+                {
+                    "grants": [
+                        {
+                            "tool_name": "process.run",
+                            "argv": request["argv"],
+                            "cwd": request["cwd"],
+                            "script_sha256": request["script_sha256"],
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        clock.advance(seconds)
+
+    manifest = ApprovalManifest.from_json(
+        approvals,
+        tmp_path,
+        approval_wait_seconds=0.02,
+        clock=clock,
+        sleeper=approve_after_request,
+        poll_interval_seconds=0.01,
+    )
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "reproduction"},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert manifest(call, decision)
+    assert observed_argv[1] == "a.py"
+
+
+def test_dynamic_request_never_writes_an_executable_path_inside_workspace(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "private-runtime" / "python.exe"
+    executable.parent.mkdir()
+    executable.write_bytes(b"test executable placeholder")
+    (tmp_path / "a.py").write_text("print('blocked')\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    clock = _FakeClock()
+    sleeps = 0
+
+    def unexpected_sleep(seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        clock.advance(seconds)
+
+    manifest = ApprovalManifest.from_json(
+        approvals,
+        tmp_path,
+        approval_wait_seconds=1,
+        clock=clock,
+        sleeper=unexpected_sleep,
+    )
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [str(executable), "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert not manifest(call, decision)
+    assert sleeps == 0
+    assert not (tmp_path / ".phycode/prbench/approval-request.json").exists()
+
+
+def test_zero_wait_keeps_missing_process_grant_fail_closed_without_pending_request(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("print('blocked')\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    manifest = ApprovalManifest.from_json(approvals, tmp_path)
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert not manifest(call, decision)
+    assert not (tmp_path / ".phycode/prbench/approval-request.json").exists()
+
+
+def test_zero_wait_removes_a_stale_pending_request_before_failing_closed(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("print('blocked')\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    request_path = tmp_path / ".phycode/prbench/approval-request.json"
+    request_path.parent.mkdir(parents=True)
+    request_path.write_text('{"stale": true}', encoding="utf-8")
+    manifest = ApprovalManifest.from_json(approvals, tmp_path)
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert not manifest(call, decision)
+    assert not request_path.exists()
+
+
+def test_pending_request_cleanup_does_not_follow_runtime_directory_symlink(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "a.py").write_text("print('blocked')\n", encoding="utf-8")
+    approvals = workspace / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "approval-request.json"
+    sentinel.write_text("must remain", encoding="utf-8")
+    try:
+        (workspace / ".phycode").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+    manifest = ApprovalManifest.from_json(approvals, workspace)
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(workspace, [], False))
+
+    assert not manifest(call, decision)
+    assert sentinel.read_text(encoding="utf-8") == "must remain"
+
+
+def test_pending_request_cleanup_fails_closed_if_runtime_target_resolves_outside(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "a.py").write_text("print('blocked')\n", encoding="utf-8")
+    approvals = workspace / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    sentinel = tmp_path / "approval-request.json"
+    sentinel.write_text("must remain", encoding="utf-8")
+    manifest = ApprovalManifest.from_json(approvals, workspace)
+    setattr(manifest, "_request_path", sentinel)
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(workspace, [], False))
+
+    assert not manifest(call, decision)
+    assert sentinel.read_text(encoding="utf-8") == "must remain"
+
+
+def test_hash_bound_process_grant_rejects_script_changed_while_waiting(tmp_path: Path) -> None:
+    script = tmp_path / "a.py"
+    script.write_text("print('before')\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    request_path = tmp_path / ".phycode/prbench/approval-request.json"
+    clock = _FakeClock()
+    wrote_grant = False
+
+    def replace_script_after_request(seconds: float) -> None:
+        nonlocal wrote_grant
+        if not wrote_grant:
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            script.write_text("print('after')\n", encoding="utf-8")
+            approvals.write_text(
+                json.dumps(
+                    {
+                        "grants": [
+                            {
+                                "tool_name": "process.run",
+                                "argv": request["argv"],
+                                "cwd": request["cwd"],
+                                "script_sha256": request["script_sha256"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            wrote_grant = True
+        clock.advance(seconds)
+
+    manifest = ApprovalManifest.from_json(
+        approvals,
+        tmp_path,
+        approval_wait_seconds=0.03,
+        clock=clock,
+        sleeper=replace_script_after_request,
+        poll_interval_seconds=0.01,
+    )
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert not manifest(call, decision)
+    assert not request_path.exists()
+
+
+def test_dynamic_refresh_rejects_a_new_process_grant_without_script_hash(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("print('blocked')\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    request_path = tmp_path / ".phycode/prbench/approval-request.json"
+    clock = _FakeClock()
+    wrote_grant = False
+
+    def append_unbound_grant(seconds: float) -> None:
+        nonlocal wrote_grant
+        if not wrote_grant:
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            approvals.write_text(
+                json.dumps(
+                    {
+                        "grants": [
+                            {
+                                "tool_name": "process.run",
+                                "argv": request["argv"],
+                                "cwd": request["cwd"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            wrote_grant = True
+        clock.advance(seconds)
+
+    manifest = ApprovalManifest.from_json(
+        approvals,
+        tmp_path,
+        approval_wait_seconds=0.02,
+        clock=clock,
+        sleeper=append_unbound_grant,
+        poll_interval_seconds=0.01,
+    )
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert not manifest(call, decision)
+    assert not request_path.exists()
+
+
+def test_reloading_manifest_does_not_revive_consumed_hash_bound_grant(tmp_path: Path) -> None:
+    script = tmp_path / "a.py"
+    script.write_text("print('once')\n", encoding="utf-8")
+    script_hash = hashlib.sha256(script.read_bytes()).hexdigest()
+    grant = {
+        "tool_name": "process.run",
+        "argv": [sys.executable, "a.py"],
+        "cwd": ".",
+        "script_sha256": script_hash,
+    }
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": [grant]}), encoding="utf-8")
+    manifest = ApprovalManifest.from_json(approvals, tmp_path)
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert manifest(call, decision)
+    approvals.write_text(json.dumps({"grants": [grant]}), encoding="utf-8")
+    assert not manifest(call, decision)
+    approvals.write_text(json.dumps({"grants": [grant, grant]}), encoding="utf-8")
+    assert manifest(call, decision)
+    assert not manifest(call, decision)
+
+
+def test_malformed_refresh_fails_closed_and_cleans_pending_request(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("print('blocked')\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    request_path = tmp_path / ".phycode/prbench/approval-request.json"
+    clock = _FakeClock()
+
+    def corrupt_manifest(seconds: float) -> None:
+        assert request_path.is_file()
+        approvals.write_text("{malformed", encoding="utf-8")
+        clock.advance(seconds)
+
+    manifest = ApprovalManifest.from_json(
+        approvals,
+        tmp_path,
+        approval_wait_seconds=1,
+        clock=clock,
+        sleeper=corrupt_manifest,
+        poll_interval_seconds=0.01,
+    )
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert not manifest(call, decision)
+    assert not request_path.exists()
+
+
+def test_dynamic_process_approval_timeout_cleans_pending_request(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("print('blocked')\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    request_path = tmp_path / ".phycode/prbench/approval-request.json"
+    clock = _FakeClock()
+    sleeps: list[float] = []
+
+    def advance(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.advance(seconds)
+
+    manifest = ApprovalManifest.from_json(
+        approvals,
+        tmp_path,
+        approval_wait_seconds=0.02,
+        clock=clock,
+        sleeper=advance,
+        poll_interval_seconds=0.01,
+    )
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert not manifest(call, decision)
+    assert sleeps == [0.01, 0.01]
+    assert not request_path.exists()
+
+
+def test_dynamic_process_approval_request_write_failure_is_closed(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("print('blocked')\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    (tmp_path / ".phycode").write_text("not a directory", encoding="utf-8")
+    manifest = ApprovalManifest.from_json(
+        approvals,
+        tmp_path,
+        approval_wait_seconds=1,
+    )
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert not manifest(call, decision)
+
+
+def test_process_approval_grant_rejects_invalid_script_hash(tmp_path: Path) -> None:
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(
+        json.dumps(
+            {
+                "grants": [
+                    {
+                        "tool_name": "process.run",
+                        "argv": [sys.executable, "a.py"],
+                        "cwd": ".",
+                        "script_sha256": "not-a-sha256",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError):
+        ApprovalManifest.from_json(approvals, tmp_path)
 
 
 def test_file_approval_matches_resolved_path(tmp_path: Path) -> None:

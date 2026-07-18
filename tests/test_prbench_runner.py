@@ -45,6 +45,26 @@ def test_runner_returns_non_success_when_final_artifacts_are_missing(tmp_path: P
     assert result.exit_code != 0
 
 
+@pytest.mark.parametrize("approval_wait_seconds", [-1, 901])
+def test_runner_rejects_approval_wait_outside_public_bounds(
+    tmp_path: Path,
+    approval_wait_seconds: int,
+) -> None:
+    contract, approvals = _write_public_task_files(tmp_path, approvals=False)
+    llm = _RecordingFinalLLM()
+
+    result = run_prbench(
+        tmp_path,
+        contract,
+        approvals,
+        llm=llm,
+        approval_wait_seconds=approval_wait_seconds,
+    )
+
+    assert result.status == PRBenchRunStatus.POLICY_BLOCKED
+    assert llm.calls == 0
+
+
 def test_runner_executes_script_and_writes_sanitized_result(tmp_path: Path) -> None:
     contract, approvals = _write_public_task_files(tmp_path)
 

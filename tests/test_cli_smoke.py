@@ -37,12 +37,83 @@ def test_demo_unknown_name_exits_nonzero():
 
 
 def test_prbench_run_help_exposes_required_paths():
-    result = runner.invoke(app, ["prbench", "run", "--help"])
+    result = runner.invoke(app, ["prbench", "run", "--help"], terminal_width=160)
 
     assert result.exit_code == 0, result.stdout
     assert "--workspace" in result.stdout
     assert "--contract" in result.stdout
     assert "--approvals" in result.stdout
+    # Rich shortens long option labels to fit its fixed help-table width.
+    assert "--approval-wait-sec" in result.stdout
+
+
+def test_prbench_approval_wait_option_is_bounded_before_runner_call(tmp_path, monkeypatch):
+    import phycode.prbench_eval as prbench_eval
+
+    called = False
+
+    def record_call(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("runner must not be called for an invalid wait")
+
+    monkeypatch.setattr(prbench_eval, "run_prbench", record_call)
+
+    result = runner.invoke(
+        prbench_eval.prbench_app,
+        [
+            "run",
+            "--workspace",
+            str(tmp_path),
+            "--contract",
+            str(tmp_path / "contract.json"),
+            "--approvals",
+            str(tmp_path / "approvals.json"),
+            "--approval-wait-seconds",
+            "901",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert not called
+    assert "approval-wait-seconds" in result.stderr
+    assert "0<=x<=900" in result.stderr
+
+
+def test_prbench_approval_wait_option_is_forwarded_to_runner(tmp_path, monkeypatch):
+    import phycode.prbench_eval as prbench_eval
+
+    captured = None
+    expected = PRBenchRunResult(
+        status=PRBenchRunStatus.APPROVAL_REQUIRED,
+        model="safe-model",
+        tool_calls=1,
+    )
+
+    def record_call(*args, **kwargs):
+        nonlocal captured
+        captured = kwargs["approval_wait_seconds"]
+        return expected
+
+    monkeypatch.setattr(prbench_eval, "run_prbench", record_call)
+
+    result = runner.invoke(
+        prbench_eval.prbench_app,
+        [
+            "run",
+            "--workspace",
+            str(tmp_path),
+            "--contract",
+            str(tmp_path / "contract.json"),
+            "--approvals",
+            str(tmp_path / "approvals.json"),
+            "--approval-wait-seconds",
+            "7",
+        ],
+    )
+
+    assert result.exit_code == expected.exit_code
+    assert captured == 7
 
 
 def test_main_cli_mounts_the_single_prbench_eval_app():

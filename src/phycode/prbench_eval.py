@@ -285,6 +285,7 @@ def run_prbench(
     *,
     llm: LLMClient | None = None,
     max_tool_calls: int | None = None,
+    approval_wait_seconds: int = 0,
 ) -> PRBenchRunResult:
     model_name = _safe_model_name(llm)
     try:
@@ -301,6 +302,12 @@ def run_prbench(
             model=model_name,
             tool_calls=0,
         )
+    if (
+        isinstance(approval_wait_seconds, bool)
+        or not isinstance(approval_wait_seconds, int)
+        or not 0 <= approval_wait_seconds <= 900
+    ):
+        return _policy_failure(root, model_name)
     try:
         _ensure_no_ground_truth(root)
         _result_directory(root)
@@ -319,7 +326,11 @@ def run_prbench(
         )
         for expected_file in contract.expected_files:
             _resolve_workspace_path(root, expected_file, require_file=False)
-        approvals = ApprovalManifest.from_json(safe_approvals_path, root)
+        approvals = ApprovalManifest.from_json(
+            safe_approvals_path,
+            root,
+            approval_wait_seconds=approval_wait_seconds,
+        )
     except Exception:
         return _policy_failure(root, model_name)
 
@@ -436,12 +447,19 @@ def prbench_run(
     contract: Path = typer.Option(..., help="Public task contract JSON"),
     approvals: Path = typer.Option(..., help="Exact one-time approval manifest JSON"),
     max_tool_calls: int | None = typer.Option(None, min=1, help="Tool-call budget override"),
+    approval_wait_seconds: int = typer.Option(
+        0,
+        min=0,
+        max=900,
+        help="Seconds to wait for a runtime hash-bound process approval",
+    ),
 ) -> None:
     result = run_prbench(
         workspace,
         contract,
         approvals,
         max_tool_calls=max_tool_calls,
+        approval_wait_seconds=approval_wait_seconds,
     )
     for line in prbench_result_lines(result):
         typer.echo(line)
