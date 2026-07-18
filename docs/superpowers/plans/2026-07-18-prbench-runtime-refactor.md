@@ -815,7 +815,11 @@ git commit -m "docs(prbench): document verified evaluator workflow"
 
 - [ ] **Step 5: 修复 smoke 编排和环境恢复**
 
-初始 manifest 只批准任务指定 reproduction 文件写入，不预授权 `process.run`；脚本等待主 agent 写入 hash-bound grant。新增的 `OPENCODE_*` 用 `Remove-Item Env:` 真正删除，既有值精确恢复。
+初始 manifest 只批准任务指定 reproduction 文件各一次精确 `file.write` 和同路径
+`file.edit`，不批准任何 CSV 且不预授权 `process.run`；脚本等待主 agent 写入
+hash-bound grant。PRBench policy 在审批前确定性拒绝 `data/**/*.csv` 的直接
+write/edit，结构化 feedback 引导回到修正 reproduction 脚本并请求执行。新增的
+`OPENCODE_*` 用 `Remove-Item Env:` 真正删除，既有值精确恢复。
 
 - [ ] **Step 6: 全量验证、独立复审与提交**
 
@@ -828,7 +832,9 @@ git commit -m "docs(prbench): document verified evaluator workflow"
 1. 从 `D:\BaiduSyncdisk\NewTextDocument.txt` 在当前 PowerShell 进程内读取 URL/key/model，设置三个 `PHYCODE_*` 环境变量；不得输出值。
 2. 构建 wheel：`uv build`。
 3. 启动并确认 Docker daemon；clone 官方 evaluator 并 checkout 固定 commit。
-4. 初始只批准写入公开任务指定的 reproduction 文件；runner 产生 hash-bound 待批请求后，主 agent 读取脚本并逐项追加精确 `process.run` grant，任何额外调用不批准。
+4. 初始只批准公开任务指定的 reproduction 文件各一次精确 write/edit；不批准 CSV。
+   runner 产生 hash-bound 待批请求后，主 agent 读取脚本并逐项追加精确
+   `process.run` grant，任何额外调用不批准。
 5. 分别运行 `aaatest_helloworld` 和 `bbbtest_alphabet` 官方流程。
 6. 验收每项 white runner status 为 `completed`、expected outputs 存在、官方 evaluator 生成报告、trace/result 不含 key/URL。
 7. 若真实模型失败，按 `systematic-debugging` 先定位根因；任何修复先添加可复现的失败测试，不进行 prompt/规则打地鼠。

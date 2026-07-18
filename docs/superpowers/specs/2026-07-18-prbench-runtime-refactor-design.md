@@ -93,7 +93,7 @@ process.run(
 - `max_tool_calls`；
 - `hidden_path_components`。
 
-`build_agent`、registry 和 `PolicyContext` 必须从同一个 `ProfileSpec` 构造，不能分别接收可能不一致的 profile 配置。PRBench prompt 明确要求运行生成脚本、检查产物，并说明 final 会经过确定性验收。
+`build_agent`、registry 和 `PolicyContext` 必须从同一个 `ProfileSpec` 构造，不能分别接收可能不一致的 profile 配置。PRBench prompt 明确要求不得直接写入或编辑 expected CSV / data output，必须先让 reproduction 脚本生成数据，再请求 `process.run`；运行审批可能等待人工核对的 hash-bound grant。prompt 同时要求检查产物，并说明 final 会经过确定性验收。
 
 ### 6.2 `ApprovalGateway`
 
@@ -105,9 +105,18 @@ process.run(
 
 本阶段官方最小任务的审批只允许：
 
-- 在当前临时 workspace 内写入任务明确要求的 reproduction 源文件和分析文件；
+- 在当前临时 workspace 内对任务明确要求的 reproduction 源文件执行一次精确
+  `file.write`；真实回归证明首版脚本可能只打印，因此允许一次同路径精确
+  `file.edit` 作为最小恢复能力；
 - 运行当前 workspace 内已写入的 Python reproduction 脚本；
 - 不允许访问凭据、workspace 外路径或任何 `_ground_truth` 路径。
+
+审批不能授予 expected CSV 的直接写入能力。PRBench `PolicyEngine` 在审批处理前，
+对 workspace-relative `data/**/*.csv` 的 `file.write` / `file.edit` 以确定性 rule
+`prbench.direct_csv_mutation_blocked` 拒绝；路径大小写、Windows 分隔符、规范化后的
+路径和既有 visibility / escape / hidden 规则都不能形成绕过。固定 reason 不包含
+contract 数值、文件内容或凭据。对应结构化 feedback 明确引导模型修改或重写
+reproduction 脚本并请求 `process.run`，不泛化为向用户索取普通文件写审批。
 
 ### 6.3 `ExecutionJournal`
 
@@ -254,6 +263,9 @@ adapter 不修改官方 grading rubric，不把 ground truth 传给 PhyCode runn
 ## 12. 风险与缓解
 
 - **真实模型仍可能不调用执行工具**：verifier 回灌明确缺失项，stop controller 只在连续无进展时停机。
+- **真实模型可能尝试直接写正确 CSV**：profile prompt 先声明 provenance 工作流，
+  确定性 policy 再拒绝 direct mutation，结构化 feedback 引导回到
+  reproduction script → hash-bound `process.run`；manifest grant 不能覆盖 DENY。
 - **人工审批清单过宽**：审批绑定完整规范化参数并一次性消费；运行前由主 agent 审核，意外调用拒绝。
 - **官方 evaluator 环境差异**：adapter 固定 commit，最小任务先在隔离临时目录测试，再在 Docker 中验证。
 - **Docker daemon 不可用**：实现和本地真实 fixture 可先完成，但最终验收必须启动 Docker 后运行官方流程；不可把直接 fixture 测试冒充官方 evaluator 成绩。

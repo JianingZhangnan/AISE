@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from phycode.models import FeedbackKind, FeedbackSignal, ToolResult
+from phycode.models import AgentProfile, FeedbackKind, FeedbackSignal, ToolResult
 from phycode.redaction import redact_obj
 
 STATUS_TO_KIND = {
@@ -17,7 +17,12 @@ STATUS_TO_KIND = {
 }
 
 
-def classify_feedback(result: ToolResult) -> list[FeedbackSignal]:
+def classify_feedback(
+    result: ToolResult,
+    *,
+    profile: AgentProfile | None = None,
+    policy_rule_id: str | None = None,
+) -> list[FeedbackSignal]:
     kind = STATUS_TO_KIND.get(result.status, FeedbackKind.TOOL_ERROR)
     evidence = {"stdout": result.stdout[:1000], "stderr": result.stderr[:1000], "truncated": result.truncated}
     signals = [
@@ -25,8 +30,20 @@ def classify_feedback(result: ToolResult) -> list[FeedbackSignal]:
             kind=kind,
             summary=_summary_for(kind, result),
             evidence=evidence,
-            retryable=kind in {FeedbackKind.COMMAND_FAILED, FeedbackKind.TEST_FAILED, FeedbackKind.TOOL_ERROR},
-            suggested_next_step=_next_step_for(kind),
+            retryable=(
+                kind
+                in {
+                    FeedbackKind.COMMAND_FAILED,
+                    FeedbackKind.TEST_FAILED,
+                    FeedbackKind.TOOL_ERROR,
+                }
+                or (
+                    kind == FeedbackKind.POLICY_BLOCKED
+                    and profile == AgentProfile.PRBENCH
+                    and policy_rule_id == "prbench.direct_csv_mutation_blocked"
+                )
+            ),
+            suggested_next_step=_next_step_for(kind, profile, policy_rule_id),
         )
     ]
     if result.truncated:
@@ -61,7 +78,20 @@ def _summary_for(kind: FeedbackKind, result: ToolResult) -> str:
     return kind.value
 
 
-def _next_step_for(kind: FeedbackKind) -> str | None:
+def _next_step_for(
+    kind: FeedbackKind,
+    profile: AgentProfile | None = None,
+    policy_rule_id: str | None = None,
+) -> str | None:
+    if (
+        kind == FeedbackKind.POLICY_BLOCKED
+        and profile == AgentProfile.PRBENCH
+        and policy_rule_id == "prbench.direct_csv_mutation_blocked"
+    ):
+        return (
+            "Modify or rewrite the reproduction script to generate the CSV, "
+            "then request process.run"
+        )
     if kind == FeedbackKind.TEST_FAILED:
         return "Inspect the failing test and edit the related file"
     if kind == FeedbackKind.POLICY_REQUIRES_APPROVAL:

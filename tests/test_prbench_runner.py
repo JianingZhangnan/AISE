@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -6,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from phycode.approval import ApprovalManifest
 from phycode.llm import ScriptedLLM
 from phycode.prbench_eval import (
     PRBenchRunResult,
@@ -181,6 +183,199 @@ def test_runner_does_not_auto_complete_direct_writes_without_process_provenance(
     assert result.status == PRBenchRunStatus.ARTIFACT_VERIFICATION_FAILED
     assert result.tool_calls == 3
     assert llm.index == 4
+
+
+def test_runner_recovers_from_denied_direct_csv_via_script_and_runtime_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import phycode.prbench_eval as prbench_eval
+
+    contract, approvals = _write_public_task_files(tmp_path, approvals=False)
+    contract_payload = json.loads(contract.read_text(encoding="utf-8"))
+    contract_payload["expected_files"] = [
+        "reproduction/reproduce.py",
+        "data/output.csv",
+    ]
+    contract_payload["constraints"] = [
+        {
+            "path": "data/output.csv",
+            "csv_header": ["message"],
+            "csv_rows": [["hello"]],
+        }
+    ]
+    contract.write_text(json.dumps(contract_payload), encoding="utf-8")
+    approvals.write_text(
+        json.dumps(
+            {
+                "grants": [
+                    {"tool_name": "file.write", "path": "data/output.csv"},
+                    {"tool_name": "file.write", "path": "reproduction/reproduce.py"},
+                    {"tool_name": "file.edit", "path": "reproduction/reproduce.py"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    request_path = tmp_path / ".phycode/prbench/approval-request.json"
+    observed_request: dict[str, object] = {}
+
+    class FakeClock:
+        value = 0.0
+
+        def __call__(self) -> float:
+            return self.value
+
+        def advance(self, seconds: float) -> None:
+            self.value += seconds
+
+    clock = FakeClock()
+
+    def approve_reviewed_script(seconds: float) -> None:
+        observed_request.update(json.loads(request_path.read_text(encoding="utf-8")))
+        current = json.loads(approvals.read_text(encoding="utf-8"))
+        current["grants"].append(
+            {
+                "tool_name": "process.run",
+                "argv": observed_request["argv"],
+                "cwd": observed_request["cwd"],
+                "script_sha256": observed_request["script_sha256"],
+            }
+        )
+        approvals.write_text(json.dumps(current), encoding="utf-8")
+        clock.advance(seconds)
+
+    original_from_json = ApprovalManifest.from_json
+
+    def manifest_with_deterministic_wait(path, workspace_root, **kwargs):
+        return original_from_json(
+            path,
+            workspace_root,
+            approval_wait_seconds=kwargs["approval_wait_seconds"],
+            clock=clock,
+            sleeper=approve_reviewed_script,
+            poll_interval_seconds=0.01,
+        )
+
+    monkeypatch.setattr(
+        prbench_eval.ApprovalManifest,
+        "from_json",
+        manifest_with_deterministic_wait,
+    )
+    initial_script = "print('hello')\n"
+    final_script = (
+        "from pathlib import Path\n"
+        "Path('data').mkdir(exist_ok=True)\n"
+        "Path('data/output.csv').write_text('message\\nhello\\n', encoding='utf-8')\n"
+    )
+    trace_secret = "sk-denied-direct-write-secret-123456789"
+    llm = ScriptedLLM(
+        [
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.write",
+                        "args": {
+                            "path": "data/output.csv",
+                            "content": f"message\\nhello\\n{trace_secret}",
+                        },
+                    },
+                }
+            ],
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.write",
+                        "args": {
+                            "path": "reproduction/reproduce.py",
+                            "content": initial_script,
+                        },
+                    },
+                }
+            ],
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.edit",
+                        "args": {
+                            "path": "reproduction/reproduce.py",
+                            "old": initial_script,
+                            "new": final_script,
+                        },
+                    },
+                }
+            ],
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "process.run",
+                        "args": {
+                            "argv": [sys.executable, "reproduction/reproduce.py"],
+                            "cwd": ".",
+                        },
+                    },
+                }
+            ],
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.read",
+                        "args": {"path": "data/output.csv"},
+                    },
+                }
+            ],
+        ]
+    )
+
+    result = run_prbench(
+        tmp_path,
+        contract,
+        approvals,
+        llm=llm,
+        max_tool_calls=8,
+        approval_wait_seconds=1,
+    )
+
+    assert result.status == PRBenchRunStatus.COMPLETED
+    assert result.tool_calls == 4
+    assert llm.index == 4
+    assert (tmp_path / "data/output.csv").read_text(encoding="utf-8") == "message\nhello\n"
+    assert observed_request["script_sha256"] == hashlib.sha256(
+        (tmp_path / "reproduction/reproduce.py").read_bytes()
+    ).hexdigest()
+    assert not request_path.exists()
+    assert result.trace is not None
+    trace_payloads = [
+        json.loads(line)
+        for line in (tmp_path / result.trace.path).read_text(encoding="utf-8").splitlines()
+    ]
+    first_policy = next(
+        payload
+        for payload in trace_payloads
+        if payload["type"] == "policy_decision"
+    )
+    assert first_policy["payload"]["decision"] == "deny"
+    assert first_policy["payload"]["rule_id"] == "prbench.direct_csv_mutation_blocked"
+    direct_feedback = next(
+        payload
+        for payload in trace_payloads
+        if payload["type"] == "feedback_signal"
+        and payload["payload"]["kind"] == "policy_blocked"
+    )
+    assert "modify or rewrite the reproduction script" in direct_feedback["payload"][
+        "suggested_next_step"
+    ].casefold()
+    persisted = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (tmp_path / ".phycode").rglob("*")
+        if path.is_file()
+    )
+    assert trace_secret not in persisted
 
 
 def test_runner_blocks_lexical_ground_truth_before_calling_llm(tmp_path: Path) -> None:

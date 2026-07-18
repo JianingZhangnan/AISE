@@ -374,7 +374,11 @@ class AgentLoop:
         )
         feedback_events = [
             self._new_event(AgentEventType.FEEDBACK_SIGNAL, signal.model_dump(mode="json"))
-            for signal in classify_feedback(runtime_result.tool_result)
+            for signal in classify_feedback(
+                runtime_result.tool_result,
+                profile=self.policy_context.profile_spec.profile,
+                policy_rule_id=runtime_result.policy.rule_id,
+            )
         ]
         emitted = [policy_event, result_event, *feedback_events]
         for item in emitted:

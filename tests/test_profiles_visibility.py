@@ -1,12 +1,15 @@
+import json
 from pathlib import Path
 
 import pytest
 
+from phycode.approval import ApprovalManifest
 from phycode.models import AgentProfile
 from phycode.models import PolicyAction, SessionMode, ToolCall
 from phycode.policy import PolicyContext, PolicyEngine
 from phycode.profiles import profile_spec
 from phycode.tools.base import ToolRegistry, ToolRuntime
+from phycode.tools.file_tools import register_file_tools
 from phycode.tools.search_tools import register_search_tools
 from phycode.visibility import PathVisibilityPolicy, VisibilityViolation
 
@@ -19,6 +22,91 @@ def test_prbench_profile_is_single_source_of_runtime_limits() -> None:
     assert "process.run" in spec.tool_names
     assert "shell.run" not in spec.tool_names
     assert "final is accepted only after artifact verification" in spec.system_prompt
+    assert "Do not write or edit expected CSV files" in spec.system_prompt
+    assert "process.run" in spec.system_prompt
+    assert "hash-bound approval" in spec.system_prompt
+
+
+@pytest.mark.parametrize("tool_name", ["file.write", "file.edit"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "data/output.csv",
+        "DATA/OUTPUT.CSV",
+        "data/nested/output.csv",
+        r"data\nested\output.csv",
+        "data/temporary/../output.csv",
+    ],
+)
+def test_prbench_policy_denies_direct_csv_mutation(
+    tmp_path: Path,
+    tool_name: str,
+    path: str,
+) -> None:
+    args = {"path": path, "content": "a,b\n1,2\n"}
+    if tool_name == "file.edit":
+        args = {"path": path, "old": "1,2", "new": "3,4"}
+
+    decision = PolicyEngine().decide(
+        ToolCall(tool_name=tool_name, args=args),
+        PolicyContext(
+            tmp_path,
+            [],
+            False,
+            profile_spec=profile_spec(AgentProfile.PRBENCH),
+        ),
+    )
+
+    assert decision.decision == PolicyAction.DENY
+    assert decision.rule_id == "prbench.direct_csv_mutation_blocked"
+    assert "reproduction script" in decision.reason
+    assert "process.run" in decision.reason
+
+
+def test_prbench_direct_csv_grant_cannot_bypass_policy(tmp_path: Path) -> None:
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(
+        json.dumps(
+            {"grants": [{"tool_name": "file.write", "path": "data/output.csv"}]}
+        ),
+        encoding="utf-8",
+    )
+    manifest = ApprovalManifest.from_json(approvals, tmp_path)
+    registry = ToolRegistry()
+    register_file_tools(registry)
+    call = ToolCall(
+        tool_name="file.write",
+        args={"path": "data/output.csv", "content": "a,b\n1,2\n"},
+    )
+
+    result = ToolRuntime(registry).run(
+        call,
+        PolicyContext(
+            tmp_path,
+            [],
+            False,
+            profile_spec=profile_spec(AgentProfile.PRBENCH),
+        ),
+        approval_handler=manifest,
+    )
+
+    assert result.policy.decision == PolicyAction.DENY
+    assert result.tool_result.status == "policy_blocked"
+    assert not (tmp_path / "data/output.csv").exists()
+
+
+@pytest.mark.parametrize("profile", [AgentProfile.CODING, AgentProfile.GAIA])
+def test_direct_csv_policy_is_prbench_only(tmp_path: Path, profile: AgentProfile) -> None:
+    decision = PolicyEngine().decide(
+        ToolCall(
+            tool_name="file.write",
+            args={"path": "data/output.csv", "content": "a,b\n1,2\n"},
+        ),
+        PolicyContext(tmp_path, [], False, profile_spec=profile_spec(profile)),
+    )
+
+    assert decision.decision == PolicyAction.ASK
+    assert decision.rule_id == "tool.risky_default"
 
 
 def test_visibility_rejects_resolved_file_symlink_into_hidden_tree(tmp_path: Path) -> None:

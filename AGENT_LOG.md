@@ -184,3 +184,36 @@
   无 provenance、symlink/escape、失败工具与旧产物、显式 final 兼容及默认关闭语义。
   完整门禁：`uv run pytest` 为 405 passed/71 skipped，`uvx pyright` 为 0 errors，
   `uv build` 成功生成 sdist 与 wheel。
+
+## 2026-07-18 真实 smoke 暴露的 CSV provenance workflow 回归
+
+- 主 agent 的真实模型 smoke 复现了另一条与评分内容正确性无关的机制失败：模型先
+  写入只打印文本的 reproduction 脚本，随后直接写入内容正确的 CSV。绿色 grader
+  得分为 1.0，但白色 runner 正确以 `script_not_executed` /
+  `csv_without_provenance` 拒绝完成。根因不是 verifier 过严，而是提交 `7bb2a6b`
+  错误地把两个 `data/*.csv` 加入初始 `file.write` grant；通用 policy 当时只返回
+  `ASK`，所以错误 grant 可以让 direct write 穿过审批层。
+- 本 subagent 未读取凭据、未调用 API、未修改临时 evaluator。按本地
+  `systematic-debugging` 先追踪 design → smoke manifest → PolicyEngine → feedback
+  数据流，再按 TDD 写 RED。稳定 RED 覆盖 prompt、大小写/嵌套/Windows 分隔符的
+  CSV write/edit、错误 grant 绕过、非 PRBench 兼容、profile-aware feedback 和
+  smoke 清单；确定性 runner 回放在旧实现中首个 policy 明确为 `ASK`，证明绕过真实
+  存在。
+- 最小修复撤回所有 CSV grant，只给两个 reproduction 脚本各一次精确
+  `file.write` 与同路径 `file.edit`。`file.edit` 由回放证明必要：第一次 write 已被
+  不完整脚本消费后，需要一个不扩展路径范围的恢复动作；它不能触及 CSV。没有静态
+  process grant、通配符或自动 hash。
+- `PolicyEngine` 仅在 PRBench profile 对 workspace `data/**/*.csv` 的
+  `file.write` / `file.edit` 返回确定性 DENY
+  `prbench.direct_csv_mutation_blocked`；错误 manifest grant 不能覆盖 DENY。固定
+  reason 不含路径、expected value 或凭据。AgentLoop 将 profile 与 rule id 交给
+  feedback classifier，结构化下一步固定为修改/重写 reproduction 脚本并请求
+  `process.run`，而不是泛化为 Ask user。
+- GREEN 的确定性端到端回放为：direct CSV 被拒绝 → 精确 write 初版脚本 → 精确
+  edit 补全脚本 → 生成动态 approval request → 写入匹配脚本 SHA-256 的一次性
+  process grant → 真实 Python 子进程执行 → 即时 verifier 返回 `completed`，后续
+  read 未执行；同时断言错误 direct-write grant 不能绕过，secret-shaped 测试值不
+  进入 trace/result。
+- 最终门禁：`uv run pytest` 为 **420 passed / 71 skipped**；补齐测试中的 Optional
+  类型收窄后 `uvx pyright` 为 0 errors；`uv build` 成功生成 sdist/wheel；PowerShell
+  AST、`git diff --check` 与 tracked `.env` / PEM / key 清单检查通过。

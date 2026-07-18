@@ -223,6 +223,28 @@ CSV 获得官方绿色 grader 的满分内容评价，却没有主动请求 stop
 语义扩散到普通 coding/GAIA loop，也没有新增第二套验证器、任务专用 solver 或提示词
 补丁。
 
+### 第五轮修订：从“精确 CSV 审批”到不可绕过的 provenance workflow
+
+第二次真实 smoke 暴露了配置与机制之间的矛盾：`7bb2a6b` 为两个公开 CSV 增加了
+精确 `file.write` grant，模型因此能直接写出评分内容正确的 CSV；但 reproduction
+脚本只打印而未生成数据，verifier 正确报告 `script_not_executed` 与
+`csv_without_provenance`。绿色 grader 的 1.0 只能证明内容，不证明执行来源，因此
+本轮再次拒绝“放宽 provenance”或“把正确输出视为成功”的建议。
+
+系统性追踪确认根因有两层：错误 smoke grant 扩大了能力；通用 `PolicyEngine` 对
+所有 PRBench 文件写入仅返回 `ASK`，使该 grant 可以生效。同时通用 structured
+feedback 不携带 profile/rule 上下文，无法给出 provenance-specific 恢复步骤。
+修订后，初始 manifest 只允许目标 reproduction 脚本的一次精确 write 和同路径
+edit；后者只服务首版脚本不完整时的最小恢复，不允许改其他路径。
+
+确定性代码门禁在审批前拒绝 PRBench workspace `data/**/*.csv` 的 direct
+write/edit，大小写、Windows 分隔符、规范化路径与既有 escape/hidden 防护都纳入
+测试；即使 manifest 错含精确 CSV grant 也不能绕过。profile-aware feedback 只按
+该 rule 引导模型“修改或重写 reproduction 脚本，再请求 `process.run`”，固定文本
+不泄露 expected value、文件内容或凭据。端到端回放进一步证明动态请求绑定最终脚本
+SHA-256，批准后真实执行建立 provenance，并由既有即时 verifier 在下一轮模型调用前
+返回 `completed`。
+
 ## 仓库平台记录
 
 助教尚未最终确认期末项目应提交到 GitHub 还是 NJU Git。当前为了开发、提交、review 和过程记录顺畅，先使用 GitHub 仓库 `JianingZhangnan/AISE`。如课程后续明确要求 NJU Git，将以 GitHub 仓库完整历史为源迁移或镜像，并在本文件和 `AGENT_LOG.md` 中记录切换原因与关键操作。

@@ -27,11 +27,11 @@ if (-not $TaskIds -or $TaskIds.Count -eq 0) {
 $approvalGrants = @{
     aaatest_helloworld = @(
         @{ tool_name = 'file.write'; path = 'reproduction/hello.py' }
-        @{ tool_name = 'file.write'; path = 'data/output.csv' }
+        @{ tool_name = 'file.edit'; path = 'reproduction/hello.py' }
     )
     bbbtest_alphabet = @(
         @{ tool_name = 'file.write'; path = 'reproduction/alphabet.py' }
-        @{ tool_name = 'file.write'; path = 'data/letters.csv' }
+        @{ tool_name = 'file.edit'; path = 'reproduction/alphabet.py' }
     )
 }
 

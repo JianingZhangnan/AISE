@@ -132,13 +132,12 @@ def test_public_smoke_script_has_closed_credential_and_approval_contract():
         "900",
     ):
         assert argument in script
-    for exact_target in (
-        "reproduction/hello.py",
-        "data/output.csv",
-        "reproduction/alphabet.py",
-        "data/letters.csv",
-    ):
+    for exact_target in ("reproduction/hello.py", "reproduction/alphabet.py"):
         assert exact_target in script
+        assert f"tool_name = 'file.write'; path = '{exact_target}'" in script
+        assert f"tool_name = 'file.edit'; path = '{exact_target}'" in script
+    assert "data/output.csv" not in script
+    assert "data/letters.csv" not in script
     assert "expected_files" not in script
     assert "process.run" not in script
     assert "/usr/local/bin/python" not in script

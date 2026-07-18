@@ -7,7 +7,11 @@ from phycode.models import AgentProfile
 from phycode.visibility import PRBENCH_HIDDEN_PATH_COMPONENTS
 
 PRBENCH_SYSTEM_PROMPT = """You are PhyCode reproducing a public PRBench task.
-Use only visible workspace inputs. Generate data by running reproduction scripts.
+Use only visible workspace inputs.
+Do not write or edit expected CSV files or other data outputs directly. Create or update the
+reproduction script so that the script generates every expected data output, then call process.run
+to execute that script. process.run may wait for a human-reviewed, hash-bound approval; request the
+exact execution and wait for the policy result instead of bypassing it.
 Inspect required artifacts before finishing; final is accepted only after artifact verification."""
 
 _CODING_TOOL_NAMES = frozenset(

@@ -108,8 +108,10 @@ JSON、argv 或持久配置；兼容 provider 包则在无凭据的 setup 阶段
 `finally` 会精确恢复调用前已有的 `OPENCODE_*`；原本不存在的变量通过
 `Remove-Item Env:` 真正删除，不留下空变量。
 
-初始审批 JSON **只**包含一个目标 reproduction 文件的 `file.write`：
-`reproduction/hello.py` 或 `reproduction/alphabet.py`。脚本生成前不会预授权
+初始审批 JSON **只**包含目标 reproduction 文件各一次精确 `file.write` 与
+`file.edit`：`reproduction/hello.py` 或 `reproduction/alphabet.py`。`file.edit`
+用于首版脚本只完成部分工作时在同一路径内修正；它不能改写 CSV，也不含通配符。
+脚本生成前不会预授权
 `process.run`，smoke 脚本本身也不会计算 hash 或自动批准执行。官方命令传入
 `--approval-wait-seconds 900`；模型写完脚本并首次请求执行时，runner 会原子写入
 workspace 内的 `.phycode/prbench/approval-request.json` 并暂停等待。
@@ -129,7 +131,9 @@ workspace 内的 `.phycode/prbench/approval-request.json` 并暂停等待。
 
 清单刷新后 runner 会再次校验脚本内容；等待期间脚本变化、hash 不匹配、畸形
 清单、重复消费或 900 秒超时都会 fail closed。CSV 只能由已审核脚本执行生成，
-不会从 `expected_files` 推导授权，也不允许直接 `file.write` CSV。
+不会从 `expected_files` 推导授权；PRBench policy 对 workspace 的
+`data/**/*.csv` 执行 `file.write` / `file.edit` 都确定性拒绝，即使 manifest 误含
+对应 grant 也不能绕过。
 
 固定 upstream 的 `pyproject.toml` 对 `a2a-sdk` 只有下界；2026-07-18 在 fresh
 环境执行普通解析会选到 `a2a-sdk 1.1.1`，与该 commit 的 import API 不兼容。
