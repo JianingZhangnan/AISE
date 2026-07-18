@@ -164,6 +164,33 @@ def _load_function(
     return loaded
 
 
+def _load_launcher_output_helpers(
+    launcher_path: Path,
+    os_module: object,
+    *,
+    open_function: Callable[..., object] = open,
+) -> dict[str, object]:
+    path_is_within = _load_function(
+        launcher_path, "_path_is_within", {"os": os_module}
+    )
+    helper_globals = {
+        "_path_is_within": path_is_within,
+        "json": json,
+        "open": open_function,
+        "os": os_module,
+        "stat": stat,
+    }
+    return {
+        "_load_verified_json": _load_function(
+            launcher_path, "_load_verified_json", helper_globals
+        ),
+        "_path_is_within": path_is_within,
+        "_remove_stale_output": _load_function(
+            launcher_path, "_remove_stale_output", helper_globals
+        ),
+    }
+
+
 def _load_agent_env(source: Path) -> types.ModuleType:
     spec = importlib.util.spec_from_file_location("patched_agent_env", source)
     assert spec is not None and spec.loader is not None
@@ -1102,15 +1129,13 @@ def test_official_launcher_handles_stale_report_before_container_setup(
 
     launcher_path = patched_official_evaluator / "src/launcher.py"
     report_os = ReportOsProxy()
-    path_is_within = _load_function(
-        launcher_path, "_path_is_within", {"os": report_os}
-    )
+    output_helpers = _load_launcher_output_helpers(launcher_path, report_os)
     launch_evaluation = _load_function(
         launcher_path,
         "launch_evaluation",
         {
             "DATA_DIR": str(tmp_path / "tasks"),
-            "_path_is_within": path_is_within,
+            **output_helpers,
             "_copy_input_files": lambda *_args: None,
             "_copy_paper_images": observe_report_cleanup,
             "_copy_paper_markdown": lambda *_args: None,
@@ -1166,6 +1191,13 @@ def test_official_launcher_handles_stale_report_before_container_setup(
         ("stale_report", False),
         ("report_symlink", False),
         ("report_outside", False),
+        ("stale_run_result", False),
+        ("missing_run_result", False),
+        ("malformed_run_result", False),
+        ("run_result_symlink", False),
+        ("run_result_outside", False),
+        ("run_result_not_completed", False),
+        ("grading_error", False),
         ("report", True),
     ],
 )
@@ -1179,9 +1211,13 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
     task_root.mkdir(parents=True)
     (task_root / "task.yaml").write_text("public task", encoding="utf-8")
     report_path = task_root / "workspace/eval_logs/eval_report.json"
+    run_result_path = task_root / "workspace/.phycode/prbench/run_result.json"
     if outcome == "stale_report":
         report_path.parent.mkdir(parents=True)
         report_path.write_text('{"stale": true}', encoding="utf-8")
+    if outcome == "stale_run_result":
+        run_result_path.parent.mkdir(parents=True)
+        run_result_path.write_text('{"status": "completed"}', encoding="utf-8")
     cleanup_events: list[str] = []
     ready_values = {
         "green_not_ready": [False],
@@ -1208,9 +1244,32 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
         async def send_message(self, _url: str, _task: str) -> object:
             if outcome == "send_error":
                 raise RuntimeError("send failed")
-            if outcome in {"report", "report_symlink", "report_outside"}:
+            if outcome not in {"no_report", "stale_report"}:
                 report_path.parent.mkdir(parents=True, exist_ok=True)
-                report_path.write_text('{"status": "ok"}', encoding="utf-8")
+                grading = (
+                    {"error": "parse_failure"} if outcome == "grading_error" else {}
+                )
+                report_path.write_text(
+                    json.dumps({"grading": grading}), encoding="utf-8"
+                )
+            if outcome not in {
+                "no_report",
+                "stale_report",
+                "stale_run_result",
+                "missing_run_result",
+            }:
+                run_result_path.parent.mkdir(parents=True, exist_ok=True)
+                if outcome == "malformed_run_result":
+                    run_result_path.write_text("not-json", encoding="utf-8")
+                else:
+                    status_value = (
+                        "repeated_no_progress"
+                        if outcome == "run_result_not_completed"
+                        else "completed"
+                    )
+                    run_result_path.write_text(
+                        json.dumps({"status": status_value}), encoding="utf-8"
+                    )
             return object()
 
     original_open = open
@@ -1224,6 +1283,11 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
         def realpath(self, path: str | os.PathLike[str]) -> str:
             if os.fspath(path) == str(report_path) and outcome == "report_outside":
                 return str(tmp_path / "outside/eval_report.json")
+            if (
+                os.fspath(path) == str(run_result_path)
+                and outcome == "run_result_outside"
+            ):
+                return str(tmp_path / "outside/run_result.json")
             return original_realpath(path)
 
     class ReportOsProxy:
@@ -1235,27 +1299,36 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
         def lstat(self, path: str | os.PathLike[str]) -> object:
             if os.fspath(path) == str(report_path) and outcome == "report_symlink":
                 return types.SimpleNamespace(st_mode=stat.S_IFLNK | 0o777)
+            if (
+                os.fspath(path) == str(run_result_path)
+                and outcome == "run_result_symlink"
+            ):
+                return types.SimpleNamespace(st_mode=stat.S_IFLNK | 0o777)
             return original_lstat(path)
 
     def guarded_open(path: str | os.PathLike[str], mode: str = "r") -> object:
-        if os.fspath(path) == str(report_path) and outcome in {
-            "report_symlink",
-            "report_outside",
-        }:
+        unsafe_path = (
+            os.fspath(path) == str(report_path)
+            and outcome in {"report_symlink", "report_outside"}
+        ) or (
+            os.fspath(path) == str(run_result_path)
+            and outcome in {"run_result_symlink", "run_result_outside"}
+        )
+        if unsafe_path:
             raise AssertionError("untrusted report must not be opened")
         return original_open(path, mode)
 
     launcher_path = patched_official_evaluator / "src/launcher.py"
     report_os = ReportOsProxy()
-    path_is_within = _load_function(
-        launcher_path, "_path_is_within", {"os": report_os}
+    output_helpers = _load_launcher_output_helpers(
+        launcher_path, report_os, open_function=guarded_open
     )
     launch_evaluation = _load_function(
         launcher_path,
         "launch_evaluation",
         {
             "DATA_DIR": str(tmp_path / "tasks"),
-            "_path_is_within": path_is_within,
+            **output_helpers,
             "_archive_trace": lambda *_args: cleanup_events.append("archive-trace"),
             "_archive_workspace": lambda *_args: cleanup_events.append("archive")
             or "archive-destination",
@@ -1323,6 +1396,111 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
     assert "remove" in cleanup_events
     assert "archive" in cleanup_events
     assert cleanup_events.count("kill") == 2
+
+
+@pytest.mark.parametrize(
+    "report_payload",
+    [{"grading": {"error": "parse_failure"}}, []],
+)
+def test_official_non_phycode_launcher_keeps_upstream_report_success_semantics(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+    report_payload: object,
+) -> None:
+    task_root = tmp_path / "tasks/public-task"
+    task_root.mkdir(parents=True)
+    (task_root / "task.yaml").write_text("public task", encoding="utf-8")
+    report_path = task_root / "workspace/eval_logs/eval_report.json"
+
+    class FakeProcess:
+        pid = 4321
+
+    class FakeDockerEnvironment:
+        container_id = "container-id"
+
+        def get_logs(self) -> str:
+            return "public logs"
+
+    class FakeA2A:
+        async def wait_agent_ready(self, _url: str, timeout: int) -> bool:
+            del timeout
+            return True
+
+        async def send_message(self, _url: str, _task: str) -> object:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(
+                json.dumps(report_payload),
+                encoding="utf-8",
+            )
+            return object()
+
+    launcher_path = patched_official_evaluator / "src/launcher.py"
+    output_helpers = _load_launcher_output_helpers(launcher_path, os)
+    launch_evaluation = _load_function(
+        launcher_path,
+        "launch_evaluation",
+        {
+            "DATA_DIR": str(tmp_path / "tasks"),
+            **output_helpers,
+            "_archive_trace": lambda *_args: None,
+            "_archive_workspace": lambda *_args: "archive-destination",
+            "_copy_input_files": lambda *_args: None,
+            "_copy_paper_images": lambda *_args: None,
+            "_copy_paper_markdown": lambda *_args: None,
+            "_export_traces_for_type": lambda *_args: None,
+            "_kill_process": lambda *_args: None,
+            "_remove_container": lambda *_args: None,
+            "_start_without_phycode_environment": lambda *_args: None,
+            "find_free_port_pair": lambda: (9001, 9002),
+            "json": json,
+            "logger": types.SimpleNamespace(
+                error=lambda *_: None,
+                exception=lambda *_: None,
+                info=lambda *_: None,
+                warning=lambda *_: None,
+            ),
+            "logging": types.SimpleNamespace(
+                INFO=20,
+                basicConfig=lambda **_kwargs: None,
+                FileHandler=lambda *_args: object(),
+                StreamHandler=lambda *_args: object(),
+            ),
+            "multiprocessing": types.SimpleNamespace(
+                Process=lambda **_kwargs: FakeProcess()
+            ),
+            "my_a2a": FakeA2A(),
+            "open": open,
+            "os": os,
+            "resolve_env": lambda _agent_type: {},
+            "setup_docker_environment": lambda *_args, **_kwargs: FakeDockerEnvironment(),
+            "start_green_agent": object(),
+            "start_white_agent": object(),
+            "stat": stat,
+            "time": types.SimpleNamespace(time=lambda: 1.0),
+            "yaml": types.SimpleNamespace(
+                safe_load=lambda _handle: {
+                    "paper": {
+                        "title": "Public task",
+                        "author": "Public author",
+                        "paper_file": "paper.md",
+                    }
+                }
+            ),
+        },
+    )
+
+    assert asyncio.run(
+        cast(
+            Coroutine[object, object, object],
+            launch_evaluation(
+                task_id="public-task",
+                green_port=9001,
+                white_port=9002,
+                white_agent_type="codex",
+                green_agent_type="opencode",
+            ),
+        )
+    ) is True
 
 
 def test_official_launcher_missing_task_is_failure_and_main_exits_nonzero(
