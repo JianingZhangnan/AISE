@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
+from phycode.execution import ExecutionJournal, ExecutionJournalError
 from phycode.models import ToolCall, ToolResult, ToolRiskLevel, ToolSpec
 from phycode.redaction import redact_text
 from phycode.tools.base import ToolRegistry
@@ -53,12 +55,11 @@ def register_process_tools(
     registry: ToolRegistry,
     workspace_root: Path,
     allowed_executables: frozenset[Path],
-    journal: object | None = None,
+    journal: ExecutionJournal | None = None,
 ) -> None:
     root = workspace_root.expanduser().resolve()
     visibility = PathVisibilityPolicy(root)
     executable_allowlist = frozenset(path.expanduser().resolve() for path in allowed_executables)
-    _ = journal  # Task 3 will connect the execution journal at this extension point.
 
     def process_run(call: ToolCall) -> ToolResult:
         unknown_args = set(call.args) - {"argv", "cwd", "timeout"}
@@ -99,6 +100,36 @@ def register_process_tools(
             if (value := os.environ.get(name)) is not None
         }
 
+        started_at = datetime.now(timezone.utc)
+        artifacts_before = ()
+        script_path: str | None = None
+        script_sha256: str | None = None
+        if journal is not None:
+            try:
+                artifacts_before = journal.snapshot_artifacts()
+                script_path, script_sha256 = journal.snapshot_script(tuple(argv), resolved_cwd)
+            except (OSError, RuntimeError, ExecutionJournalError):
+                return _invalid(call, "process execution could not be journaled safely")
+
+        def finish_journal(status: str, exit_code: int | None) -> ToolResult | None:
+            if journal is None:
+                return None
+            try:
+                journal.record_process(
+                    call_id=call.id,
+                    argv=tuple(argv),
+                    cwd=resolved_cwd,
+                    status=status,
+                    exit_code=exit_code,
+                    started_at=started_at,
+                    artifacts_before=artifacts_before,
+                    script_path=script_path,
+                    script_sha256=script_sha256,
+                )
+            except (OSError, RuntimeError, ExecutionJournalError):
+                return _result(call, "tool_error", stderr="execution journal update failed")
+            return None
+
         try:
             completed = subprocess.run(
                 argv,
@@ -110,6 +141,9 @@ def register_process_tools(
                 env=minimal_environment,
             )
         except subprocess.TimeoutExpired as exc:
+            journal_error = finish_journal("timeout", None)
+            if journal_error is not None:
+                return journal_error
             return _result(
                 call,
                 "timeout",
@@ -117,9 +151,15 @@ def register_process_tools(
                 stderr=_to_text(exc.stderr) or f"Process timed out after {timeout} seconds",
             )
         except OSError as exc:
+            journal_error = finish_journal("tool_error", None)
+            if journal_error is not None:
+                return journal_error
             return _result(call, "tool_error", stderr=str(exc))
 
         status = "ok" if completed.returncode == 0 else "command_failed"
+        journal_error = finish_journal(status, completed.returncode)
+        if journal_error is not None:
+            return journal_error
         return _result(call, status, stdout=completed.stdout, stderr=completed.stderr)
 
     registry.register(
