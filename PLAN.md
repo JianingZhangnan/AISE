@@ -2433,12 +2433,26 @@ Task 2 完成后，以下任务可在独立 worktree 中并行进行：
 
 逐步实施计划：`docs/superpowers/plans/2026-07-18-prbench-runtime-refactor.md`。
 
-- [ ] Task 14：Profile 单一来源与路径可见性。
-- [ ] Task 15：结构化 `process.run(argv)` 与一次性审批。
-- [ ] Task 16：Execution journal、公开任务契约与 artifact verifier。
-- [ ] Task 17：AgentLoop 完成门禁与连续无进展停机。
-- [ ] Task 18：PRBench runner 与 CLI 状态契约。
-- [ ] Task 19：固定版本官方 evaluator adapter。
-- [ ] Task 20：中文文档、过程证据和可重复真实 smoke 命令。
+- [x] Task 14：Profile 单一来源与路径可见性。commits：`6f8dd6a`、`468ac42`；spec/quality review clean。
+- [x] Task 15：结构化 `process.run(argv)` 与一次性审批。commits：`7ed3423`、`c37467f`、`65fca5c`、`d198f5c`；spec/quality review clean。
+- [x] Task 16：Execution journal、公开任务契约与 artifact verifier。commits：`4bd700f`、`a429dbe`、`67b7c3e`；spec/quality review clean。
+- [x] Task 17：AgentLoop 完成门禁与连续无进展停机。commits：`5d561b3`、`9b7fa50`；spec/quality review clean。
+- [x] Task 18：PRBench runner 与 CLI 状态契约。commits：`537b8dc` 至 `148df4f`；spec/quality review clean。
+- [x] Task 19：固定版本官方 evaluator adapter。commits：`31f58a4`、`1b0a448`；spec/quality review clean。
+- [x] Task 20：中文文档、过程证据和可重复真实 smoke 命令。commit：本次文档提交；真实凭据与官方运行保留给主 agent。
 
 依赖关系为 Task 14 → 15 → 16 → 17 → 18 → 19 → 20。每项由新鲜 subagent 按 TDD 完成，并在进入下一项前通过 spec 合规与代码质量审查。最终由主 agent 在不暴露凭据的前提下使用真实 `deepseek-v4-pro` 和固定官方 evaluator commit 跑 `aaatest_helloworld`、`bbbtest_alphabet`。
+
+本批 PRBench 运行时真正重构明确拒绝继续维护旧 parser：字符串级 shell
+lexer/state machine 无法覆盖解释器拼接、变量展开、symlink 和不同 shell 语义，
+其复杂度增长也没有形成权威安全边界。替代方案是结构化 argv、路径 visibility、
+一次性审批、execution provenance、artifact verifier 和 evaluator 生命周期隔离。
+
+真实 API 验收边界在 Task 20 文档/确定性全量测试之后：仅主 agent 可把真实
+provider 值读入当前子进程并运行 `aaatest_helloworld`、`bbbtest_alphabet`；
+subagent、默认 `uv run pytest` 和 CI 均不得读取凭据或把 mock 成功表述为真实能力。
+官方 fresh 环境还必须通过 uv 临时 exact overlay
+`a2a-sdk[http-server]==0.3.8` 启动固定 commit，避免普通解析选择 1.1.1 后产生
+upstream import API 漂移；overlay 不修改上游依赖声明。最终只有 runner
+`completed`、expected outputs、官方 evaluator 报告和 key/URL 泄漏扫描全部通过，
+才能记录真实验收成功。

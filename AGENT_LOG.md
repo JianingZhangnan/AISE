@@ -71,3 +71,60 @@
 - TDD：先加 4 个失败测试（`_build_llm` 无 key→Echo / 有 key→adapter、chat 非 final 存活、`_interactive_approver` 走 confirm），并给两个 echo 测试加 `_force_no_credentials`（monkeypatch `CredentialStore`）使其不受本机钥匙串状态影响；再实现变绿。
 - 验证：`uv run pytest` 为 **97 passed**；`uvx pyright` 为 0 errors；实机 `phycode run "hello again"` 无 key 时回退输出 `Echo: hello again`。
 - 合并：应用户要求，`codex/task-10-12` 以 fast-forward 合并到 `main` 并推送 `origin/main`（这批含全部评审修复 + Task 10–12 + 本次 run/chat 收口才首次落到主线）。
+
+## 2026-07-18 PRBench 运行时真正重构（Task 14–20）
+
+- 工作流：在 `codex/prbench-runtime-refactor` 隔离 worktree 中使用本地
+  Superpowers `subagent-driven-development` 与 `test-driven-development`。每个
+  Task 由新鲜 subagent 执行 RED→GREEN，自审后提交，再由独立 reviewer 同时给出
+  spec 合规与代码质量结论；进度保存在 `.superpowers/sdd/progress.md`。
+- 重构原因：真实 API 试运行证明旧 parser 路线同时存在安全与正确性缺陷——自制
+  shell lexer/state machine 越补越复杂，仍不能成为 ground truth 的权威隔离；全局
+  重复计数会误停机；assistant final 未经产物验证也可能被误报成功。因此从
+  `f2817ab` 干净基线重建结构化执行纵向切片，没有移植 parser-specific 补丁。
+- Task 14：建立 profile 单一来源与 symlink-aware path visibility。实现/修复提交
+  `6f8dd6a`、`468ac42`，spec/quality review clean。
+- Task 15：新增 `process.run(argv)`（`shell=False`、绝对 executable identity、最小
+  子进程环境）与一次性精确审批。提交 `7ed3423`、`c37467f`、`65fca5c`、
+  `d198f5c`，spec/quality review clean。
+- Task 16：新增 execution journal、公开 task contract、真实脚本 provenance 与
+  artifact verifier。提交 `4bd700f`、`a429dbe`、`67b7c3e`，spec/quality review
+  clean。
+- Task 17：把 final 接到 verifier，重复检测改为连续无进展，并保持 fatal blocker
+  优先级。提交 `5d561b3`、`9b7fa50`，spec/quality review clean。
+- Task 18：新增 `phycode prbench run`、机器可读状态、可信 composition 边界和递归
+  trace/result 脱敏。实现及审查修复从 `537b8dc` 到 `148df4f`；定向 144 passed、
+  全量 341 passed/10 skipped、Pyright 0 errors，spec/quality review clean。
+- Task 19：为官方固定 commit
+  `3e5bee4545cad2138832f06302e9c98bd81f5216` 增加最小 patch/apply adapter、两份
+  public contract、provider 生命周期清理与 pinned uv 安装。提交 `31f58a4`、
+  `1b0a448`；定向 18 passed、全量 359 passed/10 skipped、Pyright 0 errors，
+  fresh clone apply/help 与 wheel 检查通过，spec/quality review clean。
+- Task 20 subagent 范围：只修改中文文档、`tests/test_docs_process.py` 和
+  `integrations/prbench/run_public_smoke.ps1`；没有读取、索取或接收真实凭据，没有
+  调用真实 API，也没有运行 official evaluator。RED 命令
+  `uv run pytest tests/test_docs_process.py -v` 得到 3 failed/4 passed，失败原因精确
+  为 README/过程证据缺少新契约以及 smoke 脚本尚不存在。
+- Task 20 GREEN：同一 focused 命令为 7 passed；PowerShell AST 解析通过，清空三项
+  provider 环境后的负例在任何 adapter/文件操作前以通用缺配置消息 fail closed；
+  `uv run pytest` 为 367 passed/12 skipped，`uvx pyright` 为 0 errors；
+  `git diff --check` 通过，`git ls-files ".env" ".env.*" "*.pem" "*.key"` 无输出。
+- Task 20 审批清单：`aaatest_helloworld` 只允许一次写
+  `reproduction/hello.py` 和一次运行
+  `[/usr/local/bin/python, reproduction/hello.py]`；`bbbtest_alphabet` 对应
+  `reproduction/alphabet.py`。脚本没有从 expected outputs 自动派生授权，所有额外
+  调用 fail closed，临时 manifest 用后删除。
+- 上游环境风险：固定 commit 没有 lockfile 且只声明 `a2a-sdk>=0.3.8`；fresh
+  普通解析会选择 1.1.1 并破坏 upstream imports。主 agent 已动态验证 uv 临时
+  overlay `a2a-sdk[http-server]==0.3.8` 可解析官方 CLI；smoke 脚本采用该 exact
+  overlay，不修改 upstream `pyproject.toml`，也不扩大 adapter 到上游依赖维护。
+- 官方绿色 grader：脚本仍只读取三项 `PHYCODE_*`，但在 launch 子进程期间临时
+  映射为 `OPENCODE_API_KEY`、`OPENCODE_BASE_URL` 与
+  `OPENCODE_MODEL=openai/<PHYCODE_MODEL>`，并显式选择
+  `--green-agent-type opencode`。`finally` 恢复原有 `OPENCODE_*` 或清除临时值，
+  任何值都不进入脚本输出。
+- 真实 API 验收边界：Task 20 文档与确定性测试通过后，只由主 agent 在当前子进程
+  内载入 provider 值，启动 Docker daemon，并依次运行 `aaatest_helloworld`、
+  `bbbtest_alphabet`。必须同时看到 runner `completed`、expected outputs、官方
+  evaluator 报告且 trace/result 无 key/URL，才可记录为真实验收成功；mock、直接
+  runner 或 adapter apply 成功均不能冒充官方结果。
