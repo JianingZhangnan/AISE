@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import types
@@ -915,18 +916,26 @@ def test_official_main_and_white_runner_pass_approval_wait_only_to_phycode(
 
 
 @pytest.mark.parametrize(
-    ("agent_type", "provider_env", "expected_resolves", "clears_phycode"),
+    (
+        "agent_type",
+        "provider_env",
+        "constructor_fails",
+        "expected_resolves",
+        "clears_phycode",
+    ),
     [
-        ("phycode", {"PHYCODE_API_KEY": "provided"}, 0, True),
-        ("phycode", None, 1, True),
-        ("codex", None, 0, False),
+        ("phycode", {"PHYCODE_API_KEY": "provided"}, False, 0, True),
+        ("phycode", None, False, 1, True),
+        ("phycode", {"PHYCODE_API_KEY": "provided"}, True, 0, True),
+        ("codex", {"PHYCODE_API_KEY": "provided"}, False, 0, False),
     ],
 )
-def test_official_start_white_defines_phycode_environment_for_every_provider_path(
+def test_official_start_white_clears_original_mapping_after_executor_copy(
     patched_official_evaluator: Path,
     monkeypatch: pytest.MonkeyPatch,
     agent_type: str,
     provider_env: dict[str, str] | None,
+    constructor_fails: bool,
     expected_resolves: int,
     clears_phycode: bool,
 ) -> None:
@@ -936,15 +945,18 @@ def test_official_start_white_defines_phycode_environment_for_every_provider_pat
         "PHYCODE_MODEL",
     )
     resolve_calls: list[str] = []
-    executor_calls: list[dict[str, object]] = []
+    executor_copies: list[dict[str, str]] = []
     fake_environment = {name: "synthetic" for name in provider_names}
+    resolved_provider_env = {"PHYCODE_API_KEY": "resolved"}
+    original_provider_env = provider_env or resolved_provider_env
+    expected_provider_values = dict(original_provider_env)
 
     agent_env_module = types.ModuleType("src.my_util.agent_env")
     agent_env_module.PHYCODE_PROVIDER_NAMES = provider_names  # type: ignore[attr-defined]
 
     def resolve_env(requested_type: str) -> dict[str, str]:
         resolve_calls.append(requested_type)
-        return {"PHYCODE_API_KEY": "resolved"}
+        return resolved_provider_env
 
     agent_env_module.resolve_env = resolve_env  # type: ignore[attr-defined]
     src_module = types.ModuleType("src")
@@ -957,7 +969,11 @@ def test_official_start_white_defines_phycode_environment_for_every_provider_pat
 
     class FakeExecutor:
         def __init__(self, **kwargs: object) -> None:
-            executor_calls.append(kwargs)
+            supplied = kwargs["provider_env"]
+            assert isinstance(supplied, dict)
+            executor_copies.append(dict(supplied))
+            if constructor_fails:
+                raise RuntimeError("executor construction failed")
 
     class FakeRequestHandler:
         def __init__(self, **_kwargs: object) -> None:
@@ -991,16 +1007,153 @@ def test_official_start_white_defines_phycode_environment_for_every_provider_pat
         },
     )
 
-    start_white(agent_type=agent_type, provider_env=provider_env)
+    if constructor_fails:
+        with pytest.raises(RuntimeError, match="executor construction failed"):
+            start_white(agent_type=agent_type, provider_env=provider_env)
+    else:
+        start_white(agent_type=agent_type, provider_env=provider_env)
 
     assert resolve_calls == ["phycode"] * expected_resolves
-    assert len(executor_calls) == 1
-    if provider_env is not None:
-        assert executor_calls[0]["provider_env"] is provider_env
+    assert executor_copies == [expected_provider_values]
     if clears_phycode:
+        assert original_provider_env == {}
         assert all(name not in fake_environment for name in provider_names)
     else:
+        assert original_provider_env == expected_provider_values
         assert set(fake_environment) == set(provider_names)
+
+
+@pytest.mark.parametrize(
+    "stale_kind",
+    ["regular", "file_symlink", "dangling_symlink", "directory", "unlink_failure"],
+)
+def test_official_launcher_handles_stale_report_before_container_setup(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+    stale_kind: str,
+) -> None:
+    task_root = tmp_path / "tasks/public-task"
+    task_root.mkdir(parents=True)
+    (task_root / "task.yaml").write_text("public task", encoding="utf-8")
+    report_path = task_root / "workspace/eval_logs/eval_report.json"
+    report_path.parent.mkdir(parents=True)
+    if stale_kind == "directory":
+        report_path.mkdir()
+    elif stale_kind != "dangling_symlink":
+        report_path.write_text('{"stale": true}', encoding="utf-8")
+
+    report_active = True
+    original_lexists = os.path.lexists
+    original_lstat = os.lstat
+    original_unlink = os.unlink
+
+    class ReportPathProxy:
+        def __getattr__(self, name: str) -> object:
+            return getattr(os.path, name)
+
+        def lexists(self, path: str | os.PathLike[str]) -> bool:
+            if os.fspath(path) == str(report_path):
+                return report_active
+            return original_lexists(path)
+
+    class ReportOsProxy:
+        path = ReportPathProxy()
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(os, name)
+
+        def lstat(self, path: str | os.PathLike[str]) -> object:
+            if os.fspath(path) == str(report_path) and stale_kind in {
+                "file_symlink",
+                "dangling_symlink",
+            }:
+                return types.SimpleNamespace(st_mode=stat.S_IFLNK | 0o777)
+            return original_lstat(path)
+
+        def unlink(self, path: str | os.PathLike[str]) -> None:
+            nonlocal report_active
+            if os.fspath(path) != str(report_path):
+                original_unlink(path)
+                return
+            if stale_kind == "unlink_failure":
+                raise PermissionError("stale report cannot be removed")
+            report_active = False
+            if original_lexists(path):
+                original_unlink(path)
+
+    class ReachedResourcePreparation(RuntimeError):
+        pass
+
+    class ReachedContainerSetup(RuntimeError):
+        pass
+
+    resource_calls: list[str] = []
+    setup_calls: list[str] = []
+
+    def observe_report_cleanup(*_args: object) -> None:
+        resource_calls.append("copy")
+        if stale_kind in {"regular", "file_symlink", "dangling_symlink"}:
+            assert not report_active
+            raise ReachedResourcePreparation
+
+    def reject_container_setup(*_args: object, **_kwargs: object) -> object:
+        setup_calls.append("setup")
+        raise ReachedContainerSetup
+
+    launcher_path = patched_official_evaluator / "src/launcher.py"
+    report_os = ReportOsProxy()
+    path_is_within = _load_function(
+        launcher_path, "_path_is_within", {"os": report_os}
+    )
+    launch_evaluation = _load_function(
+        launcher_path,
+        "launch_evaluation",
+        {
+            "DATA_DIR": str(tmp_path / "tasks"),
+            "_path_is_within": path_is_within,
+            "_copy_input_files": lambda *_args: None,
+            "_copy_paper_images": observe_report_cleanup,
+            "_copy_paper_markdown": lambda *_args: None,
+            "find_free_port_pair": lambda: (9001, 9002),
+            "logger": types.SimpleNamespace(
+                error=lambda *_: None,
+                info=lambda *_: None,
+            ),
+            "logging": types.SimpleNamespace(
+                INFO=20,
+                basicConfig=lambda **_kwargs: None,
+                FileHandler=lambda *_args: object(),
+                StreamHandler=lambda *_args: object(),
+            ),
+            "os": report_os,
+            "resolve_env": lambda _agent_type: {},
+            "setup_docker_environment": reject_container_setup,
+            "stat": stat,
+            "yaml": types.SimpleNamespace(
+                safe_load=lambda _handle: {
+                    "paper": {"title": "Public task", "author": "Public author"}
+                }
+            ),
+        },
+    )
+    launch_call = cast(
+        Coroutine[object, object, object],
+        launch_evaluation(task_id="public-task", green_port=9001, white_port=9002),
+    )
+
+    if stale_kind in {"regular", "file_symlink", "dangling_symlink"}:
+        with pytest.raises(ReachedResourcePreparation):
+            asyncio.run(launch_call)
+        assert resource_calls == ["copy"]
+    elif stale_kind == "directory":
+        with pytest.raises(RuntimeError, match="report"):
+            asyncio.run(launch_call)
+        assert resource_calls == []
+    else:
+        with pytest.raises(PermissionError, match="cannot be removed"):
+            asyncio.run(launch_call)
+        assert resource_calls == []
+    assert setup_calls == []
 
 
 @pytest.mark.parametrize(
@@ -1010,6 +1163,9 @@ def test_official_start_white_defines_phycode_environment_for_every_provider_pat
         ("white_not_ready", False),
         ("send_error", False),
         ("no_report", False),
+        ("stale_report", False),
+        ("report_symlink", False),
+        ("report_outside", False),
         ("report", True),
     ],
 )
@@ -1023,6 +1179,9 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
     task_root.mkdir(parents=True)
     (task_root / "task.yaml").write_text("public task", encoding="utf-8")
     report_path = task_root / "workspace/eval_logs/eval_report.json"
+    if outcome == "stale_report":
+        report_path.parent.mkdir(parents=True)
+        report_path.write_text('{"stale": true}', encoding="utf-8")
     cleanup_events: list[str] = []
     ready_values = {
         "green_not_ready": [False],
@@ -1049,16 +1208,54 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
         async def send_message(self, _url: str, _task: str) -> object:
             if outcome == "send_error":
                 raise RuntimeError("send failed")
-            if outcome == "report":
+            if outcome in {"report", "report_symlink", "report_outside"}:
                 report_path.parent.mkdir(parents=True, exist_ok=True)
                 report_path.write_text('{"status": "ok"}', encoding="utf-8")
             return object()
 
+    original_open = open
+    original_realpath = os.path.realpath
+    original_lstat = os.lstat
+
+    class ReportPathProxy:
+        def __getattr__(self, name: str) -> object:
+            return getattr(os.path, name)
+
+        def realpath(self, path: str | os.PathLike[str]) -> str:
+            if os.fspath(path) == str(report_path) and outcome == "report_outside":
+                return str(tmp_path / "outside/eval_report.json")
+            return original_realpath(path)
+
+    class ReportOsProxy:
+        path = ReportPathProxy()
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(os, name)
+
+        def lstat(self, path: str | os.PathLike[str]) -> object:
+            if os.fspath(path) == str(report_path) and outcome == "report_symlink":
+                return types.SimpleNamespace(st_mode=stat.S_IFLNK | 0o777)
+            return original_lstat(path)
+
+    def guarded_open(path: str | os.PathLike[str], mode: str = "r") -> object:
+        if os.fspath(path) == str(report_path) and outcome in {
+            "report_symlink",
+            "report_outside",
+        }:
+            raise AssertionError("untrusted report must not be opened")
+        return original_open(path, mode)
+
+    launcher_path = patched_official_evaluator / "src/launcher.py"
+    report_os = ReportOsProxy()
+    path_is_within = _load_function(
+        launcher_path, "_path_is_within", {"os": report_os}
+    )
     launch_evaluation = _load_function(
-        patched_official_evaluator / "src/launcher.py",
+        launcher_path,
         "launch_evaluation",
         {
             "DATA_DIR": str(tmp_path / "tasks"),
+            "_path_is_within": path_is_within,
             "_archive_trace": lambda *_args: cleanup_events.append("archive-trace"),
             "_archive_workspace": lambda *_args: cleanup_events.append("archive")
             or "archive-destination",
@@ -1088,12 +1285,14 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
                 Process=lambda **_kwargs: FakeProcess()
             ),
             "my_a2a": FakeA2A(),
-            "os": os,
+            "open": guarded_open,
+            "os": report_os,
             "resolve_env": lambda _agent_type: {},
             "run_with_phycode_cleanup": lambda action, *_args: action(),
             "setup_docker_environment": lambda *_args, **_kwargs: FakeDockerEnvironment(),
             "start_green_agent": object(),
             "start_white_agent": object(),
+            "stat": stat,
             "time": types.SimpleNamespace(time=lambda: 1.0),
             "yaml": types.SimpleNamespace(
                 safe_load=lambda _handle: {

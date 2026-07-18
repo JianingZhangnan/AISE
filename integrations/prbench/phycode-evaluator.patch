@@ -93,7 +93,9 @@ diff --git a/src/launcher.py b/src/launcher.py
 index c705de8..b7417d5 100644
 --- a/src/launcher.py
 +++ b/src/launcher.py
-@@ -33 +33,6 @@ from src.my_util.docker_manager import DockerEnvironment
+@@ -23,0 +24 @@ import signal
++import stat
+@@ -33 +34,6 @@ from src.my_util.docker_manager import DockerEnvironment
 -from src.my_util.agent_env import resolve_env, build_docker_exec_env_flags
 +from src.my_util.agent_env import (
 +    PHYCODE_PROVIDER_NAMES,
@@ -101,7 +103,18 @@ index c705de8..b7417d5 100644
 +    resolve_env,
 +    run_with_phycode_cleanup,
 +)
-@@ -40,0 +46,7 @@ RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
+@@ -42,0 +49,20 @@ RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
++def _path_is_within(root: str, candidate: str) -> bool:
++    """Return whether candidate resolves inside root, including on Windows."""
++    root_real = os.path.realpath(root)
++    candidate_real = os.path.realpath(candidate)
++    try:
++        common = os.path.commonpath((root_real, candidate_real))
++    except ValueError:
++        return False
++    return os.path.normcase(common) == os.path.normcase(root_real)
++
++
 +def _start_without_phycode_environment(proc: multiprocessing.Process) -> None:
 +    """Start an evaluator child without leaking white-provider credentials."""
 +    saved = {name: os.environ.pop(name) for name in PHYCODE_PROVIDER_NAMES if name in os.environ}
@@ -109,7 +122,9 @@ index c705de8..b7417d5 100644
 +        proc.start()
 +    finally:
 +        os.environ.update(saved)
-@@ -230,0 +243,76 @@ def _copy_input_files(task_config: dict, task_dir: str, workspace_dir: str) -> N
++
++
+@@ -230,0 +257,76 @@ def _copy_input_files(task_config: dict, task_dir: str, workspace_dir: str) -> N
 +def _copy_phycode_controls(
 +    task_config: dict,
 +    task_dir: str,
@@ -186,26 +201,26 @@ index c705de8..b7417d5 100644
 +            handle.write("\n")
 +
 +
-@@ -234,0 +323,3 @@ def _export_traces_for_type(
+@@ -234,0 +337,3 @@ def _export_traces_for_type(
 +    if agent_type == "phycode":
 +        # Already persisted inside workspace/.phycode/prbench.
 +        return
-@@ -261 +352,3 @@ def setup_docker_environment(
+@@ -261 +366,3 @@ def setup_docker_environment(
 -    # Collect credentials for all needed agent types via centralized resolver
 +    # A PhyCode white run must not expose green credentials to the shared
 +    # container. The green child receives them only when grading begins.
 +    defer_green_env = white_agent_type == "phycode"
-@@ -264 +357,2 @@ def setup_docker_environment(
+@@ -264 +371,2 @@ def setup_docker_environment(
 -        env_vars.update(resolve_env(t))
 +        if t != "phycode" and not (defer_green_env and t == green_agent_type):
 +            env_vars.update(resolve_env(t))
-@@ -273,0 +368,5 @@ def setup_docker_environment(
+@@ -273,0 +382,5 @@ def setup_docker_environment(
 +        phycode_wheel=(
 +            os.path.join(PROJECT_ROOT, ".phycode-adapter", "phycode.whl")
 +            if "phycode" in needed_types
 +            else None
 +        ),
-@@ -285 +384,8 @@ def setup_docker_environment(
+@@ -285 +398,8 @@ def setup_docker_environment(
 -        if agent_type == "codex":
 +        if agent_type == "phycode":
 +            logger.info("Docker: Installing PhyCode wheel...")
@@ -215,14 +230,14 @@ index c705de8..b7417d5 100644
 +                raise RuntimeError("PhyCode CLI verification failed in Docker")
 +            logger.info("Docker: PhyCode ready.")
 +        elif agent_type == "codex":
-@@ -322,0 +429,3 @@ async def launch_evaluation(
+@@ -322,0 +443,3 @@ async def launch_evaluation(
 +    phycode_contract: str | None = None,
 +    phycode_approvals: str | None = None,
 +    approval_wait_seconds: int = 0,
-@@ -325 +434 @@ async def launch_evaluation(
+@@ -325 +448 @@ async def launch_evaluation(
 -):
 +) -> bool:
-@@ -337,0 +447,9 @@ async def launch_evaluation(
+@@ -337,0 +461,9 @@ async def launch_evaluation(
 +    if not 0 <= approval_wait_seconds <= 900:
 +        raise ValueError("approval wait seconds must be between 0 and 900")
 +    if effective_green_type == "phycode":
@@ -232,13 +247,28 @@ index c705de8..b7417d5 100644
 +    phycode_provider_env = (
 +        resolve_env("phycode") if effective_white_type == "phycode" else {}
 +    )
-@@ -357 +475 @@ async def launch_evaluation(
+@@ -357 +489 @@ async def launch_evaluation(
 -        return
 +        return False
-@@ -362 +480 @@ async def launch_evaluation(
+@@ -362 +494 @@ async def launch_evaluation(
 -        return
 +        return False
-@@ -393,0 +512,10 @@ async def launch_evaluation(
+@@ -374,0 +507,14 @@ async def launch_evaluation(
++    report_path = os.path.join(workspace_dir, "eval_logs", "eval_report.json")
++    if not _path_is_within(task_dir, workspace_dir) or not _path_is_within(
++        workspace_dir, os.path.dirname(report_path)
++    ):
++        raise RuntimeError("Evaluation report path escapes the task workspace")
++    if os.path.lexists(report_path):
++        stale_report = os.lstat(report_path)
++        if not (
++            stat.S_ISREG(stale_report.st_mode)
++            or stat.S_ISLNK(stale_report.st_mode)
++        ):
++            raise RuntimeError("Existing evaluation report is not a removable file")
++        os.unlink(report_path)
++
+@@ -393,0 +540,10 @@ async def launch_evaluation(
 +    if effective_white_type == "phycode":
 +        _copy_phycode_controls(
 +            task_config,
@@ -249,23 +279,23 @@ index c705de8..b7417d5 100644
 +            code_only,
 +        )
 +
-@@ -397,0 +526 @@ async def launch_evaluation(
+@@ -397,0 +554 @@ async def launch_evaluation(
 +    evaluation_succeeded = False
-@@ -420 +548,2 @@ async def launch_evaluation(
+@@ -420 +577,2 @@ async def launch_evaluation(
 -            args=("prbench_green_agent", green_host, green_port, container_id, effective_green_type),
 +            args=("prbench_green_agent", green_host, green_port, container_id,
 +                  effective_green_type, effective_white_type == "phycode"),
-@@ -423 +552 @@ async def launch_evaluation(
+@@ -423 +581 @@ async def launch_evaluation(
 -        p_green.start()
 +        _start_without_phycode_environment(p_green)
-@@ -427 +557 @@ async def launch_evaluation(
+@@ -427 +585 @@ async def launch_evaluation(
 -            return
 +            return False
-@@ -436 +565,2 @@ async def launch_evaluation(
+@@ -436 +594,2 @@ async def launch_evaluation(
 -                  workspace_dir, container_id, effective_white_type),
 +                  workspace_dir, container_id, effective_white_type,
 +                  phycode_provider_env, approval_wait_seconds),
-@@ -439 +569,7 @@ async def launch_evaluation(
+@@ -439 +598,7 @@ async def launch_evaluation(
 -        p_white.start()
 +        if effective_white_type == "phycode":
 +            run_with_phycode_cleanup(
@@ -274,25 +304,36 @@ index c705de8..b7417d5 100644
 +            )
 +        else:
 +            _start_without_phycode_environment(p_white)
-@@ -443 +580 @@ async def launch_evaluation(
+@@ -443 +608 @@ async def launch_evaluation(
 -            return
 +            return False
-@@ -466,0 +604 @@ async def launch_evaluation(
+@@ -466,0 +632 @@ async def launch_evaluation(
 +        send_succeeded = False
-@@ -469,0 +608 @@ async def launch_evaluation(
+@@ -469,0 +636 @@ async def launch_evaluation(
 +            send_succeeded = True
-@@ -479 +618,2 @@ async def launch_evaluation(
+@@ -478,2 +645,12 @@ async def launch_evaluation(
+-        report_path = os.path.join(workspace_dir, "eval_logs", "eval_report.json")
 -        if os.path.exists(report_path):
-+        report_exists = os.path.isfile(report_path)
++        report_exists = False
++        try:
++            generated_report = os.lstat(report_path)
++        except FileNotFoundError:
++            pass
++        else:
++            report_exists = (
++                stat.S_ISREG(generated_report.st_mode)
++                and not stat.S_ISLNK(generated_report.st_mode)
++                and _path_is_within(workspace_dir, report_path)
++            )
 +        if report_exists:
-@@ -487,0 +628 @@ async def launch_evaluation(
+@@ -487,0 +665 @@ async def launch_evaluation(
 +        evaluation_succeeded = send_succeeded and report_exists
-@@ -534,0 +676 @@ async def launch_evaluation(
+@@ -534,0 +713 @@ async def launch_evaluation(
 +    return evaluation_succeeded
-@@ -558 +700 @@ async def batch_evaluate(
+@@ -558 +737 @@ async def batch_evaluate(
 -                await launch_evaluation(
 +                succeeded = await launch_evaluation(
-@@ -569 +711,4 @@ async def batch_evaluate(
+@@ -569 +748,4 @@ async def batch_evaluate(
 -                print(f"[BATCH] Completed: {task_id}", flush=True)
 +                if succeeded:
 +                    print(f"[BATCH] Completed: {task_id}", flush=True)
@@ -614,6 +655,20 @@ index a1b41ff..db7a67e 100644
 @@ -410 +468 @@ def start_white_agent(
 -    _agent_labels = {"codex": "OpenAI Codex", "opencode": "OpenCode", "claude": "Claude Code"}
 +    _agent_labels = {"phycode": "PhyCode", "codex": "OpenAI Codex", "opencode": "OpenCode", "claude": "Claude Code"}
-@@ -423,0 +482,2 @@ def start_white_agent(
+@@ -419,2 +477,2 @@ def start_white_agent(
+-    request_handler = DefaultRequestHandler(
+-        agent_executor=ClaudeCodeWhiteAgentExecutor(
++    try:
++        agent_executor = ClaudeCodeWhiteAgentExecutor(
+@@ -424 +482,10 @@ def start_white_agent(
+-        ),
 +            provider_env=provider_env,
 +            approval_wait_seconds=approval_wait_seconds,
++        )
++    finally:
++        if agent_type == "phycode":
++            assert provider_env is not None
++            provider_env.clear()
++
++    request_handler = DefaultRequestHandler(
++        agent_executor=agent_executor,
