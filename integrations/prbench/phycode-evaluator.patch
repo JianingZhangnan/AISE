@@ -330,20 +330,98 @@ index d0ae5f5..df5064b 100644
 +            flags.extend(["-e", key])
 +        return flags
 diff --git a/src/my_util/docker_manager.py b/src/my_util/docker_manager.py
-index 9c1f2b4..2bd3ef3 100644
+index 9c1f2b4..3a0112a 100644
 --- a/src/my_util/docker_manager.py
 +++ b/src/my_util/docker_manager.py
-@@ -16,0 +17,5 @@ logger = logging.getLogger(__name__)
+@@ -16,0 +17,14 @@ logger = logging.getLogger(__name__)
 +PHYCODE_UV_IMAGE = (
 +    "ghcr.io/astral-sh/uv@"
 +    "sha256:5c3ab83183a73c5d319a77009eb425b60d5bb937f339fb7876788ebf567baf48"
 +)
 +
-@@ -37,0 +43 @@ class DockerEnvironment:
++
++def _host_identity() -> tuple[int, int]:
++    """Return the POSIX host identity or a deterministic Windows identity."""
++    getuid = getattr(os, "getuid", None)
++    getgid = getattr(os, "getgid", None)
++    if callable(getuid) and callable(getgid):
++        return getuid(), getgid()
++    return 1000, 1000
++
+@@ -37,0 +52 @@ class DockerEnvironment:
 +        phycode_wheel: str | None = None,
-@@ -45,0 +52 @@ class DockerEnvironment:
+@@ -45,0 +61 @@ class DockerEnvironment:
 +        self.phycode_wheel = phycode_wheel
-@@ -115,0 +123,47 @@ class DockerEnvironment:
+@@ -51,0 +68,4 @@ class DockerEnvironment:
++        host_uid, host_gid = _host_identity()
++        self.host_uid = host_uid
++        self.host_gid = host_gid
++
+@@ -85,2 +105,6 @@ class DockerEnvironment:
+-        self.container_id = self.container.id
+-        logger.info(f"Container started: {self.container.short_id} (id={self.container_id[:12]})")
++        try:
++            self.container_id = self.container.id
++            logger.info(
++                f"Container started: {self.container.short_id} "
++                f"(id={self.container_id[:12]})"
++            )
+@@ -88,26 +112,67 @@ class DockerEnvironment:
+-        # Create a non-root user matching the host user's UID/GID
+-        # This ensures files created inside the container are owned by the host user
+-        host_uid = os.getuid()
+-        host_gid = os.getgid()
+-        self.host_uid = host_uid
+-        self.host_gid = host_gid
+-        create_user_result = self.exec_command(
+-            f"groupadd -o -g {host_gid} agent 2>/dev/null || true; "
+-            f"useradd -o -m -s /bin/bash -u {host_uid} -g {host_gid} agent 2>/dev/null || true; "
+-            f"chown -R {host_uid}:{host_gid} /workspace; "
+-            f"chown -R {host_uid}:{host_gid} /home/agent; "
+-            f"id agent"
+-        )
+-        logger.info(f"Container user 'agent': {create_user_result['stdout'].strip()}")
+-
+-        # Install Python dependencies
+-        if self.pip_packages:
+-            pkgs = " ".join(self.pip_packages)
+-            logger.info(f"Installing Python packages: {pkgs}")
+-            self.exec_command(f"pip install --quiet {pkgs}", timeout=300)
+-
+-        # Create directory structure in workspace with wide permissions
+-        # (Docker userns remapping may cause UID mismatches between container and host)
+-        self.exec_command(
+-            "mkdir -p /workspace/reproduction /workspace/data /workspace/eval_logs && "
+-            "chmod -R 777 /workspace"
++            # Create a non-root user matching the selected host UID/GID.
++            create_user_result = self.exec_command(
++                f"groupadd -o -g {host_gid} agent 2>/dev/null || true; "
++                f"useradd -o -m -s /bin/bash -u {host_uid} -g {host_gid} agent 2>/dev/null || true; "
++                f"chown -R {host_uid}:{host_gid} /workspace; "
++                f"chown -R {host_uid}:{host_gid} /home/agent; "
++                f"id agent"
++            )
++            logger.info(f"Container user 'agent': {create_user_result['stdout'].strip()}")
++
++            if self.pip_packages:
++                pkgs = " ".join(self.pip_packages)
++                logger.info(f"Installing Python packages: {pkgs}")
++                self.exec_command(f"pip install --quiet {pkgs}", timeout=300)
++
++            self.exec_command(
++                "mkdir -p /workspace/reproduction /workspace/data /workspace/eval_logs && "
++                "chmod -R 777 /workspace"
++            )
++        except Exception:
++            try:
++                self.container.remove(force=True)
++            except Exception:
++                logger.warning("container cleanup failed after startup error")
++            finally:
++                self.container = None
++                self.container_id = None
++            raise
++
 +    def install_phycode(self) -> bool:
 +        """Install the adapter-staged PhyCode wheel inside the container."""
 +        if self.container is None or not self.phycode_wheel:
@@ -382,7 +460,7 @@ index 9c1f2b4..2bd3ef3 100644
 +        result = self.exec_command(
 +            "uv pip install --system /tmp/phycode-0.1.0-py3-none-any.whl",
 +            timeout=300,
-+        )
+@@ -114,0 +180,7 @@ class DockerEnvironment:
 +        return result["exit_code"] == 0
 +
 +    def check_phycode_health(self) -> bool:

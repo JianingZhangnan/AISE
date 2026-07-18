@@ -4,6 +4,7 @@ import asyncio
 import ast
 import importlib.util
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -166,6 +167,40 @@ def _load_agent_env(source: Path) -> types.ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_class(
+    source: Path, class_name: str, globals_: dict[str, object]
+) -> Callable[..., object]:
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    class_index, class_node = next(
+        (index, node)
+        for index, node in enumerate(tree.body)
+        if isinstance(node, ast.ClassDef) and node.name == class_name
+    )
+    helpers = [
+        node
+        for node in tree.body[:class_index]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    module = ast.Module(
+        body=[
+            ast.ImportFrom(
+                module="__future__",
+                names=[ast.alias(name="annotations")],
+                level=0,
+            ),
+            *helpers,
+            class_node,
+        ],
+        type_ignores=[],
+    )
+    ast.fix_missing_locations(module)
+    namespace = dict(globals_)
+    exec(compile(module, str(source), "exec"), namespace)
+    loaded = namespace[class_name]
+    assert isinstance(loaded, type)
+    return loaded
 
 
 def test_adapter_rejects_wrong_evaluator_commit(tmp_path: Path) -> None:
@@ -554,6 +589,156 @@ def test_official_phycode_setup_defers_green_credentials_until_grading(
         "CLAUDE_TOKEN": "claude-secret",
         "OPENCODE_TOKEN": "opencode-secret",
     }
+
+
+@pytest.mark.parametrize(
+    ("identity", "expected_uid", "expected_gid"),
+    [("windows", 1000, 1000), ("posix", 1201, 1301)],
+)
+def test_official_docker_start_selects_identity_before_container_creation(
+    patched_official_evaluator: Path,
+    identity: str,
+    expected_uid: int,
+    expected_gid: int,
+) -> None:
+    events: list[str] = []
+
+    class FakeContainer:
+        id = "container-id"
+        short_id = "container"
+
+    class FakeImages:
+        def pull(self, _image: str) -> None:
+            events.append("pull")
+
+    class FakeContainers:
+        def run(self, *_args: object, **_kwargs: object) -> FakeContainer:
+            events.append("run")
+            return FakeContainer()
+
+    client = types.SimpleNamespace(images=FakeImages(), containers=FakeContainers())
+    if identity == "posix":
+        os_module = types.SimpleNamespace(
+            getuid=lambda: events.append("getuid") or expected_uid,
+            getgid=lambda: events.append("getgid") or expected_gid,
+            path=os.path,
+            makedirs=os.makedirs,
+        )
+    else:
+        os_module = types.SimpleNamespace(path=os.path, makedirs=os.makedirs)
+
+    docker_environment = _load_class(
+        patched_official_evaluator / "src/my_util/docker_manager.py",
+        "DockerEnvironment",
+        {
+            "APIError": type("FakeAPIError", (Exception,), {}),
+            "docker": types.SimpleNamespace(from_env=lambda: client),
+            "logger": types.SimpleNamespace(
+                info=lambda *_: None,
+                warning=lambda *_: None,
+            ),
+            "os": os_module,
+        },
+    )
+    environment = docker_environment(pip_packages=["public-dependency"])
+    commands: list[str] = []
+
+    def exec_command(command: str, timeout: int | None = None) -> dict[str, object]:
+        del timeout
+        commands.append(command)
+        return {"exit_code": 0, "stdout": "ok", "stderr": ""}
+
+    environment.exec_command = exec_command  # type: ignore[attr-defined]
+    environment.start()  # type: ignore[attr-defined]
+
+    assert environment.host_uid == expected_uid  # type: ignore[attr-defined]
+    assert environment.host_gid == expected_gid  # type: ignore[attr-defined]
+    assert events.index("run") > events.index("pull")
+    if identity == "posix":
+        assert events[:2] == ["getuid", "getgid"]
+    else:
+        assert events[0] == "pull"
+    assert f"groupadd -o -g {expected_gid} agent" in commands[0]
+    assert f"useradd -o -m -s /bin/bash -u {expected_uid}" in commands[0]
+    assert f"chown -R {expected_uid}:{expected_gid} /workspace" in commands[0]
+    assert environment.check_health() is True  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("failure_call", "cleanup_raises"),
+    [(0, False), (1, False), (2, False), (0, True)],
+)
+def test_official_docker_start_cleans_post_create_failures_without_masking_error(
+    patched_official_evaluator: Path,
+    caplog: pytest.LogCaptureFixture,
+    failure_call: int,
+    cleanup_raises: bool,
+) -> None:
+    original_error = RuntimeError("original setup failure")
+    remove_calls: list[bool] = []
+
+    class FakeContainer:
+        id = "container-id"
+        short_id = "container"
+
+        def remove(self, force: bool = False) -> None:
+            remove_calls.append(force)
+            if cleanup_raises:
+                raise RuntimeError("cleanup synthetic-secret")
+
+    class FakeImages:
+        def pull(self, _image: str) -> None:
+            pass
+
+    class FakeContainers:
+        def run(self, *_args: object, **_kwargs: object) -> FakeContainer:
+            return FakeContainer()
+
+    client = types.SimpleNamespace(images=FakeImages(), containers=FakeContainers())
+    os_module = types.SimpleNamespace(
+        getuid=lambda: 1201,
+        getgid=lambda: 1301,
+        path=os.path,
+        makedirs=os.makedirs,
+    )
+    docker_environment = _load_class(
+        patched_official_evaluator / "src/my_util/docker_manager.py",
+        "DockerEnvironment",
+        {
+            "APIError": type("FakeAPIError", (Exception,), {}),
+            "docker": types.SimpleNamespace(from_env=lambda: client),
+            "logger": logging.getLogger("test.patched.docker-manager"),
+            "os": os_module,
+        },
+    )
+    environment = docker_environment(
+        env_vars={"PROVIDER_TOKEN": "synthetic-secret"},
+        pip_packages=["public-dependency"],
+    )
+    call_count = 0
+
+    def exec_command(_command: str, timeout: int | None = None) -> dict[str, object]:
+        nonlocal call_count
+        del timeout
+        current = call_count
+        call_count += 1
+        if current == failure_call:
+            raise original_error
+        return {"exit_code": 0, "stdout": "ok", "stderr": ""}
+
+    environment.exec_command = exec_command  # type: ignore[attr-defined]
+    caplog.set_level(logging.WARNING, logger="test.patched.docker-manager")
+
+    with pytest.raises(RuntimeError) as raised:
+        environment.start()  # type: ignore[attr-defined]
+
+    assert raised.value is original_error
+    assert remove_calls == [True]
+    assert environment.container is None  # type: ignore[attr-defined]
+    assert environment.container_id is None  # type: ignore[attr-defined]
+    if cleanup_raises:
+        assert "container cleanup failed after startup error" in caplog.text
+    assert "synthetic-secret" not in caplog.text
 
 
 def test_official_launch_cli_exposes_and_bounds_approval_wait(

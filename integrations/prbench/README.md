@@ -22,6 +22,11 @@ symlink，应用器同样 fail closed，不覆盖或解析旧目标。
 `sha256:5c3ab83183a73c5d319a77009eb425b60d5bb937f339fb7876788ebf567baf48`
 提取 `/uv`，再执行
 `uv pip install --system`，不使用 pip 安装 PhyCode 或引导安装 uv。
+容器启动前会先选择非 root 身份：POSIX 保留宿主 `getuid/getgid`，Windows 因无
+对应 API 固定使用 `1000:1000`，user/group/chown 全部使用同一组值。容器创建后
+若用户配置、依赖安装或 workspace 初始化抛错，adapter 会 best-effort
+`remove(force=True)`，无论清理本身是否失败都清空本地 container 状态并重抛原始
+异常；清理告警不拼接异常文本或 provider 值。
 
 适配后的 evaluator 通过 `--white-agent-type phycode` 选择 PhyCode。宿主可用
 `--phycode-contract` 注入公开 task contract，并用 `--phycode-approvals` 注入
