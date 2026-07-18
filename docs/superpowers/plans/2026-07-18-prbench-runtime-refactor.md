@@ -381,7 +381,7 @@ def test_real_script_execution_establishes_csv_provenance(tmp_path: Path) -> Non
     )
     journal = ExecutionJournal(tmp_path, ("data/output.csv",))
     registry = ToolRegistry()
-    register_process_tools(registry, tmp_path, frozenset({Path(sys.executable).name.casefold()}), journal=journal)
+    register_process_tools(registry, tmp_path, frozenset({Path(sys.executable).resolve()}), journal=journal)
     call = ToolCall(tool_name="process.run", args={"argv": [sys.executable, "reproduction/generate.py"], "cwd": "."})
     context = PolicyContext(tmp_path, [], False, profile_spec(AgentProfile.PRBENCH))
     assert ToolRuntime(registry).run(call, context, approved=True).tool_result.status == "ok"
