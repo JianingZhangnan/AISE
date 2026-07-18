@@ -78,16 +78,42 @@ index 3874429..1bfd98b 100644
 +                    model = _resolve("opencode").get("OPENCODE_MODEL", "")
 @@ -742,0 +763 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 +            run_env = {"env": green_process_env} if defer_provider_env else {}
-@@ -748,0 +770 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+@@ -747,0 +769,2 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
++                encoding="utf-8",
++                errors="replace",
+@@ -748,0 +772 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 +                **run_env,
-@@ -776,0 +799,4 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+@@ -750,0 +775,15 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
++            trace_stdout = result.stdout
++            trace_stderr = result.stderr
++            if defer_provider_env:
++                provider_values = sorted(
++                    (value for value in green_provider_env.values() if value),
++                    key=len,
++                    reverse=True,
++                )
++                for provider_value in provider_values:
++                    trace_stdout = trace_stdout.replace(
++                        provider_value, "[REDACTED_PROVIDER_VALUE]"
++                    )
++                    trace_stderr = trace_stderr.replace(
++                        provider_value, "[REDACTED_PROVIDER_VALUE]"
++                    )
+@@ -751,2 +790,4 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+-            with open(os.path.join(log_dir, "grading_trace.log"), "w") as f:
+-                f.write(f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n")
++            with open(
++                os.path.join(log_dir, "grading_trace.log"), "w", encoding="utf-8"
++            ) as f:
++                f.write(f"STDOUT:\n{trace_stdout}\n\nSTDERR:\n{trace_stderr}\n")
+@@ -776,0 +818,4 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 +        finally:
 +            if defer_provider_env:
 +                from src.my_util.agent_env import clear_green_child_environment
 +                clear_green_child_environment(green_provider_env, green_process_env)
-@@ -797,0 +824 @@ def start_green_agent(
+@@ -797,0 +843 @@ def start_green_agent(
 +    defer_provider_env: bool = False,
-@@ -820,0 +848 @@ def start_green_agent(
+@@ -820,0 +867 @@ def start_green_agent(
 +            defer_provider_env=defer_provider_env,
 diff --git a/src/launcher.py b/src/launcher.py
 index c705de8..49a4cb5 100644

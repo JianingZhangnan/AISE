@@ -13,7 +13,7 @@ import sys
 import types
 from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 import typer
@@ -2157,6 +2157,7 @@ def test_official_green_grading_uses_child_only_environment_and_always_clears_it
     def fake_run(cmd: list[str], **kwargs: object) -> types.SimpleNamespace:
         captured["cmd"] = cmd
         captured["env"] = kwargs["env"]
+        captured["kwargs"] = kwargs
         child_env = kwargs["env"]
         assert isinstance(child_env, dict)
         assert child_env["OPENAI_API_KEY"] == "green-sensitive-value"
@@ -2212,7 +2213,11 @@ def test_official_green_grading_uses_child_only_environment_and_always_clears_it
         method("grade this", "container-id", str(tmp_path), "opencode", True)
 
     command = captured["cmd"]
+    kwargs = captured["kwargs"]
     assert isinstance(command, list)
+    assert isinstance(kwargs, dict)
+    assert kwargs["encoding"] == "utf-8"
+    assert kwargs["errors"] == "replace"
     assert "green-sensitive-value" not in str(command)
     env_values = [
         command[index + 1]
@@ -2237,6 +2242,91 @@ def test_official_green_grading_uses_child_only_environment_and_always_clears_it
     assert "OPENCODE_CONFIG_CONTENT" not in child_env
     assert resolved_mappings
     assert all(mapping == {} for mapping in resolved_mappings)
+
+
+def test_official_deferred_green_grading_decodes_invalid_utf8_and_redacts_trace(
+    patched_official_evaluator: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    key = "synthetic-green-key-for-trace"
+    base_url = "https://synthetic-green.invalid/v1"
+    model = "openai/trace-model"
+    monkeypatch.setenv("OPENCODE_API_KEY", key)
+    monkeypatch.setenv("OPENCODE_BASE_URL", base_url)
+    monkeypatch.setenv("OPENCODE_MODEL", model)
+
+    agent_env = _load_agent_env(
+        patched_official_evaluator / "src/my_util/agent_env.py"
+    )
+    src_module = types.ModuleType("src")
+    src_module.__path__ = []  # type: ignore[attr-defined]
+    util_module = types.ModuleType("src.my_util")
+    util_module.__path__ = []  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "src", src_module)
+    monkeypatch.setitem(sys.modules, "src.my_util", util_module)
+    monkeypatch.setitem(sys.modules, "src.my_util.agent_env", agent_env)
+
+    expected_provider_values: list[str] = []
+    original_build = agent_env.build_green_child_environment
+
+    def tracked_build(
+        agent_type: str,
+    ) -> tuple[list[str], dict[str, str], dict[str, str]]:
+        env_flags, provider_env, process_env = original_build(agent_type)
+        expected_provider_values.extend(
+            value for value in provider_env.values() if value
+        )
+        return env_flags, provider_env, process_env
+
+    monkeypatch.setattr(agent_env, "build_green_child_environment", tracked_build)
+    real_run = subprocess.run
+
+    def run_invalid_utf8_child(
+        _cmd: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        child_env = dict(cast(dict[str, str], kwargs["env"]))
+        child_env["GRADING_STDOUT_PROBE"] = '{"overall_score": 1.0}'
+        child_env["GRADING_STDERR_PROBE"] = "\n".join(expected_provider_values)
+        child_kwargs = dict(kwargs)
+        child_kwargs["env"] = child_env
+        return cast(Any, real_run)(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os, sys; "
+                    "sys.stdout.buffer.write(os.environ['GRADING_STDOUT_PROBE'].encode('utf-8')); "
+                    "sys.stderr.buffer.write(os.environ['GRADING_STDERR_PROBE'].encode('utf-8') + bytes([0x92]))"
+                ),
+            ],
+            **child_kwargs,
+        )
+
+    monkeypatch.setattr(subprocess, "run", run_invalid_utf8_child)
+    run_grading = _load_function(
+        patched_official_evaluator / "src/green_agent/agent.py",
+        "_run_grading",
+        {
+            "logger": types.SimpleNamespace(
+                info=lambda *_: None,
+                warning=lambda *_: None,
+                error=lambda *_: None,
+            ),
+            "os": os,
+            "_parse_grading_json": json.loads,
+        },
+    )
+    method = types.MethodType(run_grading, object())
+
+    grading = method("grade this", "container-id", str(tmp_path), "opencode", True)
+
+    assert grading == {"overall_score": 1.0}
+    trace = (tmp_path / "grading_trace.log").read_text(encoding="utf-8")
+    assert "\ufffd" in trace
+    assert expected_provider_values
+    assert all(value not in trace for value in expected_provider_values)
+    assert "[REDACTED_PROVIDER_VALUE]" in trace
 
 
 def test_official_non_phycode_green_grading_retains_upstream_transport(
