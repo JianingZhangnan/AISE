@@ -1,3 +1,4 @@
+import sys
 import tempfile
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from phycode.tools import ToolRuntime
 from phycode.tools.calculator_tools import register_calculator_tools
 from phycode.tools.file_tools import register_file_tools
 from phycode.tools.media_tools import register_media_tools
+from phycode.tools.process_tools import register_process_tools
 from phycode.tools.search_tools import register_search_tools
 from phycode.tools.shell_tools import register_shell_tools
 from phycode.tools.state_tools import register_state_tools
@@ -51,6 +53,7 @@ def build_default_registry(
     register_file_tools(registry)
     register_calculator_tools(registry)
     register_search_tools(registry, workspace_root=root, visibility=visibility)
+    register_process_tools(registry, root, frozenset({Path(sys.executable).name.casefold()}))
     register_shell_tools(registry, workspace_root=root, test_command=configured_test_command)
     register_state_tools(registry, workspace_root=root, memory_store=memory_store)
     register_web_tools(registry)

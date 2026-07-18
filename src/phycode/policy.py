@@ -45,7 +45,16 @@ SAFE_TOOLS = {
     "web.fetch",
     "calculator.calculate",
 }
-RISKY_TOOLS = {"file.write", "file.edit", "memory.write", "config.write", "shell.run", "test.run", "image.inspect"}
+RISKY_TOOLS = {
+    "file.write",
+    "file.edit",
+    "memory.write",
+    "config.write",
+    "shell.run",
+    "test.run",
+    "image.inspect",
+    "process.run",
+}
 DANGEROUS_SHELL_PATTERNS = [
     # recursive/forced rm of a root-ish target (-rf, -fr, -r, -f ... / ~ * or bare .)
     re.compile(r"\brm\s+-[a-z]*[rf][a-z]*\s+(?:/|~|\*|\.(?:\s|$))", re.IGNORECASE),
@@ -119,6 +128,23 @@ class PolicyEngine:
                     decision=PolicyAction.DENY,
                     rule_id="credential.read_blocked",
                     reason="Credential-like files cannot be read by model-callable tools",
+                )
+
+        if call.tool_name == "process.run":
+            cwd = call.args.get("cwd", ".")
+            try:
+                context.visibility.resolve(str(cwd))
+            except (OSError, RuntimeError, VisibilityViolation) as exc:
+                hidden_path = isinstance(exc, VisibilityViolation) and exc.hidden
+                return PolicyDecision(
+                    tool_call_id=call.id,
+                    decision=PolicyAction.DENY,
+                    rule_id="prbench.hidden_path_blocked" if hidden_path else "workspace.path_escape",
+                    reason=(
+                        "Path is hidden from the active profile"
+                        if hidden_path
+                        else "Path is outside the workspace allowlist"
+                    ),
                 )
 
         if call.tool_name in SHELL_TOOLS:
