@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 
 class WorkspaceConfig(BaseModel):
@@ -33,6 +35,36 @@ class ProjectConfig(BaseModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     test: TestConfig = Field(default_factory=TestConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+
+
+class PRBenchProviderConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    api_key: SecretStr
+    base_url: str
+    model: str
+
+
+class PRBenchProviderConfigError(ValueError):
+    pass
+
+
+def load_prbench_provider_config(
+    environment: Mapping[str, str] | None = None,
+) -> PRBenchProviderConfig:
+    source = os.environ if environment is None else environment
+    names = ("PHYCODE_API_KEY", "PHYCODE_BASE_URL", "PHYCODE_MODEL")
+    values = {name: source.get(name, "").strip() for name in names}
+    if any(not value for value in values.values()):
+        raise PRBenchProviderConfigError("PRBench provider environment is incomplete")
+    model = values["PHYCODE_MODEL"]
+    if "://" in model or "\r" in model or "\n" in model:
+        raise PRBenchProviderConfigError("PRBench provider model is unsafe for summary output")
+    return PRBenchProviderConfig(
+        api_key=SecretStr(values["PHYCODE_API_KEY"]),
+        base_url=values["PHYCODE_BASE_URL"],
+        model=model,
+    )
 
 
 def load_project_config(workspace_root: Path) -> ProjectConfig:

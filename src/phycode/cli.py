@@ -1,16 +1,18 @@
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 import typer
 from rich.console import Console
 
 from phycode import __version__
-from phycode.agent import AgentLoop
+from phycode.agent import AgentLoop, CompletionVerification
 from phycode.config import ProjectConfig, load_project_config
 from phycode.context import ContextBuilder, MemoryStore, SessionStore
 from phycode.credentials import CredentialStore
 from phycode.demos import run_feedback_demo, run_guardrail_demo, run_policy_demo
+from phycode.execution import ExecutionJournal
 from phycode.llm import EchoLLM, LLMClient, OpenAICompatibleChatAdapter
 from phycode.models import AgentProfile, PolicyDecision, Session, SessionMode, ToolCall
 from phycode.policy import PolicyContext
@@ -34,8 +36,10 @@ tools_app = typer.Typer(help="Inspect registered tools")
 app.add_typer(tools_app, name="tools")
 config_app = typer.Typer(help="Read and write non-sensitive configuration")
 keys_app = typer.Typer(help="Manage provider credentials")
+prbench_app = typer.Typer(help="Run verified public PRBench tasks")
 app.add_typer(config_app, name="config")
 app.add_typer(keys_app, name="keys")
+app.add_typer(prbench_app, name="prbench")
 console = Console()
 
 
@@ -45,6 +49,7 @@ def build_default_registry(
     memory_store: MemoryStore | None = None,
     vision_inspector=None,
     visibility: PathVisibilityPolicy | None = None,
+    execution_journal: ExecutionJournal | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
     config = load_project_config(Path.cwd())
@@ -53,7 +58,12 @@ def build_default_registry(
     register_file_tools(registry)
     register_calculator_tools(registry)
     register_search_tools(registry, workspace_root=root, visibility=visibility)
-    register_process_tools(registry, root, frozenset({Path(sys.executable).resolve()}))
+    register_process_tools(
+        registry,
+        root,
+        frozenset({Path(sys.executable).resolve()}),
+        journal=execution_journal,
+    )
     register_shell_tools(registry, workspace_root=root, test_command=configured_test_command)
     register_state_tools(registry, workspace_root=root, memory_store=memory_store)
     register_web_tools(registry)
@@ -108,10 +118,15 @@ def build_agent(
     profile: AgentProfile = AgentProfile.CODING,
     max_tool_calls: int | None = None,
     vision_inspector=None,
+    workspace_root: Path | None = None,
+    execution_journal: ExecutionJournal | None = None,
+    completion_verifier: Callable[[], CompletionVerification] | None = None,
+    progress_fingerprint: Callable[[], str] | None = None,
+    trace_dir: Path | None = None,
 ) -> AgentLoop:
     """Build the default local agent loop for CLI commands."""
     spec = profile_spec(profile)
-    config = load_project_config(Path.cwd())
+    config = load_project_config(workspace_root if workspace_root is not None else Path.cwd())
     root = config.workspace.root
     phycode_dir = root / ".phycode"
     session_store = SessionStore(Session(workspace_root=str(root), mode=mode))
@@ -132,6 +147,7 @@ def build_agent(
         memory_store,
         configured_vision,
         visibility=policy_context.visibility,
+        execution_journal=execution_journal,
     )
     registry = _registry_subset(registry, spec.tool_names)
     return AgentLoop(
@@ -144,11 +160,13 @@ def build_agent(
         ),
         tool_runtime=ToolRuntime(registry),
         policy_context=policy_context,
-        trace_store=TraceStore(phycode_dir / "traces"),
+        trace_store=TraceStore(trace_dir if trace_dir is not None else phycode_dir / "traces"),
         session_store=session_store,
         max_steps=config.agent.max_steps,
         max_tool_calls=max_tool_calls if max_tool_calls is not None else spec.max_tool_calls,
         approval_handler=approval_handler,
+        completion_verifier=completion_verifier,
+        progress_fingerprint=progress_fingerprint,
     )
 
 
@@ -243,3 +261,23 @@ def demo(name: str = typer.Argument(..., help="guardrail | feedback | policy")) 
         console.print("Unknown demo. Use guardrail, feedback, or policy.")
         raise typer.Exit(code=2)
     console.print(runner(root))
+
+
+@prbench_app.command("run")
+def prbench_run(
+    workspace: Path = typer.Option(..., help="PRBench task workspace"),
+    contract: Path = typer.Option(..., help="Public task contract JSON"),
+    approvals: Path = typer.Option(..., help="Exact one-time approval manifest JSON"),
+    max_tool_calls: int | None = typer.Option(None, min=1, help="Tool-call budget override"),
+) -> None:
+    from phycode.prbench_eval import prbench_result_lines, run_prbench
+
+    result = run_prbench(
+        workspace,
+        contract,
+        approvals,
+        max_tool_calls=max_tool_calls,
+    )
+    for line in prbench_result_lines(result):
+        console.print(redact_text(line), markup=False)
+    raise typer.Exit(code=result.exit_code)
