@@ -394,7 +394,7 @@ def test_prompt_contains_only_public_instruction_paper_and_input_names(tmp_path:
 
 
 def test_unknown_stop_reason_fails_closed_as_provider_error() -> None:
-    assert _status_from_stop_reason("future_unknown_reason", [], 4) == (
+    assert _status_from_stop_reason("future_unknown_reason") == (
         PRBenchRunStatus.PROVIDER_ERROR
     )
 

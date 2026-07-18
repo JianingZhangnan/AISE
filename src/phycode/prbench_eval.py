@@ -211,11 +211,8 @@ def _write_result(workspace: Path, result: PRBenchRunResult) -> None:
 
 def _status_from_stop_reason(
     stopped_reason: str,
-    events: list,
-    max_tool_calls: int,
     terminal_blocker: str | None = None,
 ) -> PRBenchRunStatus:
-    del events, max_tool_calls
     if stopped_reason == "completed":
         return PRBenchRunStatus.COMPLETED
     if terminal_blocker is not None:
@@ -247,10 +244,13 @@ def _safe_model_name(llm: LLMClient | None) -> str:
 def _persist_if_safe(workspace: Path, result: PRBenchRunResult) -> PRBenchRunResult:
     try:
         if not workspace.is_dir():
-            return result
+            raise _PRBenchBoundaryError("PRBench result workspace is unavailable")
         _write_result(workspace, result)
     except Exception:
-        pass
+        if result.status == PRBenchRunStatus.COMPLETED:
+            return result.model_copy(
+                update={"status": PRBenchRunStatus.ARTIFACT_VERIFICATION_FAILED}
+            )
     return result
 
 
@@ -393,8 +393,6 @@ def run_prbench(
         result = PRBenchRunResult(
             status=_status_from_stop_reason(
                 agent_result.stopped_reason,
-                agent_result.events,
-                loop.max_tool_calls,
                 agent_result.terminal_blocker,
             ),
             model=model_name,

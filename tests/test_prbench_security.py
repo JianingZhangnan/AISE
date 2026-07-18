@@ -6,7 +6,12 @@ import pytest
 
 from phycode.llm import ScriptedLLM
 from phycode.prbench_eval import PRBenchRunStatus, run_prbench
-from prbench_test_support import RecordingFinalLLM, write_public_task_files, write_text_task_files
+from prbench_test_support import (
+    RecordingFinalLLM,
+    scripted_llm_that_writes_runs_reads_and_finishes,
+    write_public_task_files,
+    write_text_task_files,
+)
 
 
 def test_runner_ignores_workspace_allowlist_and_cannot_read_outside_file(
@@ -374,6 +379,56 @@ def test_result_write_exception_does_not_escape_runner(
         llm=ScriptedLLM([[{"type": "assistant_final", "payload": {"text": "done"}}]]),
     )
 
+    assert result.status == PRBenchRunStatus.ARTIFACT_VERIFICATION_FAILED
+    assert result.exit_code != 0
+
+
+def test_completed_run_downgrades_when_final_result_persistence_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import phycode.prbench_eval as prbench_eval
+
+    contract, approvals = write_public_task_files(tmp_path)
+    secret = "sk-final-persist-secret-123456789"
+    write_attempts = 0
+
+    def fail_write(*args, **kwargs):
+        nonlocal write_attempts
+        del args, kwargs
+        write_attempts += 1
+        raise OSError(secret)
+
+    monkeypatch.setattr(prbench_eval, "_write_result", fail_write)
+
+    result = run_prbench(
+        tmp_path,
+        contract,
+        approvals,
+        llm=scripted_llm_that_writes_runs_reads_and_finishes(),
+    )
+
+    assert result.status == PRBenchRunStatus.ARTIFACT_VERIFICATION_FAILED
+    assert result.exit_code != 0
+    assert write_attempts == 1
+    assert secret not in result.model_dump_json()
+    assert not (tmp_path / ".phycode/prbench/run_result.json").exists()
+
+
+def test_completed_result_downgrades_when_workspace_disappears_before_persistence(
+    tmp_path: Path,
+) -> None:
+    from phycode.prbench_eval import PRBenchRunResult, _persist_if_safe
+
+    result = _persist_if_safe(
+        tmp_path / "disappeared",
+        PRBenchRunResult(
+            status=PRBenchRunStatus.COMPLETED,
+            model="safe-model",
+            tool_calls=1,
+        ),
+    )
+
+    assert result.status == PRBenchRunStatus.ARTIFACT_VERIFICATION_FAILED
     assert result.exit_code != 0
 
 
