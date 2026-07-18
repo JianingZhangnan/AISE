@@ -2424,3 +2424,21 @@ Task 2 完成后，以下任务可在独立 worktree 中并行进行：
 - `ToolCall`、`ToolResult`、`PolicyDecision` 和 `FeedbackSignal` 在 Task 2 定义，并在后续任务接口中一致使用。
 - `PolicyContext` 在 Task 4 定义，并由 `ToolRuntime` 和 `AgentLoop` 使用。
 - `ToolRuntimeResult` 在 Task 5 定义，并由 agent 和演示任务使用。
+
+---
+
+## 2026-07-18 PRBench 运行时真正重构（Task 14-20）
+
+批准设计：`docs/superpowers/specs/2026-07-18-prbench-runtime-refactor-design.md`。
+
+逐步实施计划：`docs/superpowers/plans/2026-07-18-prbench-runtime-refactor.md`。
+
+- [ ] Task 14：Profile 单一来源与路径可见性。
+- [ ] Task 15：结构化 `process.run(argv)` 与一次性审批。
+- [ ] Task 16：Execution journal、公开任务契约与 artifact verifier。
+- [ ] Task 17：AgentLoop 完成门禁与连续无进展停机。
+- [ ] Task 18：PRBench runner 与 CLI 状态契约。
+- [ ] Task 19：固定版本官方 evaluator adapter。
+- [ ] Task 20：中文文档、过程证据和可重复真实 smoke 命令。
+
+依赖关系为 Task 14 → 15 → 16 → 17 → 18 → 19 → 20。每项由新鲜 subagent 按 TDD 完成，并在进入下一项前通过 spec 合规与代码质量审查。最终由主 agent 在不暴露凭据的前提下使用真实 `deepseek-v4-pro` 和固定官方 evaluator commit 跑 `aaatest_helloworld`、`bbbtest_alphabet`。
