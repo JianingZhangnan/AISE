@@ -1,0 +1,332 @@
+diff --git a/main.py b/main.py
+index 922d52e..2968a26 100644
+--- a/main.py
++++ b/main.py
+@@ -30 +30 @@ def white(
+-    agent_type: str = typer.Option("claude", help="Agent CLI to use: 'claude', 'codex', or 'opencode'"),
++    agent_type: str = typer.Option("claude", help="White agent CLI to use: 'claude', 'codex', 'opencode', or 'phycode'"),
+@@ -45 +45 @@ def launch(
+-    white_agent_type: str = typer.Option(None, "--white-agent-type", help="Override agent CLI for white agent (task solving)"),
++    white_agent_type: str = typer.Option(None, "--white-agent-type", help="Override white agent: 'claude', 'codex', 'opencode', or 'phycode'"),
+@@ -46,0 +47,2 @@ def launch(
++    phycode_contract: str = typer.Option(None, "--phycode-contract", help="Public task contract JSON for a PhyCode white run"),
++    phycode_approvals: str = typer.Option(None, "--phycode-approvals", help="Exact run-level approval manifest for a PhyCode white run"),
+@@ -65,0 +68,2 @@ def launch(
++        phycode_contract=phycode_contract,
++        phycode_approvals=phycode_approvals,
+diff --git a/src/launcher.py b/src/launcher.py
+index c705de8..f9a6ce0 100644
+--- a/src/launcher.py
++++ b/src/launcher.py
+@@ -40,0 +41,14 @@ RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
++_PHYCODE_PROVIDER_NAMES = (
++    "PHYCODE_API_KEY",
++    "PHYCODE_BASE_URL",
++    "PHYCODE_MODEL",
++)
++
++
++def _start_without_phycode_environment(proc: multiprocessing.Process) -> None:
++    """Start an evaluator child without leaking white-provider credentials."""
++    saved = {name: os.environ.pop(name) for name in _PHYCODE_PROVIDER_NAMES if name in os.environ}
++    try:
++        proc.start()
++    finally:
++        os.environ.update(saved)
+@@ -230,0 +245,76 @@ def _copy_input_files(task_config: dict, task_dir: str, workspace_dir: str) -> N
++def _copy_phycode_controls(
++    task_config: dict,
++    task_dir: str,
++    workspace_dir: str,
++    contract_file: str | None,
++    approvals_file: str | None,
++    code_only: bool,
++) -> None:
++    """Prepare public runner inputs without deriving any approval grants."""
++    instruction_file = task_config.get("instruction_file", "")
++    paper_file = task_config.get("paper", {}).get("paper_file", "")
++    if not instruction_file or not paper_file:
++        raise RuntimeError("PhyCode requires declared public instruction and paper files")
++
++    instruction_src = os.path.join(task_dir, instruction_file)
++    instruction_dst = os.path.join(workspace_dir, os.path.basename(instruction_file))
++    if not os.path.isfile(instruction_src):
++        raise RuntimeError("Declared public instruction file is unavailable")
++    if os.path.lexists(instruction_dst):
++        os.remove(instruction_dst)
++    shutil.copy2(instruction_src, instruction_dst)
++
++    copied_public_files = [paper_file, *task_config.get("input_files", [])]
++    for public_file in copied_public_files:
++        copied_path = os.path.join(workspace_dir, os.path.basename(public_file))
++        if not os.path.isfile(copied_path):
++            raise RuntimeError(
++                "Declared public paper/input file was not copied to the workspace"
++            )
++
++    contract_dst = os.path.join(workspace_dir, "task_contract.json")
++    approvals_dst = os.path.join(workspace_dir, "phycode-approvals.json")
++    for destination in (contract_dst, approvals_dst):
++        if os.path.lexists(destination):
++            if os.path.isdir(destination) and not os.path.islink(destination):
++                raise RuntimeError("PhyCode control destination is not a file")
++            os.remove(destination)
++
++    if contract_file:
++        if not os.path.isfile(contract_file):
++            raise RuntimeError("Explicit PhyCode contract is unavailable")
++        shutil.copy2(contract_file, contract_dst)
++    else:
++        expected_config = task_config.get("expected_outputs", {})
++        if code_only:
++            expected_config = task_config.get("code_only", {}).get(
++                "expected_outputs", expected_config
++            )
++        expected_files = [
++            path
++            for group in ("code", "data")
++            for path in expected_config.get(group, [])
++        ]
++        contract = {
++            "instruction_file": os.path.basename(instruction_file),
++            "paper_file": os.path.basename(paper_file),
++            "input_files": [
++                os.path.basename(path) for path in task_config.get("input_files", [])
++            ],
++            "expected_files": expected_files,
++            "constraints": [],
++        }
++        with open(contract_dst, "w", encoding="utf-8") as handle:
++            json.dump(contract, handle, indent=2)
++            handle.write("\n")
++
++    if approvals_file:
++        if not os.path.isfile(approvals_file):
++            raise RuntimeError("Explicit PhyCode approval manifest is unavailable")
++        shutil.copy2(approvals_file, approvals_dst)
++    else:
++        with open(approvals_dst, "w", encoding="utf-8") as handle:
++            json.dump({"grants": []}, handle, indent=2)
++            handle.write("\n")
++
++
+@@ -234,0 +325,3 @@ def _export_traces_for_type(
++    if agent_type == "phycode":
++        # Already persisted inside workspace/.phycode/prbench.
++        return
+@@ -264 +357,2 @@ def setup_docker_environment(
+-        env_vars.update(resolve_env(t))
++        if t != "phycode":
++            env_vars.update(resolve_env(t))
+@@ -273,0 +368,5 @@ def setup_docker_environment(
++        phycode_wheel=(
++            os.path.join(PROJECT_ROOT, ".phycode-adapter", "phycode.whl")
++            if "phycode" in needed_types
++            else None
++        ),
+@@ -285 +384,8 @@ def setup_docker_environment(
+-        if agent_type == "codex":
++        if agent_type == "phycode":
++            logger.info("Docker: Installing PhyCode wheel...")
++            if not docker_env.install_phycode():
++                raise RuntimeError("Failed to install PhyCode wheel in Docker")
++            if not docker_env.check_phycode_health():
++                raise RuntimeError("PhyCode CLI verification failed in Docker")
++            logger.info("Docker: PhyCode ready.")
++        elif agent_type == "codex":
+@@ -322,0 +429,2 @@ async def launch_evaluation(
++    phycode_contract: str | None = None,
++    phycode_approvals: str | None = None,
+@@ -337,0 +446,7 @@ async def launch_evaluation(
++    if effective_green_type == "phycode":
++        raise ValueError("PhyCode is supported only as the white task-solving agent")
++    if effective_white_type == "phycode" and code_only:
++        raise ValueError("PhyCode adapter supports only full verified evaluations")
++    phycode_provider_env = (
++        resolve_env("phycode") if effective_white_type == "phycode" else {}
++    )
+@@ -393,0 +509,10 @@ async def launch_evaluation(
++    if effective_white_type == "phycode":
++        _copy_phycode_controls(
++            task_config,
++            task_dir,
++            workspace_dir,
++            phycode_contract,
++            phycode_approvals,
++            code_only,
++        )
++
+@@ -423 +548 @@ async def launch_evaluation(
+-        p_green.start()
++        _start_without_phycode_environment(p_green)
+@@ -436 +561,2 @@ async def launch_evaluation(
+-                  workspace_dir, container_id, effective_white_type),
++                  workspace_dir, container_id, effective_white_type,
++                  phycode_provider_env),
+@@ -439 +565,5 @@ async def launch_evaluation(
+-        p_white.start()
++        _start_without_phycode_environment(p_white)
++        if effective_white_type == "phycode":
++            phycode_provider_env.clear()
++            for name in _PHYCODE_PROVIDER_NAMES:
++                os.environ.pop(name, None)
+diff --git a/src/my_util/agent_env.py b/src/my_util/agent_env.py
+index d0ae5f5..8cb10a4 100644
+--- a/src/my_util/agent_env.py
++++ b/src/my_util/agent_env.py
+@@ -134,0 +135,10 @@ def resolve_opencode_env() -> dict[str, str]:
++def resolve_phycode_env() -> dict[str, str]:
++    """Resolve only the provider variables consumed by the PhyCode runner."""
++    env: dict[str, str] = {}
++    for name in ("PHYCODE_API_KEY", "PHYCODE_BASE_URL", "PHYCODE_MODEL"):
++        value = os.environ.get(name, "").strip()
++        if value:
++            env[name] = value
++    return env
++
++
+@@ -138,0 +149,2 @@ def resolve_env(agent_type: str) -> dict[str, str]:
++    if agent_type == "phycode":
++        return resolve_phycode_env()
+@@ -149,0 +162,6 @@ def build_docker_exec_env_flags(agent_type: str) -> list[str]:
++    if agent_type == "phycode":
++        # Values are supplied only in the docker CLI child environment. They
++        # never enter the host subprocess argv or the persistent container env.
++        for key in ("PHYCODE_API_KEY", "PHYCODE_BASE_URL", "PHYCODE_MODEL"):
++            flags.extend(["-e", key])
++        return flags
+diff --git a/src/my_util/docker_manager.py b/src/my_util/docker_manager.py
+index 9c1f2b4..2bd3ef3 100644
+--- a/src/my_util/docker_manager.py
++++ b/src/my_util/docker_manager.py
+@@ -16,0 +17,5 @@ logger = logging.getLogger(__name__)
++PHYCODE_UV_IMAGE = (
++    "ghcr.io/astral-sh/uv@"
++    "sha256:5c3ab83183a73c5d319a77009eb425b60d5bb937f339fb7876788ebf567baf48"
++)
++
+@@ -37,0 +43 @@ class DockerEnvironment:
++        phycode_wheel: str | None = None,
+@@ -45,0 +52 @@ class DockerEnvironment:
++        self.phycode_wheel = phycode_wheel
+@@ -115,0 +123,47 @@ class DockerEnvironment:
++    def install_phycode(self) -> bool:
++        """Install the adapter-staged PhyCode wheel inside the container."""
++        if self.container is None or not self.phycode_wheel:
++            return False
++        if not os.path.isfile(self.phycode_wheel):
++            return False
++        helper = None
++        try:
++            import io
++
++            # The official python:3.11-slim task image does not include uv.
++            # Copy the binary from Astral's pinned linux/amd64 image without
++            # introducing pip as a package-management bootstrap path.
++            self.client.images.pull(PHYCODE_UV_IMAGE)
++            helper = self.client.containers.create(PHYCODE_UV_IMAGE)
++            archive, _ = helper.get_archive("/uv")
++            tar_stream = io.BytesIO()
++            for chunk in archive:
++                tar_stream.write(chunk)
++            tar_stream.seek(0)
++            self.container.put_archive("/usr/local/bin", tar_stream)
++            uv_check = self.exec_command("chmod 0755 /usr/local/bin/uv && uv --version")
++            if uv_check["exit_code"] != 0:
++                return False
++            self.copy_file_to(
++                self.phycode_wheel, "/tmp/phycode-0.1.0-py3-none-any.whl"
++            )
++        except Exception:
++            return False
++        finally:
++            if helper is not None:
++                try:
++                    helper.remove(force=True)
++                except Exception:
++                    pass
++        result = self.exec_command(
++            "uv pip install --system /tmp/phycode-0.1.0-py3-none-any.whl",
++            timeout=300,
++        )
++        return result["exit_code"] == 0
++
++    def check_phycode_health(self) -> bool:
++        """Check whether the installed PhyCode CLI is available."""
++        if self.container is None:
++            return False
++        return self.exec_command("phycode prbench run --help")["exit_code"] == 0
++
+diff --git a/src/white_agent/agent.py b/src/white_agent/agent.py
+index a1b41ff..f610ac0 100644
+--- a/src/white_agent/agent.py
++++ b/src/white_agent/agent.py
+@@ -38,0 +39,5 @@ def _export_traces(container_id: str, dest_dir: str, agent_type: str = "claude")
++    if agent_type == "phycode":
++        # PhyCode stores sanitized JSONL traces and run_result.json directly
++        # under the bind-mounted /workspace/.phycode/prbench directory.
++        logger.info(f"PhyCode traces already available in {dest_dir}")
++        return
+@@ -222 +227,2 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
+-                 agent_type: str = "claude"):
++                 agent_type: str = "claude",
++                 provider_env: dict[str, str] | None = None):
+@@ -225,0 +232 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
++        self._provider_env = dict(provider_env or {})
+@@ -301 +308,20 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
+-        if self.agent_type == "codex":
++        if self.agent_type == "phycode":
++            command = (
++                'exec env -i HOME=/home/agent PATH=/usr/local/bin:/usr/bin:/bin '
++                'PHYCODE_API_KEY="$PHYCODE_API_KEY" '
++                'PHYCODE_BASE_URL="$PHYCODE_BASE_URL" '
++                'PHYCODE_MODEL="$PHYCODE_MODEL" '
++                'phycode prbench run --workspace /workspace '
++                '--contract /workspace/task_contract.json '
++                '--approvals /workspace/phycode-approvals.json'
++            )
++            cmd = [
++                "docker", "exec",
++                "-u", "agent",
++                "-w", "/workspace",
++                *env_flags,
++                self.docker_container_id,
++                "sh", "-c", command,
++            ]
++            logger.info(f"White agent [{session_id}]: docker exec {self.docker_container_id[:12]} phycode prbench run ...")
++        elif self.agent_type == "codex":
+@@ -345,0 +372,5 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
++        process_env = None
++        if self.agent_type == "phycode":
++            process_env = os.environ.copy()
++            process_env.update(self._provider_env)
++
+@@ -352,0 +384 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
++            env=process_env,
+@@ -353,0 +386,5 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
++        if self.agent_type == "phycode":
++            self._provider_env.clear()
++            assert process_env is not None
++            for name in ("PHYCODE_API_KEY", "PHYCODE_BASE_URL", "PHYCODE_MODEL"):
++                process_env.pop(name, None)
+@@ -355 +392 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
+-        _agent_labels = {"codex": "OpenAI Codex", "opencode": "OpenCode", "claude": "Claude Code"}
++        _agent_labels = {"phycode": "PhyCode", "codex": "OpenAI Codex", "opencode": "OpenCode", "claude": "Claude Code"}
+@@ -396,0 +434 @@ def start_white_agent(
++    provider_env: dict[str, str] | None = None,
+@@ -400 +438 @@ def start_white_agent(
+-    agent_type: "claude" (default) uses Claude Code CLI; "codex" uses OpenAI Codex CLI.
++    agent_type: "claude" (default), "codex", "opencode", or "phycode".
+@@ -401,0 +440,7 @@ def start_white_agent(
++    if agent_type == "phycode" and provider_env is None:
++        from src.my_util.agent_env import resolve_env
++        provider_env = resolve_env("phycode")
++    if agent_type == "phycode":
++        for name in ("PHYCODE_API_KEY", "PHYCODE_BASE_URL", "PHYCODE_MODEL"):
++            os.environ.pop(name, None)
++
+@@ -410 +455 @@ def start_white_agent(
+-    _agent_labels = {"codex": "OpenAI Codex", "opencode": "OpenCode", "claude": "Claude Code"}
++    _agent_labels = {"phycode": "PhyCode", "codex": "OpenAI Codex", "opencode": "OpenCode", "claude": "Claude Code"}
+@@ -423,0 +469 @@ def start_white_agent(
++            provider_env=provider_env,

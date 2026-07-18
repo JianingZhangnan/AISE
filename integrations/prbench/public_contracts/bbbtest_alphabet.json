@@ -1,0 +1,20 @@
+{
+  "instruction_file": "instruction.md",
+  "paper_file": "paper.md",
+  "input_files": [],
+  "expected_files": [
+    "reproduction/alphabet.py",
+    "data/letters.csv"
+  ],
+  "constraints": [
+    {
+      "path": "data/letters.csv",
+      "csv_header": ["letter", "position"],
+      "csv_rows": [
+        ["a", "1"],
+        ["b", "2"],
+        ["c", "3"]
+      ]
+    }
+  ]
+}

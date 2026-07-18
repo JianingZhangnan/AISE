@@ -1,0 +1,16 @@
+{
+  "instruction_file": "instruction.md",
+  "paper_file": "paper.md",
+  "input_files": [],
+  "expected_files": [
+    "reproduction/hello.py",
+    "data/output.csv"
+  ],
+  "constraints": [
+    {
+      "path": "data/output.csv",
+      "csv_header": ["a", "b", "c"],
+      "csv_rows": [["1", "1", "1"]]
+    }
+  ]
+}
