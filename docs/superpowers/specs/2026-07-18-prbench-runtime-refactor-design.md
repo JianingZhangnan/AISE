@@ -62,7 +62,9 @@ process.run(
 ) -> ToolResult
 ```
 
-执行器必须使用 `subprocess.run(argv, shell=False, ...)`。`argv[0]` 只允许任务环境中明确存在的可执行文件；`cwd` 必须解析到 workspace 内。参数不得包含 NUL，timeout 必须有上限。通用 coding profile 的旧 `shell.run` 暂时保持兼容，但 PRBench registry 不暴露它。
+执行器必须使用 `subprocess.run(argv, shell=False, ...)`。`argv[0]` 必须是人工批准并由 runner 注入的规范化绝对可执行文件路径；不得仅按 basename 放行同名程序。`cwd` 必须解析到 workspace 内。参数不得包含 NUL，timeout 必须有上限。通用 coding profile 的旧 `shell.run` 暂时保持兼容，但 PRBench registry 不暴露它。
+
+子进程不得继承父进程的完整环境。executor 只传递 Python 和操作系统启动所需的固定最小环境变量集合，明确不传递任何 provider、key、token、credential 或代理变量。stdout/stderr 在构造 `ToolResult` 前经过统一文本脱敏。真实运行仍要求主 agent 在批准前阅读待执行脚本；结构化执行和环境清理不冒充 OS/container sandbox。
 
 `test.run` 只执行项目配置中的固定命令，不接受模型覆盖 command。PRBench 最小任务不依赖 `test.run`。
 
@@ -97,7 +99,7 @@ process.run(
 
 风险工具返回规范化 `ApprovalRequest`，包含 call ID、工具名、解析后的 cwd、目标路径或 argv、policy reason 和请求摘要。
 
-真实测试使用由主 agent 在每次运行前人工审定的运行级审批清单。清单中的每一项绑定完整的规范化路径/argv/cwd，只允许一次；未匹配或已消费的审批不得执行。审批清单不得包含 key、URL 或模型可写入的通配表达式。
+真实测试使用由主 agent 在每次运行前人工审定的运行级审批清单。清单中的每一项绑定完整的规范化路径/argv/cwd，只允许一次；未匹配或已消费的审批不得执行。Windows 路径按平台语义做大小写规范化。参数缺失、未知字段、非法 timeout 或其他不能执行的请求不得匹配或消费 grant。审批清单不得包含 key、URL 或模型可写入的通配表达式。
 
 本阶段官方最小任务的审批只允许：
 

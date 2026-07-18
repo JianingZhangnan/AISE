@@ -16,6 +16,7 @@
 - 每项生产代码变更严格执行 RED→GREEN→REFACTOR；必须先看到对应测试因缺失目标行为而失败。
 - 白色 agent 生命周期内 `_ground_truth` 不挂载、不复制、不通过 allowlist 暴露；字符串规则只作纵深防御。
 - PRBench profile 不公开自由文本 `shell.run`，结构化进程必须使用 `subprocess.run(argv, shell=False, ...)`。
+- `process.run` 只允许 runner 注入的规范化绝对 executable identity；不得按 basename 放行。子进程使用固定最小环境且输出在 ToolResult 边界脱敏。
 - 真实运行的风险动作只使用主 agent 人工审定的一次性精确审批；未匹配调用 fail closed。
 - API key/URL 不得写入 Git、配置、trace、memory、journal、result 或终端输出。
 - 官方 evaluator 固定为 `HET-AGI/PRBench-Eval-Handson@3e5bee4545cad2138832f06302e9c98bd81f5216`；commit 不匹配时拒绝应用 adapter。
@@ -207,7 +208,7 @@ git commit -m "refactor(prbench): centralize profile and visibility"
 
 **Interfaces:**
 - Produces: `ApprovalGrant`, `ApprovalManifest.from_json(path, workspace_root)`，对象可作为现有 `ApprovalHandler` 调用。
-- Produces: `register_process_tools(registry, workspace_root, allowed_executables, journal=None)`。
+- Produces: `register_process_tools(registry, workspace_root, allowed_executables: frozenset[Path], journal=None)`。
 - `process.run` schema 固定为 `argv: list[str]`、`cwd: str`、`timeout: int`。
 
 - [ ] **Step 1: 写真实执行和审批失败测试**
@@ -232,7 +233,7 @@ def test_process_run_passes_metacharacters_as_literal_argv(tmp_path: Path) -> No
         encoding="utf-8",
     )
     registry = ToolRegistry()
-    register_process_tools(registry, tmp_path, frozenset({Path(sys.executable).name.casefold()}))
+    register_process_tools(registry, tmp_path, frozenset({Path(sys.executable).resolve()}))
     call = ToolCall(
         tool_name="process.run",
         args={"argv": [sys.executable, "argv.py", "literal & not-a-shell"], "cwd": "."},
@@ -256,10 +257,10 @@ def test_exact_approval_is_consumed_once(tmp_path: Path) -> None:
 
 def test_approval_does_not_match_different_argv(tmp_path: Path) -> None:
     approvals = tmp_path / "approvals.json"
-    approvals.write_text(json.dumps({"grants": [{"tool_name": "process.run", "argv": ["python", "reproduction/a.py"], "cwd": "."}]}), encoding="utf-8")
+    approvals.write_text(json.dumps({"grants": [{"tool_name": "process.run", "argv": [sys.executable, "reproduction/a.py"], "cwd": "."}]}), encoding="utf-8")
     manifest = ApprovalManifest.from_json(approvals, tmp_path)
-    decision = PolicyEngine().decide(ToolCall(tool_name="process.run", args={"argv": ["python", "reproduction/b.py"], "cwd": "."}), PolicyContext(tmp_path, [], False))
-    assert not manifest(ToolCall(tool_name="process.run", args={"argv": ["python", "reproduction/b.py"], "cwd": "."}), decision)
+    decision = PolicyEngine().decide(ToolCall(tool_name="process.run", args={"argv": [sys.executable, "reproduction/b.py"], "cwd": "."}), PolicyContext(tmp_path, [], False))
+    assert not manifest(ToolCall(tool_name="process.run", args={"argv": [sys.executable, "reproduction/b.py"], "cwd": "."}), decision)
 ```
 
 - [ ] **Step 2: 验证 RED**
@@ -280,11 +281,11 @@ class ApprovalGrant(BaseModel):
     cwd: str | None = None
 ```
 
-加载时把 path/cwd 通过 Task 1 visibility 解析为绝对规范化字符串；调用时对 `file.write`/`file.edit` 或 `process.run` 构造相同 canonical tuple。grant 匹配后从内部剩余列表删除。JSON 顶层只允许 `{"grants": [...]}`，未知字段由 `extra="forbid"` 拒绝。
+加载时把 path/cwd 通过 Task 1 visibility 解析，并使用 `os.path.normcase()` 形成平台正确的 canonical key；调用时对 `file.write`/`file.edit` 或 `process.run` 构造相同 tuple。manifest 在匹配前验证工具所需字段、未知字段、argv/cwd/NUL 和 timeout 范围；无效调用返回 false 且不消费 grant。grant 只有在完整有效 key 匹配后才从内部剩余列表删除。JSON 顶层只允许 `{"grants": [...]}`，未知字段由 `extra="forbid"` 拒绝。
 
 - [ ] **Step 4: 实现 `process.run`**
 
-执行前验证：argv 非空且每项为非空无 NUL 字符串；cwd 可见；timeout 在 1..300；`Path(argv[0]).name.casefold()` 位于注入的 executable allowlist。执行必须是：
+执行前验证：argv 非空且每项为非空无 NUL 字符串；cwd 可见；timeout 在 1..300；`argv[0]` 是绝对路径，规范化后精确位于注入的 `frozenset[Path]`。实际执行使用 canonical executable path。子进程环境只允许 `SYSTEMROOT`、`WINDIR`、`TEMP`、`TMP`、`TMPDIR`、`LANG`、`LC_ALL`、`PYTHONIOENCODING`、`PYTHONUTF8` 中父进程已有的项；不得传递 PATH、HOME、provider、key、token、credential 或代理变量。stdout/stderr 在 ToolResult 构造前调用 `redact_text()`。执行必须是：
 
 ```python
 completed = subprocess.run(
@@ -294,8 +295,11 @@ completed = subprocess.run(
     text=True,
     capture_output=True,
     timeout=timeout,
+    env=minimal_environment,
 )
 ```
+
+在原测试之外先新增并看到 RED：同 basename 的其他绝对 executable 被拒绝；子进程看不到 `PHYCODE_API_KEY`；包含 secret pattern 的 stdout/stderr 被脱敏；Windows 不存在写入目标的大小写变体匹配同一个 grant；未知字段/非法 timeout 调用不消费随后合法调用所需的 grant。
 
 PRBench registry 注册 `process.run`，policy 将其列为 `RISKY_TOOLS`；PRBench spec 不含 `shell.run`。coding profile 旧 shell 工具保持不变。
 
