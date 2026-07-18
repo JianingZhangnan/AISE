@@ -5,10 +5,12 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
 from phycode.agent import AgentLoop
 from phycode.context import ContextBuilder, MemoryStore, SessionStore
 from phycode.execution import ExecutionJournal
-from phycode.llm import ScriptedLLM
+from phycode.llm import LLMClient, ReactiveLLM, ScriptedLLM
 from phycode.models import (
     AgentEventType,
     AgentProfile,
@@ -50,7 +52,7 @@ def _artifact_fingerprint(workspace: Path, paths: tuple[str, ...]) -> str:
 
 def _build_loop(
     tmp_path: Path,
-    llm: ScriptedLLM,
+    llm: LLMClient,
     *,
     expected_files: tuple[str, ...],
     completion_verifier: Callable[[], VerificationResult] | None = None,
@@ -58,6 +60,7 @@ def _build_loop(
     configure_registry: Callable[[ToolRegistry], None] | None = None,
     max_steps: int = 12,
     max_tool_calls: int = 10,
+    use_completion_verifier: bool = True,
 ) -> AgentLoop:
     session = Session(workspace_root=str(tmp_path), mode=SessionMode.NON_INTERACTIVE)
     session_store = SessionStore(session)
@@ -65,7 +68,7 @@ def _build_loop(
     register_file_tools(registry)
     if configure_registry is not None:
         configure_registry(registry)
-    if completion_verifier is None:
+    if use_completion_verifier and completion_verifier is None:
         contract = TaskContract(
             instruction_file="instruction.md",
             paper_file="paper.md",
@@ -200,6 +203,31 @@ def test_three_consecutive_identical_no_progress_actions_stop_as_failure(tmp_pat
     assert len(
         [event for event in result.events if event.type == AgentEventType.TOOL_CALL_REQUESTED]
     ) == 3
+
+
+def test_repeated_success_with_verifier_does_not_use_unverified_legacy_final(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "status.txt").write_text("unchanged", encoding="utf-8")
+    repeated_status = [
+        {
+            "type": "tool_call_requested",
+            "payload": {"tool_name": "file.read", "args": {"path": "status.txt"}},
+        }
+    ]
+    llm = ScriptedLLM(
+        [
+            repeated_status,
+            repeated_status,
+            repeated_status,
+            [{"type": "assistant_final", "payload": {"text": "unverified legacy final"}}],
+        ]
+    )
+    result = _build_loop(tmp_path, llm, expected_files=("result.txt",)).run("inspect workspace")
+
+    assert result.stopped_reason == "repeated_no_progress"
+    assert result.final_text is None
+    assert not any(event.type == AgentEventType.ASSISTANT_FINAL for event in result.events)
 
 
 def test_failed_final_skips_remaining_events_in_the_same_provider_batch(tmp_path: Path) -> None:
@@ -519,3 +547,79 @@ def test_tool_budget_with_successful_verifier_completes_without_synthetic_final(
 
     assert result.stopped_reason == "completed"
     assert not any(event.type == AgentEventType.ASSISTANT_FINAL for event in result.events)
+
+
+@pytest.mark.parametrize(
+    ("artifact_exists", "write_path", "expected_reason"),
+    [
+        (True, "unexpected.txt", "completed"),
+        (False, "result.txt", "artifact_verification_failed"),
+    ],
+)
+def test_zero_tool_budget_with_verifier_finishes_before_executing_tool(
+    tmp_path: Path,
+    artifact_exists: bool,
+    write_path: str,
+    expected_reason: str,
+) -> None:
+    if artifact_exists:
+        (tmp_path / "result.txt").write_text("already complete", encoding="utf-8")
+    llm = ScriptedLLM(
+        [
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.write",
+                        "args": {"path": write_path, "content": "must not execute"},
+                    },
+                }
+            ]
+        ]
+    )
+    result = _build_loop(
+        tmp_path,
+        llm,
+        expected_files=("result.txt",),
+        max_tool_calls=0,
+    ).run("finish without tools")
+
+    assert result.stopped_reason == expected_reason
+    assert not (tmp_path / write_path).exists()
+    assert not any(event.type == AgentEventType.TOOL_CALL_REQUESTED for event in result.events)
+    assert not any(event.type == AgentEventType.TOOL_CALL_OUTPUT for event in result.events)
+
+
+def test_zero_tool_budget_without_verifier_uses_no_tool_evidence_finalization(
+    tmp_path: Path,
+) -> None:
+    llm = ReactiveLLM(
+        [
+            (
+                "Tool use is now disabled",
+                [{"type": "assistant_final", "payload": {"text": "evidence only"}}],
+            )
+        ],
+        default=[
+            {
+                "type": "tool_call_requested",
+                "payload": {
+                    "tool_name": "file.write",
+                    "args": {"path": "unexpected.txt", "content": "must not execute"},
+                },
+            }
+        ],
+    )
+    result = _build_loop(
+        tmp_path,
+        llm,
+        expected_files=(),
+        max_tool_calls=0,
+        use_completion_verifier=False,
+    ).run("answer without tools")
+
+    assert result.stopped_reason == "final"
+    assert result.final_text == "evidence only"
+    assert not (tmp_path / "unexpected.txt").exists()
+    assert not any(event.type == AgentEventType.TOOL_CALL_REQUESTED for event in result.events)
+    assert not any(event.type == AgentEventType.TOOL_CALL_OUTPUT for event in result.events)

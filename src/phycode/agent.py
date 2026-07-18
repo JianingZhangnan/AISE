@@ -82,6 +82,8 @@ class AgentLoop:
 
     def run(self, user_input: str) -> AgentRunResult:
         all_events: list[AgentEvent] = []
+        if self.max_tool_calls <= 0:
+            return self._finish_tool_budget(user_input, all_events)
         final_text: str | None = None
         specs = self.tool_runtime.registry.list_specs()
         failure_streak = 0
@@ -148,16 +150,7 @@ class AgentLoop:
                         self._record(budget_event)
                         all_events.append(budget_event)
                     if tool_call_count >= self.max_tool_calls:
-                        if self.completion_verifier is not None:
-                            verification = self._verify_completion()
-                            if verification.ok:
-                                return AgentRunResult(None, all_events, "completed")
-                            assert verification.feedback_event is not None
-                            feedback_event = verification.feedback_event
-                            self._record(feedback_event)
-                            all_events.append(feedback_event)
-                            return AgentRunResult(None, all_events, "artifact_verification_failed")
-                        return self._finalize_from_evidence(user_input, all_events)
+                        return self._finish_tool_budget(user_input, all_events)
                     action_result_key = self._successful_action_result_key(normalized, tool_events)
                     if action_result_key is not None:
                         try:
@@ -182,7 +175,10 @@ class AgentLoop:
                         last_action_result_key = action_result_key
                         last_progress_fingerprint = progress_fingerprint
                         if consecutive_repeat_count >= self.max_repeated_actions:
-                            if self.progress_fingerprint is None:
+                            if (
+                                self.completion_verifier is None
+                                and self.progress_fingerprint is None
+                            ):
                                 return self._finalize_from_evidence(user_input, all_events)
                             return AgentRunResult(None, all_events, "repeated_no_progress")
                     else:
@@ -207,6 +203,21 @@ class AgentLoop:
             all_events.append(verification.feedback_event)
             return AgentRunResult(None, all_events, "artifact_verification_failed")
         return AgentRunResult(final_text, all_events, "max_steps")
+
+    def _finish_tool_budget(
+        self,
+        user_input: str,
+        all_events: list[AgentEvent],
+    ) -> AgentRunResult:
+        if self.completion_verifier is None:
+            return self._finalize_from_evidence(user_input, all_events)
+        verification = self._verify_completion()
+        if verification.ok:
+            return AgentRunResult(None, all_events, "completed")
+        assert verification.feedback_event is not None
+        self._record(verification.feedback_event)
+        all_events.append(verification.feedback_event)
+        return AgentRunResult(None, all_events, "artifact_verification_failed")
 
     def _verify_completion(self) -> _VerificationOutcome:
         assert self.completion_verifier is not None
