@@ -163,3 +163,24 @@
   smoke/doc 文件的 diff check 通过，tracked credential scan 无输出。全量结果包含
   core agent 尚未提交但测试已 GREEN 的 hash-guard 工作，最终整分支仍由主 agent
   在 core 提交后统一复跑。
+
+## 2026-07-18 真实 API 暴露的 contract 停机缺口
+
+- 真实 `aaatest_helloworld` 运行生成了 reproduction 脚本和目标 CSV，官方绿色评分
+  为 `overall_score=1.0`，但模型没有主动 stop，最终用满 40 次工具预算。终点
+  `ArtifactVerifier` 仍报告 `script_not_executed` 与 `csv_without_provenance`：文件
+  内容正确不等于 harness contract 完成，直接 `file.write` 不能替代成功脚本执行
+  provenance。本任务没有放宽 verifier，也没有修改 smoke grant 或 prompt。
+- 使用本地 Superpowers `systematic-debugging` 与 `test-driven-development` 定位到
+  根因：loop 只在 assistant final、预算耗尽和循环退出时验收，成功进程更新 journal
+  后没有 contract-aware 停机 hook。RED 为 6 个聚焦测试中的 4 failed/2 passed，
+  其中真实形态回归明确观察到 write→run 后仍执行 read，共 3 次工具调用。
+- 最小修复在通用 `AgentLoop` 增加默认关闭的
+  `verify_after_successful_tool`，只由 PRBench runner 显式开启。工具结果完成回灌且
+  `status=ok` 后调用现有 verifier；`ok=True` 立即返回唯一成功终态 `completed`，
+  nonfatal false 静默继续，fatal 异常记录脱敏反馈并 fail closed。拒绝、失败和超时
+  工具不调用即时验收，因此不能借旧产物误报成功；coding/GAIA 默认行为不变。
+- GREEN 覆盖 write→成功执行后立即停机且不再调用 LLM/工具、错误 CSV、direct write
+  无 provenance、symlink/escape、失败工具与旧产物、显式 final 兼容及默认关闭语义。
+  完整门禁：`uv run pytest` 为 405 passed/71 skipped，`uvx pyright` 为 0 errors，
+  `uv build` 成功生成 sdist 与 wheel。

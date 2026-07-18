@@ -44,6 +44,12 @@ PhyCode 只注册为 full evaluation 的 white task-solving agent；把它选作
 agent 或与 `--code-only` 组合会在容器创建前 fail closed。
 
 公开 contract 只包含 instruction 明示的 expected files、CSV header 和 rows。
+PRBench runner 显式开启“成功工具后验收”：每个 `status=ok` 的工具结果完成回灌后，
+立即用同一个 `ArtifactVerifier` 检查 contract；只有文件路径、内容约束和 execution
+provenance 全部通过才直接以唯一成功终态 `completed` 停机，不再等待模型主动 final，
+也不再调用后续 `status/read`。非致命的未通过检查保持静默，让模型继续工作；拒绝、
+失败或超时工具不触发该成功判定，verifier 安全异常则立即 fail closed。该开关默认
+关闭，普通 coding/GAIA run 的停机语义不变。
 adapter 在白色 agent 启动前把 contract、审批清单、公开 instruction、paper 和
 显式 input files 放入 `/workspace`。容器内始终调用同一个
 `phycode prbench run`；runner 只收到 `PHYCODE_API_KEY`、

@@ -206,6 +206,23 @@ workspace 的 `phycode-approvals.json`。smoke 编排不读取脚本、不计算
 边界；如真实模型失败，必须先用可复现测试定位机制根因，不能恢复旧 parser 或按
 task ID 写 solver/prompt 补丁。
 
+### 第四轮修订：从“模型主动结束”到 contract-aware 即时停机
+
+第一次官方真实 API 运行进一步修正了停机假设。模型生成的 reproduction 脚本与
+CSV 获得官方绿色 grader 的满分内容评价，却没有主动请求 stop，而是继续反复读取
+状态直到 40 次工具预算耗尽。终点 verifier 同时给出 `script_not_executed` 与
+`csv_without_provenance`，证明“内容看起来正确”与“具备安全执行 provenance”是两个
+独立条件。由此推翻两项建议：既不能等待模型自觉 final，也不能因为文件存在或 grader
+内容得分而放宽 contract。
+
+采用的修订是在工具结果与 stop controller 的既有边界增加 PRBench 显式 opt-in：
+成功工具结果完成回灌、进程 journal 已更新后立即调用同一个 `ArtifactVerifier`；只有
+完整 contract 与 provenance 都通过才返回 `completed`。中间阶段的 nonfatal 未通过
+保持静默，避免每次正常 read/write 都制造反馈噪声；拒绝、失败和超时动作不触发即时
+成功，verifier 安全异常仍 fail closed。该开关默认关闭，因此没有把 PRBench contract
+语义扩散到普通 coding/GAIA loop，也没有新增第二套验证器、任务专用 solver 或提示词
+补丁。
+
 ## 仓库平台记录
 
 助教尚未最终确认期末项目应提交到 GitHub 还是 NJU Git。当前为了开发、提交、review 和过程记录顺畅，先使用 GitHub 仓库 `JianingZhangnan/AISE`。如课程后续明确要求 NJU Git，将以 GitHub 仓库完整历史为源迁移或镜像，并在本文件和 `AGENT_LOG.md` 中记录切换原因与关键操作。

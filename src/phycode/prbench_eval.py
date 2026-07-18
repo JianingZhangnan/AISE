@@ -390,6 +390,7 @@ def run_prbench(
             execution_journal=journal,
             completion_verifier=verifier.verify,
             progress_fingerprint=lambda: _progress_fingerprint(journal),
+            verify_after_successful_tool=True,
             runtime_settings=trusted_prbench_runtime_settings(root, trace_dir),
         )
         agent_result = loop.run(prompt)

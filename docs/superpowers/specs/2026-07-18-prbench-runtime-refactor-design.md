@@ -126,14 +126,14 @@ Journal 进入脱敏 trace，不记录环境变量值。CSV provenance 只在一
 
 两个公开 smoke task 的 adapter 测试在 `integrations/prbench/public_contracts/` 保存人工转录自公开 `instruction.md` 的约束文件，用于检查 CSV header、行数和指令已明示的值。约束文件不得包含 metadata、reference data 或从 grader 结果反推的数值。其他任务没有约束文件时，verifier 只检查 expected outputs、非空 CSV 和 execution provenance，数值准确度仍由官方绿色 grader 判断。
 
-`ArtifactVerifier` 在模型请求 final、工具预算临近耗尽以及 runner 退出前执行。它至少检查：
+`ArtifactVerifier` 在模型请求 final、工具预算耗尽以及 runner 退出前执行；PRBench runner 还会显式开启成功工具结果后的即时验收。它至少检查：
 
 - 所有必需文件存在且位于 workspace；
 - 必需 Python 脚本至少成功执行一次；
 - CSV 具有 execution journal 支持的 provenance；
 - 对两个公开最小任务，header、数据行数和任务指令中声明的值成立。
 
-验收失败生成结构化 `artifact_verification_failed` 反馈，列出缺失或无 provenance 的路径，并让 AgentLoop 在剩余预算内继续。只有 verifier 返回成功，运行结果才是 `completed`。
+final、预算耗尽或 runner 退出时，验收失败生成结构化 `artifact_verification_failed` 反馈，列出缺失或无 provenance 的路径。成功工具结果后的即时验收只有在 verifier 返回成功时才直接结束；非致命失败保持静默，避免把每次正常的中间写入或读取都变成反馈噪声，verifier 安全异常仍立即 fail closed。拒绝、失败和超时工具不触发即时成功判定。只有 verifier 返回成功，运行结果才是 `completed`。
 
 ### 6.5 `StopController`
 
@@ -182,8 +182,8 @@ adapter 不修改官方 grading rubric，不把 ground truth 传给 PhyCode runn
 2. runner 读取公开任务字段，构造 `TaskContract`、`ProfileSpec` 和审批 gateway。
 3. AgentLoop 调用真实 LLM，接收结构化工具请求。
 4. visibility/policy 决策先执行；文件写入消耗一次性审批，进程执行在主 agent 审阅脚本并按 SHA-256 批准后才继续。
-5. 工具结果和结构化反馈进入 session/trace；进程执行同时更新 journal。
-6. 模型请求 final 时运行 verifier：失败则回灌，成功才结束。
+5. 工具结果和结构化反馈进入 session/trace；进程执行同时更新 journal。PRBench 对成功工具结果立即运行 verifier，contract 与 provenance 均通过时直接结束，不再请求下一轮模型输出。
+6. 未被即时验收结束时，模型请求 final 仍运行 verifier：失败则回灌，成功才结束。
 7. 白色 runner 退出、凭据释放后，官方 evaluator 才复制 ground truth，并仅向绿色 grading 子进程临时注入 green provider。
 
 ## 8. 错误与停止语义

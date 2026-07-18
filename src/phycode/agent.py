@@ -72,6 +72,7 @@ class AgentLoop:
         max_tool_calls: int = 40,
         completion_verifier: Callable[[], CompletionVerification] | None = None,
         progress_fingerprint: Callable[[], str] | None = None,
+        verify_after_successful_tool: bool = False,
     ) -> None:
         self.llm = llm
         self.context_builder = context_builder
@@ -86,6 +87,7 @@ class AgentLoop:
         self.max_tool_calls = max_tool_calls
         self.completion_verifier = completion_verifier
         self.progress_fingerprint = progress_fingerprint
+        self.verify_after_successful_tool = verify_after_successful_tool
 
     def run_once(self, user_input: str) -> AgentRunResult:
         return self.run(user_input)
@@ -167,6 +169,21 @@ class AgentLoop:
                         normalized,
                         tool_events,
                     )
+                    action_result_key = self._successful_action_result_key(normalized, tool_events)
+                    if self.verify_after_successful_tool and action_result_key is not None:
+                        verification = self._verify_completion()
+                        if verification.ok:
+                            return AgentRunResult(None, all_events, "completed")
+                        if verification.fatal:
+                            assert verification.feedback_event is not None
+                            self._record(verification.feedback_event)
+                            all_events.append(verification.feedback_event)
+                            return AgentRunResult(
+                                None,
+                                all_events,
+                                "artifact_verification_failed",
+                                "artifact_verification_failed",
+                            )
                     if tool_call_count == tool_budget_warning_at:
                         budget_event = self._new_event(
                             AgentEventType.FEEDBACK_SIGNAL,
@@ -182,7 +199,6 @@ class AgentLoop:
                         all_events.append(budget_event)
                     if tool_call_count >= self.max_tool_calls:
                         return self._finish_tool_budget(user_input, all_events, current_blocker)
-                    action_result_key = self._successful_action_result_key(normalized, tool_events)
                     if action_result_key is not None:
                         try:
                             progress_fingerprint = (

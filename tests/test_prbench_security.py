@@ -478,7 +478,8 @@ def test_process_request_projection_hides_executable_args_and_workspace_from_tra
         path.read_text(encoding="utf-8")
         for path in (tmp_path / ".phycode/prbench/traces").glob("*.jsonl")
     )
-    combined = (trace + json.dumps(llm.messages[1])).replace("\\\\", "\\")
+    assert len(llm.messages) == 1
+    combined = trace.replace("\\\\", "\\")
     assert str(Path(sys.executable).resolve()) not in combined
     assert sensitive_arg not in combined
     assert str(tmp_path) not in combined

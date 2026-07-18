@@ -67,21 +67,120 @@ def test_runner_rejects_approval_wait_outside_public_bounds(
 
 def test_runner_executes_script_and_writes_sanitized_result(tmp_path: Path) -> None:
     contract, approvals = _write_public_task_files(tmp_path)
+    llm = _scripted_llm_that_writes_runs_reads_and_finishes()
 
     result = run_prbench(
         tmp_path,
         contract,
         approvals,
-        llm=_scripted_llm_that_writes_runs_reads_and_finishes(),
+        llm=llm,
         max_tool_calls=8,
     )
 
     assert result.status == PRBenchRunStatus.COMPLETED
+    assert result.tool_calls == 2
+    assert llm.index == 2
     payload = json.loads(
         (tmp_path / ".phycode/prbench/run_result.json").read_text(encoding="utf-8")
     )
     assert payload["status"] == "completed"
     assert "api_key" not in json.dumps(payload).casefold()
+
+
+def test_runner_does_not_auto_complete_invalid_csv_contract(tmp_path: Path) -> None:
+    contract, approvals = _write_public_task_files(tmp_path)
+    script = (
+        "from pathlib import Path\n"
+        "Path('result.csv').write_text('wrong\\nvalue\\n', encoding='utf-8')\n"
+    )
+    read_status = [
+        {
+            "type": "tool_call_requested",
+            "payload": {"tool_name": "file.read", "args": {"path": "result.csv"}},
+        }
+    ]
+    llm = ScriptedLLM(
+        [
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.write",
+                        "args": {"path": "reproduce.py", "content": script},
+                    },
+                }
+            ],
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "process.run",
+                        "args": {"argv": [sys.executable, "reproduce.py"], "cwd": "."},
+                    },
+                }
+            ],
+            read_status,
+            [{"type": "assistant_final", "payload": {"text": "done"}}],
+        ]
+    )
+
+    result = run_prbench(tmp_path, contract, approvals, llm=llm, max_tool_calls=8)
+
+    assert result.status == PRBenchRunStatus.ARTIFACT_VERIFICATION_FAILED
+    assert result.tool_calls == 3
+    assert llm.index == 4
+
+
+def test_runner_does_not_auto_complete_direct_writes_without_process_provenance(
+    tmp_path: Path,
+) -> None:
+    contract, approvals = _write_public_task_files(tmp_path)
+    approvals.write_text(
+        json.dumps(
+            {
+                "grants": [
+                    {"tool_name": "file.write", "path": "reproduce.py"},
+                    {"tool_name": "file.write", "path": "result.csv"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    llm = ScriptedLLM(
+        [
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.write",
+                        "args": {"path": "reproduce.py", "content": "print('hello')\n"},
+                    },
+                }
+            ],
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.write",
+                        "args": {"path": "result.csv", "content": "message\nhello\n"},
+                    },
+                }
+            ],
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {"tool_name": "file.read", "args": {"path": "result.csv"}},
+                }
+            ],
+            [{"type": "assistant_final", "payload": {"text": "done"}}],
+        ]
+    )
+
+    result = run_prbench(tmp_path, contract, approvals, llm=llm, max_tool_calls=8)
+
+    assert result.status == PRBenchRunStatus.ARTIFACT_VERIFICATION_FAILED
+    assert result.tool_calls == 3
+    assert llm.index == 4
 
 
 def test_runner_blocks_lexical_ground_truth_before_calling_llm(tmp_path: Path) -> None:

@@ -61,6 +61,7 @@ def _build_loop(
     max_steps: int = 12,
     max_tool_calls: int = 10,
     use_completion_verifier: bool = True,
+    verify_after_successful_tool: bool = False,
 ) -> AgentLoop:
     session = Session(workspace_root=str(tmp_path), mode=SessionMode.NON_INTERACTIVE)
     session_store = SessionStore(session)
@@ -96,6 +97,7 @@ def _build_loop(
         max_tool_calls=max_tool_calls,
         completion_verifier=completion_verifier,
         progress_fingerprint=progress_fingerprint,
+        verify_after_successful_tool=verify_after_successful_tool,
     )
 
 
@@ -125,6 +127,90 @@ def test_final_with_missing_artifact_feeds_back_and_continues(tmp_path: Path) ->
         and event.payload.get("kind") == "artifact_verification_failed"
         for event in result.events
     )
+
+
+def test_successful_tool_auto_completes_only_when_opted_in_verifier_passes(
+    tmp_path: Path,
+) -> None:
+    llm = ScriptedLLM(
+        [
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.write",
+                        "args": {"path": "result.txt", "content": "complete"},
+                    },
+                }
+            ],
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.write",
+                        "args": {"path": "must-not-run.txt", "content": "late"},
+                    },
+                }
+            ],
+        ]
+    )
+
+    result = _build_loop(
+        tmp_path,
+        llm,
+        expected_files=("result.txt",),
+        verify_after_successful_tool=True,
+    ).run("create result")
+
+    assert result.stopped_reason == "completed"
+    assert result.final_text is None
+    assert llm.index == 1
+    assert not (tmp_path / "must-not-run.txt").exists()
+
+
+def test_failed_tool_does_not_auto_complete_from_preexisting_artifact(tmp_path: Path) -> None:
+    (tmp_path / "result.txt").write_text("preexisting", encoding="utf-8")
+    outside = tmp_path.parent / "must-not-write.txt"
+    llm = ScriptedLLM(
+        [
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.write",
+                        "args": {"path": str(outside), "content": "denied"},
+                    },
+                }
+            ],
+            [{"type": "incomplete", "payload": {"reason": "stop test"}}],
+        ]
+    )
+
+    result = _build_loop(
+        tmp_path,
+        llm,
+        expected_files=("result.txt",),
+        verify_after_successful_tool=True,
+    ).run("do not trust a failed action")
+
+    assert result.stopped_reason == "incomplete"
+    assert llm.index == 2
+    assert not outside.exists()
+
+
+def test_explicit_final_remains_compatible_with_tool_auto_verification(tmp_path: Path) -> None:
+    (tmp_path / "result.txt").write_text("complete", encoding="utf-8")
+    llm = ScriptedLLM([[{"type": "assistant_final", "payload": {"text": "done"}}]])
+
+    result = _build_loop(
+        tmp_path,
+        llm,
+        expected_files=("result.txt",),
+        verify_after_successful_tool=True,
+    ).run("finish")
+
+    assert result.stopped_reason == "completed"
+    assert result.final_text == "done"
 
 
 def test_interleaved_same_status_calls_do_not_trigger_repeat_stop(tmp_path: Path) -> None:

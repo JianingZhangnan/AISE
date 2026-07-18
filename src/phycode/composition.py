@@ -122,6 +122,7 @@ def build_agent(
     execution_journal: ExecutionJournal | None = None,
     completion_verifier: Callable[[], CompletionVerification] | None = None,
     progress_fingerprint: Callable[[], str] | None = None,
+    verify_after_successful_tool: bool = False,
     trace_dir: Path | None = None,
     runtime_settings: AgentRuntimeSettings | None = None,
 ) -> AgentLoop:
@@ -189,6 +190,7 @@ def build_agent(
         approval_handler=approval_handler,
         completion_verifier=completion_verifier,
         progress_fingerprint=progress_fingerprint,
+        verify_after_successful_tool=verify_after_successful_tool,
     )
 
 
