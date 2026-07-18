@@ -6,11 +6,13 @@ import importlib.util
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from pathlib import Path
+from typing import cast
 
 import pytest
 import typer
@@ -800,8 +802,9 @@ def test_official_main_and_white_runner_pass_approval_wait_only_to_phycode(
 ) -> None:
     launch_calls: list[dict[str, object]] = []
 
-    async def fake_launch_evaluation(**kwargs: object) -> None:
+    async def fake_launch_evaluation(**kwargs: object) -> bool:
         launch_calls.append(kwargs)
+        return True
 
     src_module = types.ModuleType("src")
     src_module.__path__ = []  # type: ignore[attr-defined]
@@ -909,6 +912,361 @@ def test_official_main_and_white_runner_pass_approval_wait_only_to_phycode(
     assert "--approval-wait-seconds 900" in commands[0][-1]
     assert "synthetic-value" not in str(commands[0])
     assert "--approval-wait-seconds" not in str(commands[1])
+
+
+@pytest.mark.parametrize(
+    ("agent_type", "provider_env", "expected_resolves", "clears_phycode"),
+    [
+        ("phycode", {"PHYCODE_API_KEY": "provided"}, 0, True),
+        ("phycode", None, 1, True),
+        ("codex", None, 0, False),
+    ],
+)
+def test_official_start_white_defines_phycode_environment_for_every_provider_path(
+    patched_official_evaluator: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agent_type: str,
+    provider_env: dict[str, str] | None,
+    expected_resolves: int,
+    clears_phycode: bool,
+) -> None:
+    provider_names = (
+        "PHYCODE_API_KEY",
+        "PHYCODE_BASE_URL",
+        "PHYCODE_MODEL",
+    )
+    resolve_calls: list[str] = []
+    executor_calls: list[dict[str, object]] = []
+    fake_environment = {name: "synthetic" for name in provider_names}
+
+    agent_env_module = types.ModuleType("src.my_util.agent_env")
+    agent_env_module.PHYCODE_PROVIDER_NAMES = provider_names  # type: ignore[attr-defined]
+
+    def resolve_env(requested_type: str) -> dict[str, str]:
+        resolve_calls.append(requested_type)
+        return {"PHYCODE_API_KEY": "resolved"}
+
+    agent_env_module.resolve_env = resolve_env  # type: ignore[attr-defined]
+    src_module = types.ModuleType("src")
+    src_module.__path__ = []  # type: ignore[attr-defined]
+    util_module = types.ModuleType("src.my_util")
+    util_module.__path__ = []  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "src", src_module)
+    monkeypatch.setitem(sys.modules, "src.my_util", util_module)
+    monkeypatch.setitem(sys.modules, "src.my_util.agent_env", agent_env_module)
+
+    class FakeExecutor:
+        def __init__(self, **kwargs: object) -> None:
+            executor_calls.append(kwargs)
+
+    class FakeRequestHandler:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    class FakeApplication:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def build(self) -> object:
+            return object()
+
+    start_white = _load_function(
+        patched_official_evaluator / "src/white_agent/agent.py",
+        "start_white_agent",
+        {
+            "A2AStarletteApplication": FakeApplication,
+            "ClaudeCodeWhiteAgentExecutor": FakeExecutor,
+            "DefaultRequestHandler": FakeRequestHandler,
+            "InMemoryTaskStore": object,
+            "logging": types.SimpleNamespace(
+                INFO=20,
+                basicConfig=lambda **_kwargs: None,
+                FileHandler=lambda *_args: object(),
+                StreamHandler=lambda *_args: object(),
+            ),
+            "logger": types.SimpleNamespace(info=lambda *_: None),
+            "os": types.SimpleNamespace(environ=fake_environment),
+            "prepare_white_agent_card": lambda _url: object(),
+            "uvicorn": types.SimpleNamespace(run=lambda *_args, **_kwargs: None),
+        },
+    )
+
+    start_white(agent_type=agent_type, provider_env=provider_env)
+
+    assert resolve_calls == ["phycode"] * expected_resolves
+    assert len(executor_calls) == 1
+    if provider_env is not None:
+        assert executor_calls[0]["provider_env"] is provider_env
+    if clears_phycode:
+        assert all(name not in fake_environment for name in provider_names)
+    else:
+        assert set(fake_environment) == set(provider_names)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_success"),
+    [
+        ("green_not_ready", False),
+        ("white_not_ready", False),
+        ("send_error", False),
+        ("no_report", False),
+        ("report", True),
+    ],
+)
+def test_official_launcher_returns_report_success_and_always_runs_cleanup(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+    outcome: str,
+    expected_success: bool,
+) -> None:
+    task_root = tmp_path / "tasks/public-task"
+    task_root.mkdir(parents=True)
+    (task_root / "task.yaml").write_text("public task", encoding="utf-8")
+    report_path = task_root / "workspace/eval_logs/eval_report.json"
+    cleanup_events: list[str] = []
+    ready_values = {
+        "green_not_ready": [False],
+        "white_not_ready": [True, False],
+    }.get(outcome, [True, True])
+
+    class FakeProcess:
+        pid = 4321
+
+    class FakeDockerEnvironment:
+        container_id = "container-id"
+
+        def get_logs(self) -> str:
+            return "public logs"
+
+    class FakeA2A:
+        def __init__(self) -> None:
+            self.ready = list(ready_values)
+
+        async def wait_agent_ready(self, _url: str, timeout: int) -> bool:
+            del timeout
+            return self.ready.pop(0)
+
+        async def send_message(self, _url: str, _task: str) -> object:
+            if outcome == "send_error":
+                raise RuntimeError("send failed")
+            if outcome == "report":
+                report_path.parent.mkdir(parents=True, exist_ok=True)
+                report_path.write_text('{"status": "ok"}', encoding="utf-8")
+            return object()
+
+    launch_evaluation = _load_function(
+        patched_official_evaluator / "src/launcher.py",
+        "launch_evaluation",
+        {
+            "DATA_DIR": str(tmp_path / "tasks"),
+            "_archive_trace": lambda *_args: cleanup_events.append("archive-trace"),
+            "_archive_workspace": lambda *_args: cleanup_events.append("archive")
+            or "archive-destination",
+            "_copy_input_files": lambda *_args: None,
+            "_copy_paper_images": lambda *_args: None,
+            "_copy_paper_markdown": lambda *_args: None,
+            "_copy_phycode_controls": lambda *_args: None,
+            "_export_traces_for_type": lambda *_args: cleanup_events.append("export"),
+            "_kill_process": lambda *_args: cleanup_events.append("kill"),
+            "_remove_container": lambda *_args: cleanup_events.append("remove"),
+            "_start_without_phycode_environment": lambda *_args: None,
+            "find_free_port_pair": lambda: (9001, 9002),
+            "json": json,
+            "logger": types.SimpleNamespace(
+                error=lambda *_: None,
+                exception=lambda *_: None,
+                info=lambda *_: None,
+                warning=lambda *_: None,
+            ),
+            "logging": types.SimpleNamespace(
+                INFO=20,
+                basicConfig=lambda **_kwargs: None,
+                FileHandler=lambda *_args: object(),
+                StreamHandler=lambda *_args: object(),
+            ),
+            "multiprocessing": types.SimpleNamespace(
+                Process=lambda **_kwargs: FakeProcess()
+            ),
+            "my_a2a": FakeA2A(),
+            "os": os,
+            "resolve_env": lambda _agent_type: {},
+            "run_with_phycode_cleanup": lambda action, *_args: action(),
+            "setup_docker_environment": lambda *_args, **_kwargs: FakeDockerEnvironment(),
+            "start_green_agent": object(),
+            "start_white_agent": object(),
+            "time": types.SimpleNamespace(time=lambda: 1.0),
+            "yaml": types.SimpleNamespace(
+                safe_load=lambda _handle: {
+                    "paper": {
+                        "title": "Public task",
+                        "author": "Public author",
+                        "paper_file": "paper.md",
+                    }
+                }
+            ),
+        },
+    )
+
+    result = asyncio.run(
+        cast(
+            Coroutine[object, object, object],
+            launch_evaluation(
+                task_id="public-task",
+                green_port=9001,
+                white_port=9002,
+                white_agent_type="phycode",
+                green_agent_type="opencode",
+            ),
+        )
+    )
+
+    assert result is expected_success
+    assert "remove" in cleanup_events
+    assert "archive" in cleanup_events
+    assert cleanup_events.count("kill") == 2
+
+
+def test_official_launcher_missing_task_is_failure_and_main_exits_nonzero(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launch_evaluation = _load_function(
+        patched_official_evaluator / "src/launcher.py",
+        "launch_evaluation",
+        {
+            "DATA_DIR": str(tmp_path / "missing-tasks"),
+            "find_free_port_pair": lambda: (9001, 9002),
+            "logger": types.SimpleNamespace(error=lambda *_: None),
+            "logging": types.SimpleNamespace(
+                INFO=20,
+                basicConfig=lambda **_kwargs: None,
+                FileHandler=lambda *_args: object(),
+                StreamHandler=lambda *_args: object(),
+            ),
+            "os": os,
+            "resolve_env": lambda _agent_type: {},
+        },
+    )
+    assert (
+        asyncio.run(
+            cast(
+                Coroutine[object, object, object],
+                launch_evaluation(task_id="missing"),
+            )
+        )
+        is False
+    )
+
+    launcher_module = types.ModuleType("src.launcher")
+
+    async def failed_launch(**_kwargs: object) -> bool:
+        return False
+
+    launcher_module.launch_evaluation = failed_launch  # type: ignore[attr-defined]
+    src_module = types.ModuleType("src")
+    src_module.__path__ = []  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "src", src_module)
+    monkeypatch.setitem(sys.modules, "src.launcher", launcher_module)
+    launch = _load_function(
+        patched_official_evaluator / "main.py",
+        "launch",
+        {"asyncio": asyncio, "typer": typer},
+    )
+
+    with pytest.raises(typer.Exit) as raised:
+        launch(
+            task_id="missing",
+            green_port=9001,
+            white_port=9002,
+            code_only=False,
+            agent_type="claude",
+            white_agent_type="phycode",
+            green_agent_type="opencode",
+            phycode_contract="contract.json",
+            phycode_approvals="approvals.json",
+            approval_wait_seconds=0,
+            no_archive=True,
+            results_subdir=None,
+        )
+
+    assert raised.value.exit_code == 1
+
+
+def test_public_smoke_stops_after_first_evaluator_failure_with_fake_uv(
+    tmp_path: Path,
+) -> None:
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell is unavailable")
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    uv_log = tmp_path / "uv-calls.log"
+    (fake_bin / "uv.cmd").write_text(
+        "@echo off\r\n"
+        ">>\"%FAKE_UV_LOG%\" echo %*\r\n"
+        "echo %* | findstr /C:\"apply_adapter.py\" >nul\r\n"
+        "if not errorlevel 1 exit /b 0\r\n"
+        "echo %* | findstr /C:\"aaatest_helloworld\" >nul\r\n"
+        "if not errorlevel 1 exit /b 23\r\n"
+        "exit /b 0\r\n",
+        encoding="utf-8",
+    )
+    evaluator = tmp_path / "evaluator"
+    evaluator.mkdir()
+    wheel = tmp_path / "phycode-0.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"fake wheel")
+    wrapper = tmp_path / "invoke-smoke.ps1"
+    wrapper.write_text(
+        "param([string]$SmokeScript, [string]$EvaluatorRoot, [string]$WheelPath)\n"
+        "$failed = $false\n"
+        "try {\n"
+        "  & $SmokeScript -EvaluatorRoot $EvaluatorRoot -WheelPath $WheelPath "
+        "-TaskIds @('aaatest_helloworld','bbbtest_alphabet')\n"
+        "}\n"
+        "catch { $failed = $true }\n"
+        "if (-not $failed) { exit 91 }\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["PATH"] = str(fake_bin) + os.pathsep + environment["PATH"]
+    environment.update(
+        {
+            "FAKE_UV_LOG": str(uv_log),
+            "PHYCODE_API_KEY": "synthetic-key",
+            "PHYCODE_BASE_URL": "https://synthetic.invalid/v1",
+            "PHYCODE_MODEL": "synthetic-model",
+        }
+    )
+
+    completed = subprocess.run(
+        [
+            pwsh,
+            "-NoProfile",
+            "-File",
+            str(wrapper),
+            "-SmokeScript",
+            str(Path(__file__).resolve().parents[1] / "integrations/prbench/run_public_smoke.ps1"),
+            "-EvaluatorRoot",
+            str(evaluator),
+            "-WheelPath",
+            str(wheel),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    calls = uv_log.read_text(encoding="utf-8").splitlines()
+    assert sum("apply_adapter.py" in call for call in calls) == 1
+    launch_calls = [call for call in calls if "main.py launch" in call]
+    assert len(launch_calls) == 1
+    assert "aaatest_helloworld" in launch_calls[0]
+    assert all("bbbtest_alphabet" not in call for call in calls)
 
 
 @pytest.mark.parametrize("outcome", ["success", "nonzero", "oserror", "timeout"])

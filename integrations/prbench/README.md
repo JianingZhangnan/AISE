@@ -51,6 +51,11 @@ adapter 在白色 agent 启动前把 contract、审批清单、公开 instructio
 `multiprocessing.Process.start()` 或 `subprocess.Popen()` 抛错时也走同一个
 `finally` 清理路径，异常不会让 provider dict、child environment 或父进程
 `PHYCODE_*` 残留。
+launcher 通常把已解析的 provider mapping 传给 `start_white_agent()`；直接调用时
+若 mapping 为 `None`，white 端只在 `agent_type=phycode` 分支补做一次解析。无论
+mapping 是预先提供还是现场解析，其值都会传入 executor 的私有副本，三项
+`PHYCODE_*` 同时从父进程环境移除。非 PhyCode 分支既不导入 provider 名单，也不
+解析或清除这些变量。
 
 当 white 为 PhyCode 时，green provider 的值同样不会写入共享容器的
 `Config.Env`，因此 white 阶段和容器内 `/proc/1/environ` 都不可见。只有 white
@@ -59,6 +64,14 @@ adapter 在白色 agent 启动前把 contract、审批清单、公开 instructio
 `-e NAME`，不携带 `NAME=value`。成功、非零退出、启动 `OSError` 和超时都会在
 `finally` 中清空 provider 与 child-environment 映射。非 PhyCode white/green
 组合仍沿用官方 evaluator 原有的共享环境行为。
+
+`launch_evaluation()` 现在返回显式布尔结果：只有任务成功发送给 green agent，且
+`workspace/eval_logs/eval_report.json` 是普通文件时才为成功。任务或 task.yaml
+缺失、green/white 未就绪、消息发送异常或报告缺失都返回失败；进入 evaluation
+资源生命周期后的失败仍由 `finally` 导出 trace、终止两个 agent、删除本次容器并
+按配置归档 workspace。`main.py launch` 会把 `False` 映射为退出码 1，因此公开
+smoke 的首个任务失败后会立即停止，不会继续执行后续任务。batch 模式同样只把
+布尔成功报告为 `Completed`。
 
 `public_contracts/` 中的两个 JSON 只服务公开最小 smoke；其他任务默认使用
 官方 `task.yaml` 的公开文件字段构造无数值约束 contract，最终数值准确度仍由

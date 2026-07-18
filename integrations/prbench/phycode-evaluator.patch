@@ -18,10 +18,16 @@ index 922d52e..df2504d 100644
 +        max=900,
 +        help="Seconds PhyCode may wait for a runtime approval (0-900)",
 +    ),
+@@ -58 +67 @@ def launch(
+-    asyncio.run(launch_evaluation(
++    succeeded = asyncio.run(launch_evaluation(
 @@ -65,0 +75,3 @@ def launch(
 +        phycode_contract=phycode_contract,
 +        phycode_approvals=phycode_approvals,
 +        approval_wait_seconds=approval_wait_seconds,
+@@ -68,0 +81,2 @@ def launch(
++    if not succeeded:
++        raise typer.Exit(1)
 diff --git a/src/green_agent/agent.py b/src/green_agent/agent.py
 index 3874429..1bfd98b 100644
 --- a/src/green_agent/agent.py
@@ -213,6 +219,9 @@ index c705de8..b7417d5 100644
 +    phycode_contract: str | None = None,
 +    phycode_approvals: str | None = None,
 +    approval_wait_seconds: int = 0,
+@@ -325 +434 @@ async def launch_evaluation(
+-):
++) -> bool:
 @@ -337,0 +447,9 @@ async def launch_evaluation(
 +    if not 0 <= approval_wait_seconds <= 900:
 +        raise ValueError("approval wait seconds must be between 0 and 900")
@@ -223,6 +232,12 @@ index c705de8..b7417d5 100644
 +    phycode_provider_env = (
 +        resolve_env("phycode") if effective_white_type == "phycode" else {}
 +    )
+@@ -357 +475 @@ async def launch_evaluation(
+-        return
++        return False
+@@ -362 +480 @@ async def launch_evaluation(
+-        return
++        return False
 @@ -393,0 +512,10 @@ async def launch_evaluation(
 +    if effective_white_type == "phycode":
 +        _copy_phycode_controls(
@@ -234,6 +249,8 @@ index c705de8..b7417d5 100644
 +            code_only,
 +        )
 +
+@@ -397,0 +526 @@ async def launch_evaluation(
++    evaluation_succeeded = False
 @@ -420 +548,2 @@ async def launch_evaluation(
 -            args=("prbench_green_agent", green_host, green_port, container_id, effective_green_type),
 +            args=("prbench_green_agent", green_host, green_port, container_id,
@@ -241,6 +258,9 @@ index c705de8..b7417d5 100644
 @@ -423 +552 @@ async def launch_evaluation(
 -        p_green.start()
 +        _start_without_phycode_environment(p_green)
+@@ -427 +557 @@ async def launch_evaluation(
+-            return
++            return False
 @@ -436 +565,2 @@ async def launch_evaluation(
 -                  workspace_dir, container_id, effective_white_type),
 +                  workspace_dir, container_id, effective_white_type,
@@ -254,6 +274,30 @@ index c705de8..b7417d5 100644
 +            )
 +        else:
 +            _start_without_phycode_environment(p_white)
+@@ -443 +580 @@ async def launch_evaluation(
+-            return
++            return False
+@@ -466,0 +604 @@ async def launch_evaluation(
++        send_succeeded = False
+@@ -469,0 +608 @@ async def launch_evaluation(
++            send_succeeded = True
+@@ -479 +618,2 @@ async def launch_evaluation(
+-        if os.path.exists(report_path):
++        report_exists = os.path.isfile(report_path)
++        if report_exists:
+@@ -487,0 +628 @@ async def launch_evaluation(
++        evaluation_succeeded = send_succeeded and report_exists
+@@ -534,0 +676 @@ async def launch_evaluation(
++    return evaluation_succeeded
+@@ -558 +700 @@ async def batch_evaluate(
+-                await launch_evaluation(
++                succeeded = await launch_evaluation(
+@@ -569 +711,4 @@ async def batch_evaluate(
+-                print(f"[BATCH] Completed: {task_id}", flush=True)
++                if succeeded:
++                    print(f"[BATCH] Completed: {task_id}", flush=True)
++                else:
++                    print(f"[BATCH] Failed: {task_id}: evaluation did not produce a report", flush=True)
 diff --git a/src/my_util/agent_env.py b/src/my_util/agent_env.py
 index d0ae5f5..df5064b 100644
 --- a/src/my_util/agent_env.py
@@ -558,17 +602,18 @@ index a1b41ff..db7a67e 100644
 @@ -400 +450 @@ def start_white_agent(
 -    agent_type: "claude" (default) uses Claude Code CLI; "codex" uses OpenAI Codex CLI.
 +    agent_type: "claude" (default), "codex", "opencode", or "phycode".
-@@ -401,0 +452,7 @@ def start_white_agent(
-+    if agent_type == "phycode" and provider_env is None:
-+        from src.my_util.agent_env import PHYCODE_PROVIDER_NAMES, resolve_env
-+        provider_env = resolve_env("phycode")
+@@ -401,0 +452,8 @@ def start_white_agent(
 +    if agent_type == "phycode":
++        from src.my_util.agent_env import PHYCODE_PROVIDER_NAMES, resolve_env
++
++        if provider_env is None:
++            provider_env = resolve_env("phycode")
 +        for name in PHYCODE_PROVIDER_NAMES:
 +            os.environ.pop(name, None)
 +
-@@ -410 +467 @@ def start_white_agent(
+@@ -410 +468 @@ def start_white_agent(
 -    _agent_labels = {"codex": "OpenAI Codex", "opencode": "OpenCode", "claude": "Claude Code"}
 +    _agent_labels = {"phycode": "PhyCode", "codex": "OpenAI Codex", "opencode": "OpenCode", "claude": "Claude Code"}
-@@ -423,0 +481,2 @@ def start_white_agent(
+@@ -423,0 +482,2 @@ def start_white_agent(
 +            provider_env=provider_env,
 +            approval_wait_seconds=approval_wait_seconds,
