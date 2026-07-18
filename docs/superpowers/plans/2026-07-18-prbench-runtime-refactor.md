@@ -776,12 +776,59 @@ git commit -m "docs(prbench): document verified evaluator workflow"
 
 ---
 
+### Task 8: 运行中脚本审批与绿色凭据延迟注入
+
+**依赖：** Task 7 的独立审查。该审查复现了共享容器凭据泄漏、PowerShell 空值残留和脚本生成前预授权三个阻断问题。
+
+**Files:**
+- Modify: `src/phycode/approval.py`
+- Modify: `src/phycode/prbench_eval.py`
+- Modify: `tests/test_process_approval.py`
+- Modify: `tests/test_prbench_runner.py`
+- Modify: `integrations/prbench/phycode-evaluator.patch`
+- Modify: `tests/test_prbench_adapter.py`
+- Modify: `integrations/prbench/run_public_smoke.ps1`
+- Modify: `tests/test_docs_process.py`
+- Modify: `README.md`, `AGENT_LOG.md`, `SPEC_PROCESS.md`
+
+**Interfaces:**
+- `phycode prbench run` 新增显式、默认关闭且有上限的审批等待选项。
+- 待批请求只写入隐藏 runtime 目录，包含规范化 argv/cwd 和脚本 SHA-256，不含凭据。
+- 真实执行 grant 绑定脚本 SHA-256；清单动态刷新仍保持每项只消费一次。
+- green-only provider 不进入共享容器 `Config.Env`；仅在 white 结束后的 grading child env 通过 name-only `docker -e` 注入并清理。
+
+- [ ] **Step 1: 为动态审批写 RED**
+
+覆盖：无执行 grant 时生成请求并等待；外部追加匹配 hash 后继续；脚本变更、重复 grant、畸形清单和超时拒绝；默认零等待保持现有确定性语义。
+
+- [ ] **Step 2: 最小实现动态一次性审批**
+
+审批文件刷新按 grant key 计数，已消费项不得因重读重新出现；执行 grant 的脚本 hash 必须与批准时一致。请求文件使用原子替换且不暴露 workspace 外路径。
+
+- [ ] **Step 3: 为 green 凭据生命周期写 RED**
+
+在应用到 fresh pinned clone 的动态模块探针中证明当前 green 值进入 `Config.Env`/`/proc/1/environ` 风险路径；覆盖 grading 成功、启动失败、超时后的 child env 清理和 name-only argv。
+
+- [ ] **Step 4: 最小修复 adapter**
+
+排除 green-only 持久容器 env；green grading 时才解析 provider，使用 subprocess `env` 传值、Docker argv 只含变量名，并在 `finally` 清理。不得改 green rubric 或 ground-truth 时序。
+
+- [ ] **Step 5: 修复 smoke 编排和环境恢复**
+
+初始 manifest 只批准任务指定 reproduction 文件写入，不预授权 `process.run`；脚本等待主 agent 写入 hash-bound grant。新增的 `OPENCODE_*` 用 `Remove-Item Env:` 真正删除，既有值精确恢复。
+
+- [ ] **Step 6: 全量验证、独立复审与提交**
+
+运行 focused、`uv run pytest`、`uvx pyright`、PowerShell 成功/失败恢复探针、fresh pinned clone patch/apply/CLI 探针、diff/凭据扫描；Critical/Important 清零后才允许真实 smoke。
+
+---
+
 ## 最终真实验收（主 agent 执行，不委派凭据）
 
 1. 从 `D:\BaiduSyncdisk\NewTextDocument.txt` 在当前 PowerShell 进程内读取 URL/key/model，设置三个 `PHYCODE_*` 环境变量；不得输出值。
 2. 构建 wheel：`uv build`。
 3. 启动并确认 Docker daemon；clone 官方 evaluator 并 checkout 固定 commit。
-4. 主 agent 逐项审阅两个 smoke task 的精确 approvals；任何额外调用不加入清单。
+4. 初始只批准写入公开任务指定的 reproduction 文件；runner 产生 hash-bound 待批请求后，主 agent 读取脚本并逐项追加精确 `process.run` grant，任何额外调用不批准。
 5. 分别运行 `aaatest_helloworld` 和 `bbbtest_alphabet` 官方流程。
 6. 验收每项 white runner status 为 `completed`、expected outputs 存在、官方 evaluator 生成报告、trace/result 不含 key/URL。
 7. 若真实模型失败，按 `systematic-debugging` 先定位根因；任何修复先添加可复现的失败测试，不进行 prompt/规则打地鼠。
@@ -789,9 +836,9 @@ git commit -m "docs(prbench): document verified evaluator workflow"
 
 ## 依赖关系
 
-- Task 1 → Task 2 → Task 3 → Task 4 → Task 5 → Task 6 → Task 7。
+- Task 1 → Task 2 → Task 3 → Task 4 → Task 5 → Task 6 → Task 7 → Task 8。
 - 每个 task 完成后必须先进行 spec 合规与代码质量双阶段审查，Critical/Important 清零后才进入下一项。
-- 真实 API 与官方 evaluator 验收只在 Task 7 和全量测试通过后执行。
+- 真实 API 与官方 evaluator 验收只在 Task 8 独立复审和全量测试通过后执行。
 
 ## 计划自审
 

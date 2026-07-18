@@ -101,6 +101,8 @@ process.run(
 
 真实测试使用由主 agent 在每次运行前人工审定的运行级审批清单。清单中的每一项绑定完整的规范化路径/argv/cwd，只允许一次；未匹配或已消费的审批不得执行。Windows 路径按平台语义做大小写规范化。参数缺失、未知字段、非法 timeout 或其他不能执行的请求不得匹配或消费 grant。审批清单不得包含 key、URL 或模型可写入的通配表达式。
 
+真实 smoke 不得在 reproduction 脚本生成前预授权 `process.run`。runner 在没有匹配执行 grant 时，把规范化 argv/cwd 与待执行脚本的 SHA-256 原子写入 `.phycode/prbench/approval-request.json`，并在显式启用的有限等待窗口内重新读取审批清单。主 agent 必须先读取脚本，再写入包含同一脚本 SHA-256 的一次性执行 grant；脚本内容在等待期间变化、清单畸形、超时或重复消费均 fail closed。默认测试与普通非交互运行不等待。
+
 本阶段官方最小任务的审批只允许：
 
 - 在当前临时 workspace 内写入任务明确要求的 reproduction 源文件和分析文件；
@@ -172,15 +174,17 @@ Journal 进入脱敏 trace，不记录环境变量值。CSV provenance 只在一
 
 adapter 不修改官方 grading rubric，不把 ground truth 传给 PhyCode runner。
 
+当白色 agent 为 PhyCode、绿色 grader 使用另一 provider 时，绿色凭据不得写入共享容器 `Config.Env`，也不得在白色阶段进入任何容器进程。绿色 agent 只能在白色 runner 退出并释放其凭据后，为 grading 子进程构造临时 child environment，并用 name-only `docker exec -e NAME` 注入；成功、失败和超时路径都必须清除临时映射。宿主 smoke 脚本新增的 provider alias 必须在 `finally` 中恢复原值或真正删除，而不是留下空值变量。
+
 ## 7. 运行数据流
 
 1. evaluator 创建隔离 workspace，只复制 instruction、paper 和显式 input files。
 2. runner 读取公开任务字段，构造 `TaskContract`、`ProfileSpec` 和审批 gateway。
 3. AgentLoop 调用真实 LLM，接收结构化工具请求。
-4. visibility/policy 决策先执行；风险动作随后消耗一次性审批。
+4. visibility/policy 决策先执行；文件写入消耗一次性审批，进程执行在主 agent 审阅脚本并按 SHA-256 批准后才继续。
 5. 工具结果和结构化反馈进入 session/trace；进程执行同时更新 journal。
 6. 模型请求 final 时运行 verifier：失败则回灌，成功才结束。
-7. 白色 runner 退出、凭据释放后，官方 evaluator 才复制 ground truth 并启动绿色 grader。
+7. 白色 runner 退出、凭据释放后，官方 evaluator 才复制 ground truth，并仅向绿色 grading 子进程临时注入 green provider。
 
 ## 8. 错误与停止语义
 
