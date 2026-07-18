@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 from phycode.models import ToolCall, ToolResult, ToolRiskLevel, ToolSpec
+from phycode.redaction import redact_text
 from phycode.tools.base import ToolRegistry
 from phycode.visibility import PathVisibilityPolicy, VisibilityViolation
+
+_MINIMAL_ENVIRONMENT_NAMES = (
+    "SYSTEMROOT",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "PYTHONIOENCODING",
+    "PYTHONUTF8",
+)
 
 
 def _to_text(value: bytes | str | None) -> str:
@@ -16,19 +30,34 @@ def _to_text(value: bytes | str | None) -> str:
     return value
 
 
+def _result(
+    call: ToolCall,
+    status: str,
+    *,
+    stdout: bytes | str | None = "",
+    stderr: bytes | str | None = "",
+) -> ToolResult:
+    return ToolResult(
+        tool_call_id=call.id,
+        status=status,
+        stdout=redact_text(_to_text(stdout)),
+        stderr=redact_text(_to_text(stderr)),
+    )
+
+
 def _invalid(call: ToolCall, message: str) -> ToolResult:
-    return ToolResult(tool_call_id=call.id, status="invalid_tool_args", stderr=message)
+    return _result(call, "invalid_tool_args", stderr=message)
 
 
 def register_process_tools(
     registry: ToolRegistry,
     workspace_root: Path,
-    allowed_executables: frozenset[str],
+    allowed_executables: frozenset[Path],
     journal: object | None = None,
 ) -> None:
     root = workspace_root.expanduser().resolve()
     visibility = PathVisibilityPolicy(root)
-    executable_allowlist = frozenset(name.casefold() for name in allowed_executables)
+    executable_allowlist = frozenset(path.expanduser().resolve() for path in allowed_executables)
     _ = journal  # Task 3 will connect the execution journal at this extension point.
 
     def process_run(call: ToolCall) -> ToolResult:
@@ -54,9 +83,21 @@ def register_process_tools(
         if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 300:
             return _invalid(call, "timeout must be an integer from 1 through 300")
 
-        executable = Path(argv[0]).name.casefold()
+        requested_executable = Path(argv[0]).expanduser()
+        if not requested_executable.is_absolute():
+            return _invalid(call, "executable path must be absolute")
+        try:
+            executable = requested_executable.resolve()
+        except (OSError, RuntimeError) as exc:
+            return _invalid(call, f"executable path cannot be resolved: {exc}")
         if executable not in executable_allowlist:
             return _invalid(call, f"executable is not allowed: {executable}")
+        argv = [str(executable), *argv[1:]]
+        minimal_environment = {
+            name: value
+            for name in _MINIMAL_ENVIRONMENT_NAMES
+            if (value := os.environ.get(name)) is not None
+        }
 
         try:
             completed = subprocess.run(
@@ -66,22 +107,20 @@ def register_process_tools(
                 text=True,
                 capture_output=True,
                 timeout=timeout,
+                env=minimal_environment,
             )
         except subprocess.TimeoutExpired as exc:
-            return ToolResult(
-                tool_call_id=call.id,
-                status="timeout",
+            return _result(
+                call,
+                "timeout",
                 stdout=_to_text(exc.stdout),
                 stderr=_to_text(exc.stderr) or f"Process timed out after {timeout} seconds",
             )
+        except OSError as exc:
+            return _result(call, "tool_error", stderr=str(exc))
 
         status = "ok" if completed.returncode == 0 else "command_failed"
-        return ToolResult(
-            tool_call_id=call.id,
-            status=status,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-        )
+        return _result(call, status, stdout=completed.stdout, stderr=completed.stderr)
 
     registry.register(
         ToolSpec(

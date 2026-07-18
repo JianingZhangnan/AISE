@@ -53,7 +53,7 @@ def build_default_registry(
     register_file_tools(registry)
     register_calculator_tools(registry)
     register_search_tools(registry, workspace_root=root, visibility=visibility)
-    register_process_tools(registry, root, frozenset({Path(sys.executable).name.casefold()}))
+    register_process_tools(registry, root, frozenset({Path(sys.executable).resolve()}))
     register_shell_tools(registry, workspace_root=root, test_command=configured_test_command)
     register_state_tools(registry, workspace_root=root, memory_store=memory_store)
     register_web_tools(registry)

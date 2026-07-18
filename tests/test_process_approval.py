@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -25,7 +27,7 @@ def _register_python(registry: ToolRegistry, workspace_root: Path) -> None:
     register_process_tools(
         registry,
         workspace_root,
-        frozenset({Path(sys.executable).name.casefold()}),
+        frozenset({Path(sys.executable).resolve()}),
     )
 
 
@@ -104,7 +106,7 @@ def test_process_run_rejects_timeout_outside_integer_bounds(tmp_path: Path, time
 
 def test_process_run_rejects_executable_outside_allowlist(tmp_path: Path) -> None:
     registry = ToolRegistry()
-    register_process_tools(registry, tmp_path, frozenset({"definitely-not-python"}))
+    register_process_tools(registry, tmp_path, frozenset({tmp_path / "definitely-not-python"}))
     call = ToolCall(
         tool_name="process.run",
         args={"argv": [sys.executable, "-c", "print('unreachable')"], "cwd": "."},
@@ -114,6 +116,39 @@ def test_process_run_rejects_executable_outside_allowlist(tmp_path: Path) -> Non
 
     assert result.tool_result.status == "invalid_tool_args"
     assert "not allowed" in result.tool_result.stderr
+    assert "unreachable" not in result.tool_result.stdout
+
+
+def test_process_run_rejects_different_absolute_executable_with_same_basename(tmp_path: Path) -> None:
+    other_executable = tmp_path / "other" / Path(sys.executable).name
+    other_executable.parent.mkdir()
+    shutil.copy2(sys.executable, other_executable)
+    registry = ToolRegistry()
+    _register_python(registry, tmp_path)
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [str(other_executable), "-c", "print('unreachable')"], "cwd": "."},
+    )
+
+    result = ToolRuntime(registry).run(call, _prbench_context(tmp_path), approved=True)
+
+    assert result.tool_result.status == "invalid_tool_args"
+    assert "not allowed" in result.tool_result.stderr
+    assert "unreachable" not in result.tool_result.stdout
+
+
+def test_process_run_rejects_relative_executable(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    _register_python(registry, tmp_path)
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [Path(sys.executable).name, "-c", "print('unreachable')"], "cwd": "."},
+    )
+
+    result = ToolRuntime(registry).run(call, _prbench_context(tmp_path), approved=True)
+
+    assert result.tool_result.status == "invalid_tool_args"
+    assert "absolute" in result.tool_result.stderr
     assert "unreachable" not in result.tool_result.stdout
 
 
@@ -197,18 +232,97 @@ def test_process_run_reports_nonzero_exit_without_shell(tmp_path: Path) -> None:
     assert result.tool_result.stderr.strip() == "err"
 
 
-def test_process_run_reports_timeout(tmp_path: Path) -> None:
+def test_process_run_uses_only_minimal_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    forbidden_names = {
+        "PHYCODE_API_KEY",
+        "OPENAI_API_KEY",
+        "CUSTOM_PROVIDER",
+        "CUSTOM_TOKEN",
+        "CUSTOM_CREDENTIAL",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "PATH",
+        "HOME",
+    }
+    for name in forbidden_names:
+        monkeypatch.setenv(name, f"test-only-{name.casefold()}")
+    allowed_names = {
+        "SYSTEMROOT",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "PYTHONIOENCODING",
+        "PYTHONUTF8",
+    }
     registry = ToolRegistry()
     _register_python(registry, tmp_path)
     call = ToolCall(
         tool_name="process.run",
-        args={"argv": [sys.executable, "-c", "import time; time.sleep(5)"], "cwd": ".", "timeout": 1},
+        args={
+            "argv": [sys.executable, "-c", "import json, os; print(json.dumps(sorted(os.environ)))"],
+            "cwd": ".",
+        },
+    )
+
+    result = ToolRuntime(registry).run(call, _prbench_context(tmp_path), approved=True)
+    child_environment_names = {name.upper() for name in json.loads(result.tool_result.stdout)}
+
+    assert result.tool_result.status == "ok"
+    assert child_environment_names <= allowed_names
+    assert child_environment_names.isdisjoint(forbidden_names)
+
+
+def test_process_run_redacts_stdout_and_stderr(tmp_path: Path) -> None:
+    stdout_secret = "sk-stdout-reviewer-1234567890"
+    stderr_secret = "sk-stderr-reviewer-1234567890"
+    registry = ToolRegistry()
+    _register_python(registry, tmp_path)
+    script = (
+        f"import sys; print({stdout_secret!r}); "
+        f"print('OPENAI_API_KEY=' + {stderr_secret!r}, file=sys.stderr); sys.exit(7)"
+    )
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "-c", script], "cwd": "."},
+    )
+
+    result = ToolRuntime(registry).run(call, _prbench_context(tmp_path), approved=True)
+
+    assert result.tool_result.status == "command_failed"
+    assert stdout_secret not in result.tool_result.stdout
+    assert stderr_secret not in result.tool_result.stderr
+    assert "[REDACTED_SECRET]" in result.tool_result.stdout
+    assert "[REDACTED_SECRET]" in result.tool_result.stderr
+
+
+def test_process_run_reports_timeout(tmp_path: Path) -> None:
+    timeout_secret = "sk-timeout-reviewer-1234567890"
+    registry = ToolRegistry()
+    _register_python(registry, tmp_path)
+    call = ToolCall(
+        tool_name="process.run",
+        args={
+            "argv": [
+                sys.executable,
+                "-c",
+                f"import time; print({timeout_secret!r}, flush=True); time.sleep(5)",
+            ],
+            "cwd": ".",
+            "timeout": 1,
+        },
     )
 
     result = ToolRuntime(registry).run(call, _prbench_context(tmp_path), approved=True)
 
     assert result.tool_result.status == "timeout"
     assert "timed out after 1 seconds" in result.tool_result.stderr.casefold()
+    assert timeout_secret not in result.tool_result.stdout
+    assert "[REDACTED_SECRET]" in result.tool_result.stdout
 
 
 def test_exact_approval_is_consumed_once(tmp_path: Path) -> None:
@@ -240,13 +354,48 @@ def test_file_approval_matches_resolved_path(tmp_path: Path) -> None:
     assert manifest(call, decision)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows normcase behavior")
+def test_file_approval_matches_case_variant_for_nonexistent_windows_target(tmp_path: Path) -> None:
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(
+        json.dumps({"grants": [{"tool_name": "file.write", "path": "Reproduction/NewFile.PY"}]}),
+        encoding="utf-8",
+    )
+    manifest = ApprovalManifest.from_json(approvals, tmp_path)
+    call = ToolCall(
+        tool_name="file.write",
+        args={"path": "reproduction/newfile.py", "content": "print('case variant')"},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert manifest(call, decision)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX paths remain case-sensitive")
+def test_file_approval_does_not_match_case_variant_on_posix(tmp_path: Path) -> None:
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(
+        json.dumps({"grants": [{"tool_name": "file.write", "path": "NewFile.py"}]}),
+        encoding="utf-8",
+    )
+    manifest = ApprovalManifest.from_json(approvals, tmp_path)
+    call = ToolCall(tool_name="file.write", args={"path": "newfile.py", "content": "different target"})
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert not manifest(call, decision)
+
+
 def test_approval_does_not_match_different_argv(tmp_path: Path) -> None:
     approvals = tmp_path / "approvals.json"
     approvals.write_text(
         json.dumps(
             {
                 "grants": [
-                    {"tool_name": "process.run", "argv": ["python", "reproduction/a.py"], "cwd": "."}
+                    {
+                        "tool_name": "process.run",
+                        "argv": [sys.executable, "reproduction/a.py"],
+                        "cwd": ".",
+                    }
                 ]
             }
         ),
@@ -255,7 +404,7 @@ def test_approval_does_not_match_different_argv(tmp_path: Path) -> None:
     manifest = ApprovalManifest.from_json(approvals, tmp_path)
     call = ToolCall(
         tool_name="process.run",
-        args={"argv": ["python", "reproduction/b.py"], "cwd": "."},
+        args={"argv": [sys.executable, "reproduction/b.py"], "cwd": "."},
     )
     decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
 
@@ -269,7 +418,7 @@ def test_process_approval_binds_resolved_cwd(tmp_path: Path) -> None:
         json.dumps(
             {
                 "grants": [
-                    {"tool_name": "process.run", "argv": ["python", "a.py"], "cwd": "reproduction"}
+                    {"tool_name": "process.run", "argv": [sys.executable, "a.py"], "cwd": "reproduction"}
                 ]
             }
         ),
@@ -278,15 +427,131 @@ def test_process_approval_binds_resolved_cwd(tmp_path: Path) -> None:
     manifest = ApprovalManifest.from_json(approvals, tmp_path)
     same = ToolCall(
         tool_name="process.run",
-        args={"argv": ["python", "a.py"], "cwd": "reproduction/../reproduction"},
+        args={"argv": [sys.executable, "a.py"], "cwd": "reproduction/../reproduction"},
     )
     different = ToolCall(
         tool_name="process.run",
-        args={"argv": ["python", "a.py"], "cwd": "."},
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
     )
 
     assert not manifest(different, PolicyEngine().decide(different, PolicyContext(tmp_path, [], False)))
     assert manifest(same, PolicyEngine().decide(same, PolicyContext(tmp_path, [], False)))
+
+
+@pytest.mark.parametrize(
+    "invalid_args",
+    [
+        {
+            "argv": [sys.executable, "reproduction/a.py"],
+            "cwd": ".",
+            "unexpected": "not allowed",
+        },
+        {"argv": [sys.executable, "reproduction/a.py"], "cwd": ".", "timeout": 0},
+        {"argv": [sys.executable, "reproduction/a.py"], "cwd": ".", "timeout": "30"},
+        {"cwd": "."},
+        {"argv": [], "cwd": "."},
+        {"argv": [sys.executable, ""], "cwd": "."},
+        {"argv": [sys.executable, "bad\x00argument"], "cwd": "."},
+        {"argv": [sys.executable, "reproduction/a.py"], "cwd": ""},
+        {"argv": [sys.executable, "reproduction/a.py"], "cwd": "bad\x00cwd"},
+    ],
+)
+def test_invalid_process_call_does_not_consume_grant(
+    tmp_path: Path, invalid_args: dict[str, object]
+) -> None:
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(
+        json.dumps(
+            {
+                "grants": [
+                    {
+                        "tool_name": "process.run",
+                        "argv": [sys.executable, "reproduction/a.py"],
+                        "cwd": ".",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = ApprovalManifest.from_json(approvals, tmp_path)
+    invalid_call = ToolCall(tool_name="process.run", args=invalid_args)
+    invalid_decision = PolicyEngine().decide(invalid_call, PolicyContext(tmp_path, [], False))
+    valid_call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "reproduction/a.py"], "cwd": ".", "timeout": 30},
+    )
+    valid_decision = PolicyEngine().decide(valid_call, PolicyContext(tmp_path, [], False))
+
+    assert not manifest(invalid_call, invalid_decision)
+    assert manifest(valid_call, valid_decision)
+    assert not manifest(valid_call, valid_decision)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "invalid_args", "valid_args"),
+    [
+        ("file.write", {"path": "a.py"}, {"path": "a.py", "content": "ok"}),
+        (
+            "file.write",
+            {"path": "a.py", "content": "ok", "unexpected": True},
+            {"path": "a.py", "content": "ok"},
+        ),
+        ("file.write", {"path": "a.py", "content": 1}, {"path": "a.py", "content": "ok"}),
+        ("file.edit", {"path": "a.py", "old": "a"}, {"path": "a.py", "old": "a", "new": "b"}),
+        (
+            "file.edit",
+            {"path": "a.py", "old": "a", "new": "b", "unexpected": True},
+            {"path": "a.py", "old": "a", "new": "b"},
+        ),
+        (
+            "file.edit",
+            {"path": "a.py", "old": 1, "new": "b"},
+            {"path": "a.py", "old": "a", "new": "b"},
+        ),
+    ],
+)
+def test_invalid_file_call_does_not_consume_grant(
+    tmp_path: Path,
+    tool_name: str,
+    invalid_args: dict[str, object],
+    valid_args: dict[str, object],
+) -> None:
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(
+        json.dumps({"grants": [{"tool_name": tool_name, "path": "a.py"}]}),
+        encoding="utf-8",
+    )
+    manifest = ApprovalManifest.from_json(approvals, tmp_path)
+    invalid_call = ToolCall(tool_name=tool_name, args=invalid_args)
+    invalid_decision = PolicyEngine().decide(invalid_call, PolicyContext(tmp_path, [], False))
+    valid_call = ToolCall(tool_name=tool_name, args=valid_args)
+    valid_decision = PolicyEngine().decide(valid_call, PolicyContext(tmp_path, [], False))
+
+    assert not manifest(invalid_call, invalid_decision)
+    assert manifest(valid_call, valid_decision)
+    assert not manifest(valid_call, valid_decision)
+
+
+@pytest.mark.parametrize(
+    "grant",
+    [
+        {"tool_name": "file.write", "path": ""},
+        {"tool_name": "file.edit", "path": "bad\x00path"},
+        {"tool_name": "process.run", "argv": [], "cwd": "."},
+        {"tool_name": "process.run", "argv": ["python", "a.py"], "cwd": "."},
+        {"tool_name": "process.run", "argv": [sys.executable, ""], "cwd": "."},
+        {"tool_name": "process.run", "argv": [sys.executable, "bad\x00argument"], "cwd": "."},
+        {"tool_name": "process.run", "argv": [sys.executable, "a.py"], "cwd": ""},
+        {"tool_name": "process.run", "argv": [sys.executable, "a.py"], "cwd": "bad\x00cwd"},
+    ],
+)
+def test_approval_manifest_rejects_invalid_grant_target(tmp_path: Path, grant: dict[str, object]) -> None:
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": [grant]}), encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        ApprovalManifest.from_json(approvals, tmp_path)
 
 
 @pytest.mark.parametrize(
