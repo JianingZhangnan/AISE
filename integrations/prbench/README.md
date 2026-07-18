@@ -50,7 +50,9 @@ adapter 在白色 agent 启动前把 contract、审批清单、公开 instructio
 `PHYCODE_BASE_URL` 与 `PHYCODE_MODEL`，白色运行结束后由官方流程继续评分。
 这些值不写入共享容器的持久环境，也不进入 `docker exec` argv；green 与 white
 子进程启动时均先从继承环境移除三项变量，只有 white 的 Docker CLI 子进程
-通过 name-only `-e` 临时取得值。启动后 host/provider 字典立即清空。
+通过 name-only `-e` 临时取得值。white 的 HOME 单独固定为非敏感的
+`HOME=/home/agent`，三个 `PHYCODE_*` flag 始终不含 `=` 或值。启动后
+host/provider 字典立即清空。
 `multiprocessing.Process.start()` 或 `subprocess.Popen()` 抛错时也走同一个
 `finally` 清理路径，异常不会让 provider dict、child environment 或父进程
 `PHYCODE_*` 残留。

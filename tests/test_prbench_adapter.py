@@ -2053,6 +2053,74 @@ def test_public_smoke_stops_after_first_evaluator_failure_with_fake_uv(
     assert all("bbbtest_alphabet" not in call for call in calls)
 
 
+def test_official_agent_env_builds_exact_phycode_name_only_flags_without_regression(
+    patched_official_evaluator: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "CC_API_KEY",
+        "CC_BASE_URL",
+        "CC_MODEL",
+        "CC_SMALL_FAST_MODEL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CC_API_KEY", "ordinary-claude-value")
+    monkeypatch.setenv("PHYCODE_API_KEY", "synthetic-phycode-key")
+    monkeypatch.setenv("PHYCODE_BASE_URL", "https://synthetic.invalid/v1")
+    monkeypatch.setenv("PHYCODE_MODEL", "synthetic-model")
+    agent_env = _load_agent_env(
+        patched_official_evaluator / "src/my_util/agent_env.py"
+    )
+
+    phycode_flags = agent_env.build_docker_exec_env_flags("phycode")
+    non_phycode_flags = agent_env.build_docker_exec_env_flags("claude")
+
+    assert phycode_flags == [
+        "-e",
+        "HOME=/home/agent",
+        "-e",
+        "PHYCODE_API_KEY",
+        "-e",
+        "PHYCODE_BASE_URL",
+        "-e",
+        "PHYCODE_MODEL",
+    ]
+    assert all("=" not in value for value in phycode_flags[3::2])
+    assert "synthetic-phycode-key" not in str(phycode_flags)
+    assert non_phycode_flags == [
+        "-e",
+        "HOME=/home/agent",
+        "-e",
+        "ANTHROPIC_API_KEY=ordinary-claude-value",
+    ]
+
+
+def test_official_resolve_env_keeps_docstring_first_and_resolves_phycode(
+    patched_official_evaluator: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PHYCODE_API_KEY", "synthetic-phycode-key")
+    monkeypatch.setenv("PHYCODE_BASE_URL", "https://synthetic.invalid/v1")
+    monkeypatch.setenv("PHYCODE_MODEL", "synthetic-model")
+    agent_env = _load_agent_env(
+        patched_official_evaluator / "src/my_util/agent_env.py"
+    )
+
+    assert agent_env.resolve_env.__doc__ == (
+        "Resolve environment variables for the given agent type."
+    )
+    assert agent_env.resolve_env("phycode") == {
+        "PHYCODE_API_KEY": "synthetic-phycode-key",
+        "PHYCODE_BASE_URL": "https://synthetic.invalid/v1",
+        "PHYCODE_MODEL": "synthetic-model",
+    }
+
+
 @pytest.mark.parametrize("outcome", ["success", "nonzero", "oserror", "timeout"])
 def test_official_green_grading_uses_child_only_environment_and_always_clears_it(
     patched_official_evaluator: Path,

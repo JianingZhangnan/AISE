@@ -549,10 +549,11 @@ index d0ae5f5..df5064b 100644
 +    process_env.clear()
 +
 +
-@@ -138,0 +227,2 @@ def resolve_env(agent_type: str) -> dict[str, str]:
+@@ -139,0 +228,2 @@ def resolve_env(agent_type: str) -> dict[str, str]:
 +    if agent_type == "phycode":
 +        return resolve_phycode_env()
-@@ -149,0 +240,6 @@ def build_docker_exec_env_flags(agent_type: str) -> list[str]:
+@@ -149,0 +240,7 @@ def build_docker_exec_env_flags(agent_type: str) -> list[str]:
++    flags = ["-e", "HOME=/home/agent"]
 +    if agent_type == "phycode":
 +        # Values are supplied only in the docker CLI child environment. They
 +        # never enter the host subprocess argv or the persistent container env.
