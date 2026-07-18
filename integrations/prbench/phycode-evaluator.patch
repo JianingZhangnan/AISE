@@ -15,25 +15,26 @@ index 922d52e..2968a26 100644
 +        phycode_contract=phycode_contract,
 +        phycode_approvals=phycode_approvals,
 diff --git a/src/launcher.py b/src/launcher.py
-index c705de8..f9a6ce0 100644
+index c705de8..b7417d5 100644
 --- a/src/launcher.py
 +++ b/src/launcher.py
-@@ -40,0 +41,14 @@ RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
-+_PHYCODE_PROVIDER_NAMES = (
-+    "PHYCODE_API_KEY",
-+    "PHYCODE_BASE_URL",
-+    "PHYCODE_MODEL",
+@@ -33 +33,6 @@ from src.my_util.docker_manager import DockerEnvironment
+-from src.my_util.agent_env import resolve_env, build_docker_exec_env_flags
++from src.my_util.agent_env import (
++    PHYCODE_PROVIDER_NAMES,
++    build_docker_exec_env_flags,
++    resolve_env,
++    run_with_phycode_cleanup,
 +)
-+
-+
+@@ -40,0 +46,7 @@ RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
 +def _start_without_phycode_environment(proc: multiprocessing.Process) -> None:
 +    """Start an evaluator child without leaking white-provider credentials."""
-+    saved = {name: os.environ.pop(name) for name in _PHYCODE_PROVIDER_NAMES if name in os.environ}
++    saved = {name: os.environ.pop(name) for name in PHYCODE_PROVIDER_NAMES if name in os.environ}
 +    try:
 +        proc.start()
 +    finally:
 +        os.environ.update(saved)
-@@ -230,0 +245,76 @@ def _copy_input_files(task_config: dict, task_dir: str, workspace_dir: str) -> N
+@@ -230,0 +243,76 @@ def _copy_input_files(task_config: dict, task_dir: str, workspace_dir: str) -> N
 +def _copy_phycode_controls(
 +    task_config: dict,
 +    task_dir: str,
@@ -110,21 +111,21 @@ index c705de8..f9a6ce0 100644
 +            handle.write("\n")
 +
 +
-@@ -234,0 +325,3 @@ def _export_traces_for_type(
+@@ -234,0 +323,3 @@ def _export_traces_for_type(
 +    if agent_type == "phycode":
 +        # Already persisted inside workspace/.phycode/prbench.
 +        return
-@@ -264 +357,2 @@ def setup_docker_environment(
+@@ -264 +355,2 @@ def setup_docker_environment(
 -        env_vars.update(resolve_env(t))
 +        if t != "phycode":
 +            env_vars.update(resolve_env(t))
-@@ -273,0 +368,5 @@ def setup_docker_environment(
+@@ -273,0 +366,5 @@ def setup_docker_environment(
 +        phycode_wheel=(
 +            os.path.join(PROJECT_ROOT, ".phycode-adapter", "phycode.whl")
 +            if "phycode" in needed_types
 +            else None
 +        ),
-@@ -285 +384,8 @@ def setup_docker_environment(
+@@ -285 +382,8 @@ def setup_docker_environment(
 -        if agent_type == "codex":
 +        if agent_type == "phycode":
 +            logger.info("Docker: Installing PhyCode wheel...")
@@ -134,10 +135,10 @@ index c705de8..f9a6ce0 100644
 +                raise RuntimeError("PhyCode CLI verification failed in Docker")
 +            logger.info("Docker: PhyCode ready.")
 +        elif agent_type == "codex":
-@@ -322,0 +429,2 @@ async def launch_evaluation(
+@@ -322,0 +427,2 @@ async def launch_evaluation(
 +    phycode_contract: str | None = None,
 +    phycode_approvals: str | None = None,
-@@ -337,0 +446,7 @@ async def launch_evaluation(
+@@ -337,0 +444,7 @@ async def launch_evaluation(
 +    if effective_green_type == "phycode":
 +        raise ValueError("PhyCode is supported only as the white task-solving agent")
 +    if effective_white_type == "phycode" and code_only:
@@ -145,7 +146,7 @@ index c705de8..f9a6ce0 100644
 +    phycode_provider_env = (
 +        resolve_env("phycode") if effective_white_type == "phycode" else {}
 +    )
-@@ -393,0 +509,10 @@ async def launch_evaluation(
+@@ -393,0 +507,10 @@ async def launch_evaluation(
 +    if effective_white_type == "phycode":
 +        _copy_phycode_controls(
 +            task_config,
@@ -156,43 +157,72 @@ index c705de8..f9a6ce0 100644
 +            code_only,
 +        )
 +
-@@ -423 +548 @@ async def launch_evaluation(
+@@ -423 +546 @@ async def launch_evaluation(
 -        p_green.start()
 +        _start_without_phycode_environment(p_green)
-@@ -436 +561,2 @@ async def launch_evaluation(
+@@ -436 +559,2 @@ async def launch_evaluation(
 -                  workspace_dir, container_id, effective_white_type),
 +                  workspace_dir, container_id, effective_white_type,
 +                  phycode_provider_env),
-@@ -439 +565,5 @@ async def launch_evaluation(
+@@ -439 +563,7 @@ async def launch_evaluation(
 -        p_white.start()
-+        _start_without_phycode_environment(p_white)
 +        if effective_white_type == "phycode":
-+            phycode_provider_env.clear()
-+            for name in _PHYCODE_PROVIDER_NAMES:
-+                os.environ.pop(name, None)
++            run_with_phycode_cleanup(
++                lambda: _start_without_phycode_environment(p_white),
++                phycode_provider_env,
++            )
++        else:
++            _start_without_phycode_environment(p_white)
 diff --git a/src/my_util/agent_env.py b/src/my_util/agent_env.py
-index d0ae5f5..8cb10a4 100644
+index d0ae5f5..be5ce69 100644
 --- a/src/my_util/agent_env.py
 +++ b/src/my_util/agent_env.py
-@@ -134,0 +135,10 @@ def resolve_opencode_env() -> dict[str, str]:
+@@ -14,0 +15,7 @@ import os
++PHYCODE_PROVIDER_NAMES = (
++    "PHYCODE_API_KEY",
++    "PHYCODE_BASE_URL",
++    "PHYCODE_MODEL",
++)
++
++
+@@ -134,0 +142,29 @@ def resolve_opencode_env() -> dict[str, str]:
 +def resolve_phycode_env() -> dict[str, str]:
 +    """Resolve only the provider variables consumed by the PhyCode runner."""
 +    env: dict[str, str] = {}
-+    for name in ("PHYCODE_API_KEY", "PHYCODE_BASE_URL", "PHYCODE_MODEL"):
++    for name in PHYCODE_PROVIDER_NAMES:
 +        value = os.environ.get(name, "").strip()
 +        if value:
 +            env[name] = value
 +    return env
 +
 +
-@@ -138,0 +149,2 @@ def resolve_env(agent_type: str) -> dict[str, str]:
++def clear_phycode_environment(
++    provider_env: dict[str, str], process_env: dict[str, str] | None = None,
++) -> None:
++    """Remove white-provider values from every transient host mapping."""
++    provider_env.clear()
++    for name in PHYCODE_PROVIDER_NAMES:
++        os.environ.pop(name, None)
++        if process_env is not None:
++            process_env.pop(name, None)
++
++
++def run_with_phycode_cleanup(action, provider_env, process_env=None):
++    """Run one spawn action and clear credentials on success or failure."""
++    try:
++        return action()
++    finally:
++        clear_phycode_environment(provider_env, process_env)
++
++
+@@ -138,0 +175,2 @@ def resolve_env(agent_type: str) -> dict[str, str]:
 +    if agent_type == "phycode":
 +        return resolve_phycode_env()
-@@ -149,0 +162,6 @@ def build_docker_exec_env_flags(agent_type: str) -> list[str]:
+@@ -149,0 +188,6 @@ def build_docker_exec_env_flags(agent_type: str) -> list[str]:
 +    if agent_type == "phycode":
 +        # Values are supplied only in the docker CLI child environment. They
 +        # never enter the host subprocess argv or the persistent container env.
-+        for key in ("PHYCODE_API_KEY", "PHYCODE_BASE_URL", "PHYCODE_MODEL"):
++        for key in PHYCODE_PROVIDER_NAMES:
 +            flags.extend(["-e", key])
 +        return flags
 diff --git a/src/my_util/docker_manager.py b/src/my_util/docker_manager.py
@@ -258,7 +288,7 @@ index 9c1f2b4..2bd3ef3 100644
 +        return self.exec_command("phycode prbench run --help")["exit_code"] == 0
 +
 diff --git a/src/white_agent/agent.py b/src/white_agent/agent.py
-index a1b41ff..f610ac0 100644
+index a1b41ff..3023679 100644
 --- a/src/white_agent/agent.py
 +++ b/src/white_agent/agent.py
 @@ -38,0 +39,5 @@ def _export_traces(container_id: str, dest_dir: str, agent_type: str = "claude")
@@ -273,7 +303,14 @@ index a1b41ff..f610ac0 100644
 +                 provider_env: dict[str, str] | None = None):
 @@ -225,0 +232 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
 +        self._provider_env = dict(provider_env or {})
-@@ -301 +308,20 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
+@@ -297 +304,5 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
+-        from src.my_util.agent_env import build_docker_exec_env_flags, resolve_env
++        from src.my_util.agent_env import (
++            build_docker_exec_env_flags,
++            resolve_env,
++            run_with_phycode_cleanup,
++        )
+@@ -301 +312,20 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
 -        if self.agent_type == "codex":
 +        if self.agent_type == "phycode":
 +            command = (
@@ -295,38 +332,56 @@ index a1b41ff..f610ac0 100644
 +            ]
 +            logger.info(f"White agent [{session_id}]: docker exec {self.docker_container_id[:12]} phycode prbench run ...")
 +        elif self.agent_type == "codex":
-@@ -345,0 +372,5 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
+@@ -346,8 +376,15 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
+-        process = subprocess.Popen(
+-            cmd,
+-            stdin=subprocess.DEVNULL,   # codex exec requires stdin=/dev/null in headless mode
+-            stdout=subprocess.PIPE,
+-            stderr=subprocess.PIPE,
+-            text=True,
+-            bufsize=1,
+-        )
 +        process_env = None
 +        if self.agent_type == "phycode":
 +            process_env = os.environ.copy()
 +            process_env.update(self._provider_env)
 +
-@@ -352,0 +384 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
-+            env=process_env,
-@@ -353,0 +386,5 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
-+        if self.agent_type == "phycode":
-+            self._provider_env.clear()
-+            assert process_env is not None
-+            for name in ("PHYCODE_API_KEY", "PHYCODE_BASE_URL", "PHYCODE_MODEL"):
-+                process_env.pop(name, None)
-@@ -355 +392 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
++        def _launch_process():
++            return subprocess.Popen(
++                cmd,
++                stdin=subprocess.DEVNULL,   # codex exec requires stdin=/dev/null in headless mode
++                stdout=subprocess.PIPE,
++                stderr=subprocess.PIPE,
++                text=True,
++                bufsize=1,
++                env=process_env,
++            )
+@@ -355 +392,9 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
 -        _agent_labels = {"codex": "OpenAI Codex", "opencode": "OpenCode", "claude": "Claude Code"}
++        if self.agent_type == "phycode":
++            assert process_env is not None
++            process = run_with_phycode_cleanup(
++                _launch_process, self._provider_env, process_env
++            )
++        else:
++            process = _launch_process()
++
 +        _agent_labels = {"phycode": "PhyCode", "codex": "OpenAI Codex", "opencode": "OpenCode", "claude": "Claude Code"}
-@@ -396,0 +434 @@ def start_white_agent(
+@@ -396,0 +442 @@ def start_white_agent(
 +    provider_env: dict[str, str] | None = None,
-@@ -400 +438 @@ def start_white_agent(
+@@ -400 +446 @@ def start_white_agent(
 -    agent_type: "claude" (default) uses Claude Code CLI; "codex" uses OpenAI Codex CLI.
 +    agent_type: "claude" (default), "codex", "opencode", or "phycode".
-@@ -401,0 +440,7 @@ def start_white_agent(
+@@ -401,0 +448,7 @@ def start_white_agent(
 +    if agent_type == "phycode" and provider_env is None:
-+        from src.my_util.agent_env import resolve_env
++        from src.my_util.agent_env import PHYCODE_PROVIDER_NAMES, resolve_env
 +        provider_env = resolve_env("phycode")
 +    if agent_type == "phycode":
-+        for name in ("PHYCODE_API_KEY", "PHYCODE_BASE_URL", "PHYCODE_MODEL"):
++        for name in PHYCODE_PROVIDER_NAMES:
 +            os.environ.pop(name, None)
 +
-@@ -410 +455 @@ def start_white_agent(
+@@ -410 +463 @@ def start_white_agent(
 -    _agent_labels = {"codex": "OpenAI Codex", "opencode": "OpenCode", "claude": "Claude Code"}
 +    _agent_labels = {"phycode": "PhyCode", "codex": "OpenAI Codex", "opencode": "OpenCode", "claude": "Claude Code"}
-@@ -423,0 +469 @@ def start_white_agent(
+@@ -423,0 +477 @@ def start_white_agent(
 +            provider_env=provider_env,

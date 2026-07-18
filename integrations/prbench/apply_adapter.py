@@ -58,10 +58,11 @@ def _resolve_wheel(wheel: Path) -> Path:
 def _checked_adapter_destination(repository: Path) -> Path:
     adapter_dir = repository / ".phycode-adapter"
     destination = adapter_dir / "phycode.whl"
+    if destination.exists() or destination.is_symlink():
+        raise AdapterError("adapter wheel destination already exists")
     try:
-        for candidate in (adapter_dir, destination):
-            if candidate.exists() or candidate.is_symlink():
-                candidate.resolve(strict=False).relative_to(repository)
+        if adapter_dir.exists() or adapter_dir.is_symlink():
+            adapter_dir.resolve(strict=False).relative_to(repository)
     except (OSError, RuntimeError, ValueError):
         raise AdapterError("adapter destination escapes the evaluator repository") from None
     return destination

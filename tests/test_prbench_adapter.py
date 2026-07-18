@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -48,6 +49,57 @@ def _commit_file(repository: Path, path: str, content: str) -> str:
         text=True,
     )
     return result.stdout.strip()
+
+
+def _configured_adapter_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    repository = tmp_path / "evaluator"
+    repository.mkdir()
+    head = _commit_file(repository, "README.md", "base\n")
+    patch_path = tmp_path / "adapter.patch"
+    patch_path.write_text(
+        "diff --git a/README.md b/README.md\n"
+        "index df967b9..67be85f 100644\n"
+        "--- a/README.md\n"
+        "+++ b/README.md\n"
+        "@@ -1 +1,2 @@\n"
+        " base\n"
+        "+adapted\n",
+        encoding="utf-8",
+    )
+    wheel = tmp_path / "phycode-0.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"new-wheel")
+    monkeypatch.setattr(adapter_module, "EXPECTED_EVALUATOR_COMMIT", head)
+    monkeypatch.setattr(adapter_module, "PATCH_PATH", patch_path)
+    return repository, wheel
+
+
+def _patch_section(path: str) -> str:
+    patch = Path("integrations/prbench/phycode-evaluator.patch").read_text(
+        encoding="utf-8"
+    )
+    marker = f"diff --git a/{path} b/{path}"
+    start = patch.index(marker)
+    end = patch.find("\ndiff --git ", start + len(marker))
+    return patch[start:] if end < 0 else patch[start:end]
+
+
+def _added_hunks(path: str) -> tuple[str, ...]:
+    section = _patch_section(path)
+    hunks: list[str] = []
+    current: list[str] | None = None
+    for line in section.splitlines():
+        if line.startswith("@@"):
+            if current:
+                hunks.append("\n".join(current) + "\n")
+            current = []
+            continue
+        if current is not None and line.startswith("+") and not line.startswith("+++"):
+            current.append(line[1:])
+    if current:
+        hunks.append("\n".join(current) + "\n")
+    return tuple(hunks)
 
 
 def test_adapter_rejects_wrong_evaluator_commit(tmp_path: Path) -> None:
@@ -110,6 +162,113 @@ def test_adapter_rejects_tracked_changes_at_expected_commit(
 
     assert (tmp_path / "README.md").read_text(encoding="utf-8") == "locally changed\n"
     assert not (tmp_path / ".phycode-adapter").exists()
+
+
+def test_adapter_refuses_existing_wheel_without_touching_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, wheel = _configured_adapter_fixture(tmp_path, monkeypatch)
+    destination = repository / ".phycode-adapter/phycode.whl"
+    destination.parent.mkdir()
+    destination.write_bytes(b"preserve-existing-wheel")
+
+    with pytest.raises(AdapterError, match="already exists"):
+        apply_adapter(repository, wheel)
+
+    assert destination.read_bytes() == b"preserve-existing-wheel"
+    assert (repository / "README.md").read_text(encoding="utf-8") == "base\n"
+
+
+def test_adapter_refuses_existing_wheel_symlink_without_touching_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, wheel = _configured_adapter_fixture(tmp_path, monkeypatch)
+    destination = repository / ".phycode-adapter/phycode.whl"
+    destination.parent.mkdir()
+    target = repository / "preserved-wheel.whl"
+    target.write_bytes(b"preserve-symlink-target")
+    try:
+        destination.symlink_to(target)
+    except OSError as error:
+        pytest.skip(f"file symlink unavailable: {error}")
+
+    with pytest.raises(AdapterError, match="already exists"):
+        apply_adapter(repository, wheel)
+
+    assert destination.is_symlink()
+    assert target.read_bytes() == b"preserve-symlink-target"
+    assert (repository / "README.md").read_text(encoding="utf-8") == "base\n"
+
+
+def test_adapter_refuses_dangling_wheel_symlink_without_replacing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, wheel = _configured_adapter_fixture(tmp_path, monkeypatch)
+    destination = repository / ".phycode-adapter/phycode.whl"
+    destination.parent.mkdir()
+    try:
+        destination.symlink_to(repository / "missing-wheel.whl")
+    except OSError as error:
+        pytest.skip(f"file symlink unavailable: {error}")
+
+    with pytest.raises(AdapterError, match="already exists"):
+        apply_adapter(repository, wheel)
+
+    assert destination.is_symlink()
+    assert not destination.exists()
+    assert (repository / "README.md").read_text(encoding="utf-8") == "base\n"
+
+
+def test_adapter_refuses_dangling_wheel_symlink_via_path_semantics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, wheel = _configured_adapter_fixture(tmp_path, monkeypatch)
+    destination = repository / ".phycode-adapter/phycode.whl"
+    original_is_symlink = Path.is_symlink
+
+    def report_dangling_destination(path: Path) -> bool:
+        if path == destination:
+            return True
+        return original_is_symlink(path)
+
+    monkeypatch.setattr(Path, "is_symlink", report_dangling_destination)
+
+    with pytest.raises(AdapterError, match="already exists"):
+        apply_adapter(repository, wheel)
+
+    assert not destination.exists()
+    assert (repository / "README.md").read_text(encoding="utf-8") == "base\n"
+
+
+def test_adapter_refuses_existing_wheel_symlink_via_path_semantics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, wheel = _configured_adapter_fixture(tmp_path, monkeypatch)
+    destination = repository / ".phycode-adapter/phycode.whl"
+    target = repository / "preserved-wheel.whl"
+    target.write_bytes(b"preserve-symlink-target")
+    original_exists = Path.exists
+    original_is_symlink = Path.is_symlink
+
+    def report_link_exists(path: Path) -> bool:
+        if path == destination:
+            return True
+        return original_exists(path)
+
+    def report_link(path: Path) -> bool:
+        if path == destination:
+            return True
+        return original_is_symlink(path)
+
+    monkeypatch.setattr(Path, "exists", report_link_exists)
+    monkeypatch.setattr(Path, "is_symlink", report_link)
+
+    with pytest.raises(AdapterError, match="already exists"):
+        apply_adapter(repository, wheel)
+
+    assert target.read_bytes() == b"preserve-symlink-target"
+    assert not destination.is_file()
+    assert (repository / "README.md").read_text(encoding="utf-8") == "base\n"
 
 
 def test_adapter_checks_applies_and_copies_wheel(
@@ -316,9 +475,65 @@ def test_patch_does_not_persist_white_credentials_for_green() -> None:
     assert 'if t != "phycode":' in added
     assert "_start_without_phycode_environment" in added
     assert "process_env.update(self._provider_env)" in added
-    assert "phycode_provider_env.clear()" in added
+    assert "run_with_phycode_cleanup" in added
+    assert "clear_phycode_environment" in added
     assert 'os.environ.pop(name, None)' in added
     assert 'env_vars.update(resolve_env("phycode"))' not in added
+
+
+def test_patch_cleanup_wrapper_clears_credentials_when_spawn_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    helper_hunk = next(
+        (
+            hunk
+            for hunk in _added_hunks("src/my_util/agent_env.py")
+            if "def run_with_phycode_cleanup" in hunk
+        ),
+        None,
+    )
+    assert helper_hunk is not None
+    provider_names = ("PHYCODE_API_KEY", "PHYCODE_BASE_URL", "PHYCODE_MODEL")
+    namespace: dict[str, object] = {
+        "os": os,
+        "PHYCODE_PROVIDER_NAMES": provider_names,
+    }
+    exec(compile(helper_hunk, "<phycode-agent-env-patch>", "exec"), namespace)
+    run_with_cleanup = namespace["run_with_phycode_cleanup"]
+
+    secret = "sensitive-provider-value"
+    provider_env = {
+        "PHYCODE_API_KEY": secret,
+        "PHYCODE_BASE_URL": "https://sensitive.invalid/v1",
+        "PHYCODE_MODEL": "sensitive-model",
+    }
+    process_env = {**provider_env, "SAFE": "kept"}
+    for name, value in provider_env.items():
+        monkeypatch.setenv(name, value)
+
+    def fail_spawn() -> None:
+        raise RuntimeError(secret)
+
+    with pytest.raises(RuntimeError, match=secret):
+        run_with_cleanup(fail_spawn, provider_env, process_env)  # type: ignore[operator]
+
+    assert provider_env == {}
+    assert process_env == {"SAFE": "kept"}
+    assert all(name not in os.environ for name in provider_names)
+    captured = capsys.readouterr()
+    assert secret not in captured.out
+    assert secret not in captured.err
+
+
+def test_patch_routes_launcher_and_white_spawns_through_cleanup_wrapper() -> None:
+    launcher = _patch_section("src/launcher.py")
+    white = _patch_section("src/white_agent/agent.py")
+
+    assert "run_with_phycode_cleanup" in launcher
+    assert "run_with_phycode_cleanup" in white
+    assert "lambda: _start_without_phycode_environment(p_white)" in launcher
+    assert "_launch_process" in white
 
 
 def test_patch_verifies_contract_names_match_copied_public_files() -> None:

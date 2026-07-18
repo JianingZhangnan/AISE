@@ -14,6 +14,8 @@ uv run python integrations/prbench/apply_adapter.py <evaluator-root> <wheel-path
 
 当前 adapter 与项目版本共同固定 wheel 文件名为
 `phycode-0.1.0-py3-none-any.whl`；其他名称会在修改 evaluator 前被拒绝。
+若 `.phycode-adapter/phycode.whl` 已经是普通文件、symlink 或 dangling
+symlink，应用器同样 fail closed，不覆盖或解析旧目标。
 官方 `python:3.11-slim` task image 不含 uv，因此 patch 从 Astral 官方
 `uv:0.11.28` 的 linux/amd64 manifest
 `sha256:5c3ab83183a73c5d319a77009eb425b60d5bb937f339fb7876788ebf567baf48`
@@ -37,6 +39,9 @@ adapter 在白色 agent 启动前把 contract、审批清单、公开 instructio
 子进程启动时均先从继承环境移除三项变量，只有 white 的 Docker CLI 子进程
 通过 name-only `-e` 临时取得值。启动后 host/provider 字典立即清空，green
 阶段只能看到官方 grader 自己的环境。
+`multiprocessing.Process.start()` 或 `subprocess.Popen()` 抛错时也走同一个
+`finally` 清理路径，异常不会让 provider dict、child environment 或父进程
+`PHYCODE_*` 残留。
 
 `public_contracts/` 中的两个 JSON 只服务公开最小 smoke；其他任务默认使用
 官方 `task.yaml` 的公开文件字段构造无数值约束 contract，最终数值准确度仍由
