@@ -50,16 +50,27 @@ class SessionStore:
 
 
 class MemoryStore:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path | None) -> None:
         self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._ephemeral_entries: list[MemoryEntry] = []
+        if self.path is not None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def ephemeral(cls) -> MemoryStore:
+        return cls(None)
 
     def append(self, entry: MemoryEntry) -> None:
+        if self.path is None:
+            self._ephemeral_entries.append(entry)
+            return
         payload = redact_obj(entry.model_dump(mode="json"))
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def entries(self) -> list[MemoryEntry]:
+        if self.path is None:
+            return list(self._ephemeral_entries)
         if not self.path.exists():
             return []
         result: list[MemoryEntry] = []
@@ -84,18 +95,25 @@ class ContextBuilder:
         memory_store: MemoryStore,
         max_chars: int = 12000,
         system_prompt: str = CODING_SYSTEM_PROMPT,
+        workspace_label: str | None = None,
     ) -> None:
         self.session_store = session_store
         self.memory_store = memory_store
         self.max_chars = max_chars
         self.system_prompt = system_prompt
+        self.workspace_label = workspace_label
 
     def build(self, current_input: str, tools: list[ToolSpec] | None = None) -> list[dict[str, object]]:
         memory = _clip_text(self.memory_store.summary(), min(1_500, self.max_chars // 8))
         tool_lines = "\n".join(f"- {spec.name} ({spec.risk_level.value}): {spec.description}" for spec in (tools or []))
         tool_lines = _clip_text(tool_lines, min(2_500, self.max_chars // 5))
         user_input = _clip_text(current_input, max(1_000, self.max_chars // 3))
-        workspace = _clip_text(str(self.session_store.session.workspace_root), 500)
+        workspace = _clip_text(
+            self.workspace_label
+            if self.workspace_label is not None
+            else str(self.session_store.session.workspace_root),
+            500,
+        )
         fixed = (
             f"Workspace: {workspace}\n"
             f"Tools:\n{tool_lines}\n"

@@ -81,3 +81,23 @@ def test_prbench_cli_prints_only_safe_summary_and_uses_result_exit_code(
     assert "trace=" not in result.stdout
     assert "base_url" not in result.stdout.casefold()
     assert "api_key" not in result.stdout.casefold()
+
+
+def test_registry_with_explicit_dependencies_does_not_parse_cwd_config(
+    tmp_path, monkeypatch
+):
+    from phycode.cli import build_default_registry
+    from phycode.context import MemoryStore
+    from phycode.visibility import PathVisibilityPolicy
+
+    (tmp_path / "phycode.toml").write_text("invalid = [toml", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    registry = build_default_registry(
+        workspace_root=tmp_path,
+        test_command="trusted-test-command",
+        memory_store=MemoryStore.ephemeral(),
+        visibility=PathVisibilityPolicy(tmp_path),
+    )
+
+    assert registry.spec_for("file.read") is not None

@@ -14,105 +14,12 @@ from phycode.prbench_eval import (
     prbench_result_lines,
     run_prbench,
 )
-
-
-def _write_public_task_files(workspace: Path, *, approvals: bool = True) -> tuple[Path, Path]:
-    (workspace / "instruction.md").write_text(
-        "Create reproduce.py, run it, and produce result.csv with message=hello.\n",
-        encoding="utf-8",
-    )
-    (workspace / "paper.md").write_text(
-        "Public paper: the expected greeting is hello.\n",
-        encoding="utf-8",
-    )
-    contract_path = workspace / "contract.json"
-    contract_path.write_text(
-        json.dumps(
-            {
-                "instruction_file": "instruction.md",
-                "paper_file": "paper.md",
-                "expected_files": ["reproduce.py", "result.csv"],
-                "constraints": [
-                    {
-                        "path": "result.csv",
-                        "csv_header": ["message"],
-                        "csv_rows": [["hello"]],
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    approvals_path = workspace / "approvals.json"
-    grants: list[dict[str, object]] = []
-    if approvals:
-        grants = [
-            {"tool_name": "file.write", "path": "reproduce.py"},
-            {
-                "tool_name": "process.run",
-                "argv": [sys.executable, "reproduce.py"],
-                "cwd": ".",
-            },
-        ]
-    approvals_path.write_text(json.dumps({"grants": grants}), encoding="utf-8")
-    return contract_path, approvals_path
-
-
-def _scripted_llm_that_writes_runs_reads_and_finishes() -> ScriptedLLM:
-    script = (
-        "from pathlib import Path\n"
-        "Path('result.csv').write_text('message\\nhello\\n', encoding='utf-8')\n"
-    )
-    return ScriptedLLM(
-        [
-            [
-                {
-                    "type": "tool_call_requested",
-                    "payload": {
-                        "tool_name": "file.write",
-                        "args": {"path": "reproduce.py", "content": script},
-                    },
-                }
-            ],
-            [
-                {
-                    "type": "tool_call_requested",
-                    "payload": {
-                        "tool_name": "process.run",
-                        "args": {"argv": [sys.executable, "reproduce.py"], "cwd": "."},
-                    },
-                }
-            ],
-            [
-                {
-                    "type": "tool_call_requested",
-                    "payload": {"tool_name": "file.read", "args": {"path": "result.csv"}},
-                }
-            ],
-            [{"type": "assistant_final", "payload": {"text": "done"}}],
-        ]
-    )
-
-
-class _RecordingFinalLLM:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def generate(self, messages, tools):
-        del messages, tools
-        self.calls += 1
-        return ScriptedLLM(
-            [[{"type": "assistant_final", "payload": {"text": "done"}}]]
-        ).generate([], [])
-
-
-class _RaisingLLM:
-    def generate(self, messages, tools):
-        del messages, tools
-        raise RuntimeError(
-            "sk-provider-crash-123456789 https://private.example/v1 "
-            "argv=[secret-approval-argument]"
-        )
+from prbench_test_support import (
+    RaisingLLM as _RaisingLLM,
+    RecordingFinalLLM as _RecordingFinalLLM,
+    scripted_llm_that_writes_runs_reads_and_finishes as _scripted_llm_that_writes_runs_reads_and_finishes,
+    write_public_task_files as _write_public_task_files,
+)
 
 
 def test_prbench_run_status_has_exact_public_values() -> None:
@@ -258,22 +165,18 @@ def test_runner_rejects_result_directory_symlink_escape_before_llm(tmp_path: Pat
 
 def test_unexpected_write_requires_approval_and_does_not_execute(tmp_path: Path) -> None:
     contract, approvals = _write_public_task_files(tmp_path, approvals=False)
-    llm = ScriptedLLM(
-        [
-            [
-                {
-                    "type": "tool_call_requested",
-                    "payload": {
-                        "tool_name": "file.write",
-                        "args": {"path": "unexpected.py", "content": "print('unexpected')\n"},
-                    },
-                }
-            ],
-            [{"type": "assistant_final", "payload": {"text": "done"}}],
-        ]
-    )
+    unexpected_write = [
+        {
+            "type": "tool_call_requested",
+            "payload": {
+                "tool_name": "file.write",
+                "args": {"path": "unexpected.py", "content": "print('unexpected')\n"},
+            },
+        }
+    ]
+    llm = ScriptedLLM([unexpected_write, unexpected_write, unexpected_write])
 
-    result = run_prbench(tmp_path, contract, approvals, llm=llm, max_tool_calls=4)
+    result = run_prbench(tmp_path, contract, approvals, llm=llm, max_tool_calls=8)
 
     assert result.status == PRBenchRunStatus.APPROVAL_REQUIRED
     assert not (tmp_path / "unexpected.py").exists()
@@ -281,22 +184,18 @@ def test_unexpected_write_requires_approval_and_does_not_execute(tmp_path: Path)
 
 def test_policy_denial_maps_to_policy_blocked(tmp_path: Path) -> None:
     contract, approvals = _write_public_task_files(tmp_path, approvals=False)
-    llm = ScriptedLLM(
-        [
-            [
-                {
-                    "type": "tool_call_requested",
-                    "payload": {
-                        "tool_name": "file.read",
-                        "args": {"path": "_ground_truth/sentinel.txt"},
-                    },
-                }
-            ],
-            [{"type": "assistant_final", "payload": {"text": "done"}}],
-        ]
-    )
+    blocked_read = [
+        {
+            "type": "tool_call_requested",
+            "payload": {
+                "tool_name": "file.read",
+                "args": {"path": "_ground_truth/sentinel.txt"},
+            },
+        }
+    ]
+    llm = ScriptedLLM([blocked_read, blocked_read, blocked_read])
 
-    result = run_prbench(tmp_path, contract, approvals, llm=llm, max_tool_calls=4)
+    result = run_prbench(tmp_path, contract, approvals, llm=llm, max_tool_calls=8)
 
     assert result.status == PRBenchRunStatus.POLICY_BLOCKED
 
@@ -314,26 +213,23 @@ def test_failed_process_maps_to_process_failed(tmp_path: Path) -> None:
                         "cwd": ".",
                     }
                 ]
+                * 3
             }
         ),
         encoding="utf-8",
     )
-    llm = ScriptedLLM(
-        [
-            [
-                {
-                    "type": "tool_call_requested",
-                    "payload": {
-                        "tool_name": "process.run",
-                        "args": {"argv": [sys.executable, "reproduce.py"], "cwd": "."},
-                    },
-                }
-            ],
-            [{"type": "assistant_final", "payload": {"text": "done"}}],
-        ]
-    )
+    failed_process = [
+        {
+            "type": "tool_call_requested",
+            "payload": {
+                "tool_name": "process.run",
+                "args": {"argv": [sys.executable, "reproduce.py"], "cwd": "."},
+            },
+        }
+    ]
+    llm = ScriptedLLM([failed_process, failed_process, failed_process])
 
-    result = run_prbench(tmp_path, contract, approvals, llm=llm, max_tool_calls=4)
+    result = run_prbench(tmp_path, contract, approvals, llm=llm, max_tool_calls=8)
 
     assert result.status == PRBenchRunStatus.PROCESS_FAILED
 

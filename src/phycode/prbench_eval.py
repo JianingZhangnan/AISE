@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -11,8 +12,8 @@ import typer
 from pydantic import BaseModel, ConfigDict, Field
 
 from phycode.approval import ApprovalManifest
-from phycode.cli import build_agent
-from phycode.config import load_prbench_provider_config
+from phycode.composition import build_agent, trusted_prbench_runtime_settings
+from phycode.config import load_prbench_provider_config, validate_prbench_model_label
 from phycode.execution import ArtifactSnapshot, ExecutionJournal
 from phycode.llm import LLMClient, OpenAICompatibleChatAdapter
 from phycode.models import AgentEventType, AgentProfile, SessionMode
@@ -189,71 +190,92 @@ def _write_result(workspace: Path, result: PRBenchRunResult) -> None:
     result_dir = _result_directory(workspace)
     result_dir.mkdir(parents=True, exist_ok=True)
     destination = result_dir / "run_result.json"
-    temporary = result_dir / "run_result.json.tmp"
     payload = redact_obj(result.model_dump(mode="json"))
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(destination)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=result_dir,
+            prefix=".run_result-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        temporary.replace(destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _status_from_stop_reason(
     stopped_reason: str,
     events: list,
     max_tool_calls: int,
+    terminal_blocker: str | None = None,
 ) -> PRBenchRunStatus:
+    del events, max_tool_calls
     if stopped_reason == "completed":
         return PRBenchRunStatus.COMPLETED
+    if terminal_blocker is not None:
+        try:
+            return PRBenchRunStatus(terminal_blocker)
+        except ValueError:
+            return PRBenchRunStatus.PROVIDER_ERROR
     if stopped_reason == "repeated_no_progress":
         return PRBenchRunStatus.REPEATED_NO_PROGRESS
-    if stopped_reason in {"error", "incomplete", "user_interrupt"}:
-        return PRBenchRunStatus.PROVIDER_ERROR
-
-    output_statuses: list[str] = []
-    process_failed = False
-    current_tool: str | None = None
-    tool_calls = 0
-    for event in events:
-        if event.type == AgentEventType.TOOL_CALL_REQUESTED:
-            current_tool = str(event.payload.get("tool_name", ""))
-            tool_calls += 1
-        elif event.type == AgentEventType.TOOL_CALL_OUTPUT:
-            status = str(event.payload.get("status", ""))
-            output_statuses.append(status)
-            if current_tool == "process.run" and status in {
-                "command_failed",
-                "timeout",
-                "tool_error",
-                "invalid_tool_args",
-            }:
-                process_failed = True
-            current_tool = None
-
-    if "policy_blocked" in output_statuses:
-        return PRBenchRunStatus.POLICY_BLOCKED
-    if "policy_requires_approval" in output_statuses:
-        return PRBenchRunStatus.APPROVAL_REQUIRED
-    if process_failed:
-        return PRBenchRunStatus.PROCESS_FAILED
-    if stopped_reason in {"tool_budget", "artifact_verification_failed"} and tool_calls >= max_tool_calls:
-        return PRBenchRunStatus.TOOL_BUDGET_EXHAUSTED
-    if stopped_reason in {"artifact_verification_failed", "max_steps", "repeated_failure"}:
+    if stopped_reason == "artifact_verification_failed":
         return PRBenchRunStatus.ARTIFACT_VERIFICATION_FAILED
     return PRBenchRunStatus.PROVIDER_ERROR
 
 
-def _policy_failure(workspace: Path, model_name: str) -> PRBenchRunResult:
+def _safe_model_name(llm: LLMClient | None) -> str:
+    if llm is None:
+        return "unconfigured"
+    fallback = type(llm).__name__ or "injected-provider"
+    try:
+        raw_label = getattr(llm, "model", fallback)
+        return validate_prbench_model_label(str(raw_label))
+    except Exception:
+        try:
+            return validate_prbench_model_label(fallback)
+        except Exception:
+            return "injected-provider"
+
+
+def _persist_if_safe(workspace: Path, result: PRBenchRunResult) -> PRBenchRunResult:
+    try:
+        if not workspace.is_dir():
+            return result
+        _write_result(workspace, result)
+    except Exception:
+        pass
+    return result
+
+
+def _controlled_failure(
+    workspace: Path,
+    model_name: str,
+    status: PRBenchRunStatus,
+) -> PRBenchRunResult:
     result = PRBenchRunResult(
-        status=PRBenchRunStatus.POLICY_BLOCKED,
+        status=status,
         model=model_name,
         tool_calls=0,
     )
-    try:
-        _write_result(workspace, result)
-    except (OSError, RuntimeError, _PRBenchBoundaryError):
-        pass
-    return result
+    return _persist_if_safe(workspace, result)
+
+
+def _policy_failure(workspace: Path, model_name: str) -> PRBenchRunResult:
+    return _controlled_failure(workspace, model_name, PRBenchRunStatus.POLICY_BLOCKED)
+
+
+def _validate_internal_directory(workspace: Path, path: Path) -> Path:
+    resolved = _resolve_workspace_path(workspace, path, require_file=False)
+    if resolved.exists() and not resolved.is_dir():
+        raise _PRBenchBoundaryError("PRBench internal path is not a directory")
+    return resolved
 
 
 def run_prbench(
@@ -264,30 +286,59 @@ def run_prbench(
     llm: LLMClient | None = None,
     max_tool_calls: int | None = None,
 ) -> PRBenchRunResult:
-    root = workspace.expanduser().resolve()
-    model_name = str(getattr(llm, "model", type(llm).__name__ if llm is not None else "unconfigured"))
+    model_name = _safe_model_name(llm)
+    try:
+        root = workspace.expanduser().resolve()
+        if not root.is_dir():
+            return PRBenchRunResult(
+                status=PRBenchRunStatus.POLICY_BLOCKED,
+                model=model_name,
+                tool_calls=0,
+            )
+    except Exception:
+        return PRBenchRunResult(
+            status=PRBenchRunStatus.POLICY_BLOCKED,
+            model=model_name,
+            tool_calls=0,
+        )
     try:
         _ensure_no_ground_truth(root)
         _result_directory(root)
+        trace_dir = _validate_internal_directory(
+            root,
+            root / ".phycode" / "prbench" / "traces",
+        )
         safe_contract_path = _resolve_workspace_path(root, contract_path, require_file=True)
         safe_approvals_path = _resolve_workspace_path(root, approvals_path, require_file=True)
         contract = TaskContract.model_validate_json(safe_contract_path.read_text(encoding="utf-8"))
-        _resolve_workspace_path(root, contract.instruction_file, require_file=True)
-        _resolve_workspace_path(root, contract.paper_file, require_file=True)
-        for input_file in contract.input_files:
+        instruction_path = _resolve_workspace_path(root, contract.instruction_file, require_file=True)
+        paper_path = _resolve_workspace_path(root, contract.paper_file, require_file=True)
+        input_paths = tuple(
             _resolve_workspace_path(root, input_file, require_file=True)
+            for input_file in contract.input_files
+        )
         for expected_file in contract.expected_files:
             _resolve_workspace_path(root, expected_file, require_file=False)
         approvals = ApprovalManifest.from_json(safe_approvals_path, root)
     except Exception:
         return _policy_failure(root, model_name)
-    journal = ExecutionJournal(root, contract.expected_files)
-    verifier = ArtifactVerifier(root, contract, journal)
-    if llm is None:
+
+    try:
+        journal = ExecutionJournal(root, contract.expected_files)
+        verifier = ArtifactVerifier(root, contract, journal)
+    except Exception:
+        return _controlled_failure(
+            root,
+            model_name,
+            PRBenchRunStatus.ARTIFACT_VERIFICATION_FAILED,
+        )
+
+    resolved_llm = llm
+    if resolved_llm is None:
         try:
             provider = load_prbench_provider_config()
             model_name = provider.model
-            llm = OpenAICompatibleChatAdapter(
+            resolved_llm = OpenAICompatibleChatAdapter(
                 api_key=provider.api_key.get_secret_value(),
                 base_url=provider.base_url,
                 model=provider.model,
@@ -297,13 +348,20 @@ def run_prbench(
                 status=PRBenchRunStatus.PROVIDER_ERROR,
                 model=model_name,
                 tool_calls=0,
-                artifacts=tuple(_artifact_summary(item) for item in journal.snapshot_artifacts()),
+                artifacts=(),
             )
-            _write_result(root, result)
-            return result
+            return _persist_if_safe(root, result)
 
-    instruction = (root / contract.instruction_file).read_text(encoding="utf-8")
-    paper = (root / contract.paper_file).read_text(encoding="utf-8")
+    try:
+        instruction_path = _resolve_workspace_path(root, instruction_path, require_file=True)
+        instruction = instruction_path.read_text(encoding="utf-8")
+        paper_path = _resolve_workspace_path(root, paper_path, require_file=True)
+        paper = paper_path.read_text(encoding="utf-8")
+        for input_path in input_paths:
+            _resolve_workspace_path(root, input_path, require_file=True)
+    except Exception:
+        return _policy_failure(root, model_name)
+
     prompt = (
         "PRBench public task instruction:\n"
         f"{instruction}\n\n"
@@ -311,40 +369,49 @@ def run_prbench(
         f"{paper}\n\n"
         f"Public input files: {', '.join(contract.input_files) or '(none)'}"
     )
-    trace_dir = root / ".phycode" / "prbench" / "traces"
-    loop = build_agent(
-        SessionMode.NON_INTERACTIVE,
-        llm=_SanitizedProvider(llm),
-        approval_handler=approvals,
-        profile=AgentProfile.PRBENCH,
-        max_tool_calls=max_tool_calls,
-        workspace_root=root,
-        execution_journal=journal,
-        completion_verifier=verifier.verify,
-        progress_fingerprint=lambda: _progress_fingerprint(journal),
-        trace_dir=trace_dir,
-    )
-    agent_result = loop.run(prompt)
+    try:
+        loop = build_agent(
+            SessionMode.NON_INTERACTIVE,
+            llm=_SanitizedProvider(resolved_llm),
+            approval_handler=approvals,
+            profile=AgentProfile.PRBENCH,
+            max_tool_calls=max_tool_calls,
+            execution_journal=journal,
+            completion_verifier=verifier.verify,
+            progress_fingerprint=lambda: _progress_fingerprint(journal),
+            runtime_settings=trusted_prbench_runtime_settings(root, trace_dir),
+        )
+        agent_result = loop.run(prompt)
+    except Exception:
+        return _controlled_failure(root, model_name, PRBenchRunStatus.PROVIDER_ERROR)
+
     tool_calls = sum(
         event.type == AgentEventType.TOOL_CALL_REQUESTED for event in agent_result.events
     )
     trace_path = trace_dir / f"{loop.session_store.session.id}.jsonl"
-    result = PRBenchRunResult(
-        status=_status_from_stop_reason(
-            agent_result.stopped_reason,
-            agent_result.events,
-            loop.max_tool_calls,
-        ),
-        model=model_name,
-        tool_calls=tool_calls,
-        artifacts=tuple(_artifact_summary(item) for item in journal.snapshot_artifacts()),
-        trace=PRBenchTraceSummary(
-            path=trace_path.relative_to(root).as_posix(),
-            events=len(agent_result.events),
-        ),
-    )
-    _write_result(root, result)
-    return result
+    try:
+        result = PRBenchRunResult(
+            status=_status_from_stop_reason(
+                agent_result.stopped_reason,
+                agent_result.events,
+                loop.max_tool_calls,
+                agent_result.terminal_blocker,
+            ),
+            model=model_name,
+            tool_calls=tool_calls,
+            artifacts=tuple(_artifact_summary(item) for item in journal.snapshot_artifacts()),
+            trace=PRBenchTraceSummary(
+                path=trace_path.relative_to(root).as_posix(),
+                events=len(agent_result.events),
+            ),
+        )
+    except Exception:
+        result = PRBenchRunResult(
+            status=PRBenchRunStatus.ARTIFACT_VERIFICATION_FAILED,
+            model=model_name,
+            tool_calls=tool_calls,
+        )
+    return _persist_if_safe(root, result)
 
 
 def prbench_result_lines(result: PRBenchRunResult) -> tuple[str, ...]:

@@ -7,6 +7,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
+from phycode.redaction import redact_text
+
 
 class WorkspaceConfig(BaseModel):
     root: Path
@@ -49,6 +51,19 @@ class PRBenchProviderConfigError(ValueError):
     pass
 
 
+def validate_prbench_model_label(value: str) -> str:
+    model = value.strip()
+    if (
+        not model
+        or "://" in model
+        or "\r" in model
+        or "\n" in model
+        or redact_text(model) != model
+    ):
+        raise PRBenchProviderConfigError("PRBench provider model is unsafe for summary output")
+    return model
+
+
 def load_prbench_provider_config(
     environment: Mapping[str, str] | None = None,
 ) -> PRBenchProviderConfig:
@@ -57,9 +72,7 @@ def load_prbench_provider_config(
     values = {name: source.get(name, "").strip() for name in names}
     if any(not value for value in values.values()):
         raise PRBenchProviderConfigError("PRBench provider environment is incomplete")
-    model = values["PHYCODE_MODEL"]
-    if "://" in model or "\r" in model or "\n" in model:
-        raise PRBenchProviderConfigError("PRBench provider model is unsafe for summary output")
+    model = validate_prbench_model_label(values["PHYCODE_MODEL"])
     return PRBenchProviderConfig(
         api_key=SecretStr(values["PHYCODE_API_KEY"]),
         base_url=values["PHYCODE_BASE_URL"],

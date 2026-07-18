@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from phycode.context import ContextBuilder, SessionStore
+from phycode.event_projection import project_agent_event
 from phycode.feedback import artifact_verification_feedback, classify_feedback
 from phycode.llm import LLMClient
 from phycode.models import AgentEvent, AgentEventType, ToolCall
@@ -15,7 +16,15 @@ from phycode.tools.base import ApprovalHandler, ToolRuntime
 from phycode.trace import TraceStore
 
 # Feedback kinds that mean "the same corrective action is not making progress".
-_FAILURE_KINDS = {"command_failed", "test_failed", "tool_error", "timeout", "invalid_tool_args"}
+_FAILURE_KINDS = {
+    "command_failed",
+    "test_failed",
+    "tool_error",
+    "timeout",
+    "invalid_tool_args",
+    "policy_blocked",
+    "policy_requires_approval",
+}
 # Provider events that should terminate the loop and defer to the stop controller.
 _TERMINAL_EVENT_REASONS = {
     AgentEventType.ERROR: "error",
@@ -29,6 +38,7 @@ class AgentRunResult:
     final_text: str | None
     events: list[AgentEvent]
     stopped_reason: str
+    terminal_blocker: str | None = None
 
 
 @dataclass(frozen=True)
@@ -83,7 +93,7 @@ class AgentLoop:
     def run(self, user_input: str) -> AgentRunResult:
         all_events: list[AgentEvent] = []
         if self.max_tool_calls <= 0:
-            return self._finish_tool_budget(user_input, all_events)
+            return self._finish_tool_budget(user_input, all_events, None)
         final_text: str | None = None
         specs = self.tool_runtime.registry.list_specs()
         failure_streak = 0
@@ -92,6 +102,7 @@ class AgentLoop:
         consecutive_repeat_count = 0
         last_progress_fingerprint: str | None = None
         tool_call_count = 0
+        current_blocker: str | None = None
         tool_budget_warning_at = max(1, self.max_tool_calls - 2)
 
         for _step in range(self.max_steps):
@@ -102,7 +113,7 @@ class AgentLoop:
                 error_event = self._new_event(AgentEventType.ERROR, {"message": str(exc)})
                 self._record(error_event)
                 all_events.append(error_event)
-                return AgentRunResult(final_text, all_events, "error")
+                return AgentRunResult(final_text, all_events, "error", "provider_error")
 
             for event in events:
                 normalized = event.model_copy(update={"session_id": self.session_store.session.id})
@@ -121,21 +132,41 @@ class AgentLoop:
                     self._record(feedback_event)
                     all_events.append(feedback_event)
                     if verification.fatal:
-                        return AgentRunResult(None, all_events, "artifact_verification_failed")
+                        return AgentRunResult(
+                            None,
+                            all_events,
+                            "artifact_verification_failed",
+                            "artifact_verification_failed",
+                        )
                     if _step + 1 >= self.max_steps:
-                        return AgentRunResult(None, all_events, "artifact_verification_failed")
+                        return AgentRunResult(
+                            None,
+                            all_events,
+                            "artifact_verification_failed",
+                            "artifact_verification_failed",
+                        )
                     last_action_result_key = None
                     consecutive_repeat_count = 0
                     last_progress_fingerprint = None
                     break
 
                 if normalized.type in _TERMINAL_EVENT_REASONS:
-                    return AgentRunResult(final_text, all_events, _TERMINAL_EVENT_REASONS[normalized.type])
+                    return AgentRunResult(
+                        final_text,
+                        all_events,
+                        _TERMINAL_EVENT_REASONS[normalized.type],
+                        "provider_error",
+                    )
 
                 if normalized.type == AgentEventType.TOOL_CALL_REQUESTED:
                     tool_call_count += 1
                     tool_events = self._handle_tool_event(normalized)
                     all_events.extend(tool_events)
+                    current_blocker = self._updated_blocker(
+                        current_blocker,
+                        normalized,
+                        tool_events,
+                    )
                     if tool_call_count == tool_budget_warning_at:
                         budget_event = self._new_event(
                             AgentEventType.FEEDBACK_SIGNAL,
@@ -150,7 +181,7 @@ class AgentLoop:
                         self._record(budget_event)
                         all_events.append(budget_event)
                     if tool_call_count >= self.max_tool_calls:
-                        return self._finish_tool_budget(user_input, all_events)
+                        return self._finish_tool_budget(user_input, all_events, current_blocker)
                     action_result_key = self._successful_action_result_key(normalized, tool_events)
                     if action_result_key is not None:
                         try:
@@ -164,7 +195,7 @@ class AgentLoop:
                             )
                             self._record(error_event)
                             all_events.append(error_event)
-                            return AgentRunResult(None, all_events, "error")
+                            return AgentRunResult(None, all_events, "error", "provider_error")
                         if (
                             action_result_key == last_action_result_key
                             and progress_fingerprint == last_progress_fingerprint
@@ -180,7 +211,12 @@ class AgentLoop:
                                 and self.progress_fingerprint is None
                             ):
                                 return self._finalize_from_evidence(user_input, all_events)
-                            return AgentRunResult(None, all_events, "repeated_no_progress")
+                            return AgentRunResult(
+                                None,
+                                all_events,
+                                "repeated_no_progress",
+                                "repeated_no_progress",
+                            )
                     else:
                         last_action_result_key = None
                         consecutive_repeat_count = 0
@@ -193,7 +229,12 @@ class AgentLoop:
                         failure_streak = failure_streak + 1 if failure_key == last_failure_key else 1
                         last_failure_key = failure_key
                         if failure_streak >= self.max_repeated_failures:
-                            return AgentRunResult(final_text, all_events, "repeated_failure")
+                            return AgentRunResult(
+                                final_text,
+                                all_events,
+                                "repeated_failure",
+                                current_blocker or "artifact_verification_failed",
+                            )
         if self.completion_verifier is not None:
             verification = self._verify_completion()
             if verification.ok:
@@ -201,13 +242,19 @@ class AgentLoop:
             assert verification.feedback_event is not None
             self._record(verification.feedback_event)
             all_events.append(verification.feedback_event)
-            return AgentRunResult(None, all_events, "artifact_verification_failed")
+            return AgentRunResult(
+                None,
+                all_events,
+                "artifact_verification_failed",
+                "artifact_verification_failed",
+            )
         return AgentRunResult(final_text, all_events, "max_steps")
 
     def _finish_tool_budget(
         self,
         user_input: str,
         all_events: list[AgentEvent],
+        current_blocker: str | None,
     ) -> AgentRunResult:
         if self.completion_verifier is None:
             return self._finalize_from_evidence(user_input, all_events)
@@ -217,7 +264,12 @@ class AgentLoop:
         assert verification.feedback_event is not None
         self._record(verification.feedback_event)
         all_events.append(verification.feedback_event)
-        return AgentRunResult(None, all_events, "artifact_verification_failed")
+        return AgentRunResult(
+            None,
+            all_events,
+            "artifact_verification_failed",
+            current_blocker or "tool_budget_exhausted",
+        )
 
     def _verify_completion(self) -> _VerificationOutcome:
         assert self.completion_verifier is not None
@@ -316,9 +368,42 @@ class AgentLoop:
                 return (tool_name, kind)
         return None
 
+    def _updated_blocker(
+        self,
+        current: str | None,
+        request: AgentEvent,
+        tool_events: list[AgentEvent],
+    ) -> str | None:
+        output = next(
+            (event for event in tool_events if event.type == AgentEventType.TOOL_CALL_OUTPUT),
+            None,
+        )
+        if output is None:
+            return current
+        status = str(output.payload.get("status", ""))
+        tool_name = str(request.payload.get("tool_name", ""))
+        if status == "policy_blocked":
+            return "policy_blocked"
+        if status == "policy_requires_approval":
+            return "approval_required"
+        if tool_name == "process.run" and status in {
+            "command_failed",
+            "timeout",
+            "tool_error",
+            "invalid_tool_args",
+        }:
+            return "process_failed"
+        if status == "ok":
+            if current in {"policy_blocked", "approval_required"}:
+                return None
+            if current == "process_failed" and tool_name == "process.run":
+                return None
+        return current
+
     def _new_event(self, event_type: AgentEventType, payload: dict) -> AgentEvent:
         return AgentEvent(session_id=self.session_store.session.id, type=event_type, payload=payload)
 
     def _record(self, event: AgentEvent) -> None:
-        self.session_store.add_event(event)
-        self.trace_store.append(event)
+        projected = project_agent_event(event, self.policy_context.workspace_root.resolve())
+        self.session_store.add_event(projected)
+        self.trace_store.append(projected)

@@ -19,7 +19,7 @@ def _json_from_stdout(stdout: str) -> dict:
 def _force_no_credentials(monkeypatch) -> None:
     """Make build_agent resolve to EchoLLM regardless of the machine keyring."""
     monkeypatch.setattr(
-        "phycode.cli.CredentialStore",
+        "phycode.composition.CredentialStore",
         lambda *a, **k: CredentialStore(backend=InMemoryCredentialBackend()),
     )
 

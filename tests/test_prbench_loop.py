@@ -623,3 +623,25 @@ def test_zero_tool_budget_without_verifier_uses_no_tool_evidence_finalization(
     assert not (tmp_path / "unexpected.txt").exists()
     assert not any(event.type == AgentEventType.TOOL_CALL_REQUESTED for event in result.events)
     assert not any(event.type == AgentEventType.TOOL_CALL_OUTPUT for event in result.events)
+
+
+def test_repeated_policy_block_returns_structured_terminal_blocker(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside-policy.txt"
+    outside.write_text("outside", encoding="utf-8")
+    denied = [
+        {
+            "type": "tool_call_requested",
+            "payload": {"tool_name": "file.read", "args": {"path": str(outside)}},
+        }
+    ]
+
+    result = _build_loop(
+        tmp_path,
+        ScriptedLLM([denied, denied, denied]),
+        expected_files=("result.txt",),
+        max_steps=3,
+        max_tool_calls=8,
+    ).run("read safely")
+
+    assert result.stopped_reason == "repeated_failure"
+    assert result.terminal_blocker == "policy_blocked"

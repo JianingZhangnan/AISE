@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from phycode.audio import transcribe_audio
-from phycode.cli import build_agent
+from phycode.composition import build_agent
 from phycode.llm import LLMClient, OpenAICompatibleChatAdapter
 from phycode.models import AgentProfile, SessionMode
 

@@ -149,6 +149,7 @@ def test_search_tools_do_not_expose_netrc(tmp_path: Path, tool_name: str) -> Non
 
 def test_build_agent_reuses_one_profile_spec_for_runtime_settings(tmp_path: Path, monkeypatch) -> None:
     import phycode.cli as cli
+    import phycode.composition as composition
     from phycode.llm import EchoLLM
     from phycode.profiles import ProfileSpec
 
@@ -167,7 +168,7 @@ def test_build_agent_reuses_one_profile_spec_for_runtime_settings(tmp_path: Path
         return expected
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "profile_spec", tracked_profile_spec)
+    monkeypatch.setattr(composition, "profile_spec", tracked_profile_spec)
     loop = cli.build_agent(SessionMode.NON_INTERACTIVE, llm=EchoLLM(), profile=AgentProfile.PRBENCH)
 
     assert calls == [AgentProfile.PRBENCH]
