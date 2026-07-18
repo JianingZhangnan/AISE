@@ -6,7 +6,7 @@ from pathlib import Path
 
 from phycode.models import AgentProfile, PolicyAction, PolicyDecision, ToolCall
 from phycode.profiles import ProfileSpec, profile_spec
-from phycode.visibility import PathVisibilityPolicy, VisibilityViolation
+from phycode.visibility import PathVisibilityPolicy, VisibilityViolation, is_sensitive_path
 
 
 class WorkspaceViolation(ValueError):
@@ -29,7 +29,6 @@ class PolicyContext:
         )
 
 
-CREDENTIAL_FILENAMES = {".env", ".env.local", "id_rsa", "id_ed25519"}
 SHELL_TOOLS = {"shell.run", "test.run"}
 SAFE_TOOLS = {
     "file.read",
@@ -97,11 +96,6 @@ def resolve_workspace_path(path: str, context: PolicyContext) -> Path:
         raise WorkspaceViolation(str(exc)) from exc
 
 
-def is_credential_path(path: str) -> bool:
-    name = Path(path).name
-    return name in CREDENTIAL_FILENAMES or name.endswith(".pem") or name.endswith(".key")
-
-
 class PolicyEngine:
     def decide(self, call: ToolCall, context: PolicyContext) -> PolicyDecision:
         if "path" in call.args:
@@ -121,7 +115,8 @@ class PolicyEngine:
                     ),
                 )
             if call.tool_name.startswith("file.") and (
-                is_credential_path(path) or is_credential_path(str(resolved_path))
+                is_sensitive_path(path, context.profile_spec.hidden_path_components)
+                or is_sensitive_path(str(resolved_path), context.profile_spec.hidden_path_components)
             ):
                 return PolicyDecision(
                     tool_call_id=call.id,

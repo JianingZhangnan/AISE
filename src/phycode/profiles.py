@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from phycode.context import CODING_SYSTEM_PROMPT, GAIA_SYSTEM_PROMPT
 from phycode.models import AgentProfile
+from phycode.visibility import PRBENCH_HIDDEN_PATH_COMPONENTS
 
 PRBENCH_SYSTEM_PROMPT = """You are PhyCode reproducing a public PRBench task.
 Use only visible workspace inputs. Generate data by running reproduction scripts.
@@ -91,7 +92,7 @@ _PROFILE_SPECS = {
         system_prompt=PRBENCH_SYSTEM_PROMPT,
         max_context_chars=12_000,
         max_tool_calls=40,
-        hidden_path_components=frozenset({"_ground_truth"}),
+        hidden_path_components=PRBENCH_HIDDEN_PATH_COMPONENTS,
     ),
 }
 

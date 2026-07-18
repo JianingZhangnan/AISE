@@ -4,15 +4,17 @@ import hashlib
 import json
 import os
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from phycode.redaction import redact_obj, redact_text
-
-
-_HIDDEN_COMPONENTS = frozenset({"_ground_truth", ".ssh", ".aws"})
-_CREDENTIAL_NAMES = frozenset({".env", ".env.local", "id_rsa", "id_ed25519", "credentials"})
+from phycode.redaction import redact_obj
+from phycode.visibility import (
+    PRBENCH_HIDDEN_PATH_COMPONENTS,
+    VisibilityViolation,
+    is_sensitive_path,
+    normalize_public_relative_path,
+)
 
 
 class ExecutionJournalError(RuntimeError):
@@ -45,19 +47,7 @@ class ProcessExecutionRecord(BaseModel):
     changed_artifacts: tuple[str, ...]
 
 
-def _is_sensitive_relative_path(path: str) -> bool:
-    parts = tuple(part.casefold() for part in PurePosixPath(path.replace("\\", "/")).parts)
-    if any(part in _HIDDEN_COMPONENTS for part in parts):
-        return True
-    for part in parts:
-        if part in _CREDENTIAL_NAMES or part.startswith(".env."):
-            return True
-        if part.endswith((".pem", ".key")):
-            return True
-    return False
-
-
-def _digest(path: Path) -> str:
+def file_sha256(path: Path) -> str:
     hasher = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -75,6 +65,9 @@ class ExecutionJournal:
     def snapshot_artifacts(self) -> tuple[ArtifactSnapshot, ...]:
         return tuple(self._snapshot(relative_path) for relative_path in self._artifact_paths)
 
+    def validate_cwd(self, cwd: Path) -> None:
+        self._resolve_workspace_path(cwd)
+
     def snapshot_script(self, argv: tuple[str, ...], cwd: Path) -> tuple[str | None, str | None]:
         if len(argv) < 2 or not argv[1].casefold().endswith(".py"):
             return None, None
@@ -82,7 +75,7 @@ class ExecutionJournal:
         relative_path = script.relative_to(self.workspace_root).as_posix()
         if not script.is_file():
             return relative_path, None
-        return relative_path, _digest(script)
+        return relative_path, file_sha256(script)
 
     def record_process(
         self,
@@ -110,7 +103,7 @@ class ExecutionJournal:
         )
         record = ProcessExecutionRecord(
             call_id=call_id,
-            argv=self._sanitize_argv(argv, cwd, script_path),
+            argv=self._sanitize_argv(argv, script_path),
             cwd=self._relative_directory(cwd),
             script_path=script_path,
             script_sha256=script_sha256,
@@ -130,11 +123,11 @@ class ExecutionJournal:
         normalized: list[str] = []
         seen: set[str] = set()
         for artifact_path in artifact_paths:
-            windows_path = PureWindowsPath(artifact_path)
-            posix_path = PurePosixPath(artifact_path.replace("\\", "/"))
-            if windows_path.drive or windows_path.root or posix_path.is_absolute():
-                raise ExecutionJournalError("tracked artifact path must be workspace-relative")
-            resolved = self._resolve_workspace_path(artifact_path)
+            try:
+                normalized_path = normalize_public_relative_path(artifact_path)
+            except VisibilityViolation as exc:
+                raise ExecutionJournalError("tracked artifact path must be workspace-relative") from exc
+            resolved = self._resolve_workspace_path(normalized_path)
             relative_path = resolved.relative_to(self.workspace_root).as_posix()
             key = os.path.normcase(relative_path)
             if key not in seen:
@@ -153,14 +146,14 @@ class ExecutionJournal:
                 path=relative_path,
                 exists=True,
                 size=path.stat().st_size,
-                sha256=_digest(path),
+                sha256=file_sha256(path),
             )
         except OSError as exc:
             raise ExecutionJournalError("tracked artifact cannot be snapshotted") from exc
 
     def _resolve_workspace_path(self, path: str | Path, *, base: Path | None = None) -> Path:
         raw = str(path)
-        if not raw or "\x00" in raw or _is_sensitive_relative_path(raw):
+        if not raw or "\x00" in raw or is_sensitive_path(raw, PRBENCH_HIDDEN_PATH_COMPONENTS):
             raise ExecutionJournalError("unsafe journal path")
         candidate = Path(path).expanduser()
         if not candidate.is_absolute():
@@ -171,39 +164,26 @@ class ExecutionJournal:
         except (OSError, RuntimeError, ValueError) as exc:
             raise ExecutionJournalError("journal path escapes the workspace") from exc
         relative_path = resolved.relative_to(self.workspace_root).as_posix()
-        if _is_sensitive_relative_path(relative_path):
+        if is_sensitive_path(relative_path, PRBENCH_HIDDEN_PATH_COMPONENTS):
             raise ExecutionJournalError("unsafe journal path")
         return resolved
 
     def _relative_directory(self, cwd: Path) -> str:
-        try:
-            relative = cwd.resolve().relative_to(self.workspace_root).as_posix()
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise ExecutionJournalError("process cwd escapes the workspace") from exc
+        resolved = self._resolve_workspace_path(cwd)
+        relative = resolved.relative_to(self.workspace_root).as_posix()
         return relative or "."
 
     def _sanitize_argv(
         self,
         argv: tuple[str, ...],
-        cwd: Path,
         script_path: str | None,
     ) -> tuple[str, ...]:
         sanitized = [Path(argv[0]).name]
-        for index, argument in enumerate(argv[1:], start=1):
+        for index, _argument in enumerate(argv[1:], start=1):
             if index == 1 and script_path is not None:
                 sanitized.append(script_path)
                 continue
-            if _is_sensitive_relative_path(argument):
-                sanitized.append("[REDACTED_PATH]")
-                continue
-            candidate = Path(argument)
-            if candidate.is_absolute():
-                try:
-                    sanitized.append(candidate.resolve().relative_to(self.workspace_root).as_posix())
-                except (OSError, RuntimeError, ValueError):
-                    sanitized.append("[EXTERNAL_PATH]")
-                continue
-            sanitized.append(redact_text(argument))
+            sanitized.append("[REDACTED_ARG]")
         return tuple(sanitized)
 
     def _append(self, record: ProcessExecutionRecord) -> None:

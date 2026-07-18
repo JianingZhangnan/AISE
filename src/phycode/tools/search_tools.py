@@ -5,9 +5,8 @@ import re
 from pathlib import Path
 
 from phycode.models import ToolCall, ToolResult, ToolRiskLevel, ToolSpec
-from phycode.policy import is_credential_path
 from phycode.tools.base import ToolRegistry
-from phycode.visibility import PathVisibilityPolicy, VisibilityViolation
+from phycode.visibility import PathVisibilityPolicy, VisibilityViolation, is_sensitive_path
 
 _SKIP_DIRS = {".git", ".phycode", ".venv", "__pycache__", "node_modules"}
 _MAX_MATCHES = 200
@@ -33,7 +32,7 @@ def _iter_files(base: Path, visibility: PathVisibilityPolicy) -> list[Path]:
             path = current_path / name
             if not visibility.is_visible(path):
                 continue
-            if not path.is_file() or is_credential_path(str(path)):
+            if not path.is_file() or is_sensitive_path(str(path)):
                 continue
             files.append(path)
     return sorted(files)
@@ -57,7 +56,7 @@ def register_search_tools(
         except VisibilityViolation as exc:
             return ToolResult(tool_call_id=call.id, status="policy_blocked", stderr=str(exc))
         if base.is_file():
-            files = [] if is_credential_path(str(base)) or not path_visibility.is_visible(base) else [base]
+            files = [] if is_sensitive_path(str(base)) or not path_visibility.is_visible(base) else [base]
         else:
             files = _iter_files(base, path_visibility)
         matches: list[str] = []
@@ -90,7 +89,7 @@ def register_search_tools(
                 continue
             if not resolved.is_file():
                 continue
-            if is_credential_path(str(resolved)):
+            if is_sensitive_path(str(resolved)):
                 continue
             results.append(_display(resolved, root))
         return ToolResult(tool_call_id=call.id, status="ok", stdout="\n".join(sorted(results)))

@@ -1,48 +1,17 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import os
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
-from phycode.execution import ExecutionJournal, ProcessExecutionRecord
-
-
-_HIDDEN_COMPONENTS = frozenset({"_ground_truth", ".ssh", ".aws"})
-_CREDENTIAL_NAMES = frozenset({".env", ".env.local", "id_rsa", "id_ed25519", "credentials"})
+from phycode.execution import ExecutionJournal, ProcessExecutionRecord, file_sha256
+from phycode.visibility import normalize_public_relative_path
 
 
-def _public_path(path: str) -> str:
-    normalized = path.replace("\\", "/")
-    pure = PurePosixPath(normalized)
-    windows = PureWindowsPath(path)
-    parts = tuple(part.casefold() for part in pure.parts)
-    if (
-        not path
-        or "\x00" in path
-        or pure.is_absolute()
-        or pure.drive
-        or windows.drive
-        or windows.root
-        or any(part in {"", ".", ".."} for part in pure.parts)
-        or any(part in _HIDDEN_COMPONENTS for part in parts)
-        or any(
-            part in _CREDENTIAL_NAMES or part.startswith(".env.") or part.endswith((".pem", ".key"))
-            for part in parts
-        )
-    ):
-        raise ValueError("path must be a safe public workspace-relative path")
-    return pure.as_posix()
-
-
-def _sha256(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
+def _path_key(path: str) -> str:
+    return os.path.normcase(path.replace("\\", "/"))
 
 
 class ArtifactConstraint(BaseModel):
@@ -55,7 +24,7 @@ class ArtifactConstraint(BaseModel):
     @field_validator("path")
     @classmethod
     def validate_path(cls, value: str) -> str:
-        return _public_path(value)
+        return normalize_public_relative_path(value)
 
 
 class TaskContract(BaseModel):
@@ -70,12 +39,25 @@ class TaskContract(BaseModel):
     @field_validator("instruction_file", "paper_file")
     @classmethod
     def validate_single_path(cls, value: str) -> str:
-        return _public_path(value)
+        return normalize_public_relative_path(value)
 
     @field_validator("input_files", "expected_files")
     @classmethod
     def validate_path_list(cls, values: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(_public_path(value) for value in values)
+        return tuple(normalize_public_relative_path(value) for value in values)
+
+    @model_validator(mode="after")
+    def validate_constraint_paths(self) -> TaskContract:
+        expected_keys = tuple(_path_key(path) for path in self.expected_files)
+        if len(set(expected_keys)) != len(expected_keys):
+            raise ValueError("expected_files contains duplicate paths")
+        expected_key_set = set(expected_keys)
+        constraint_keys = tuple(_path_key(constraint.path) for constraint in self.constraints)
+        if len(set(constraint_keys)) != len(constraint_keys):
+            raise ValueError("constraints contains duplicate paths")
+        if any(key not in expected_key_set for key in constraint_keys):
+            raise ValueError("constraint paths must belong to expected_files")
+        return self
 
 
 class VerificationIssue(BaseModel):
@@ -146,7 +128,7 @@ class ArtifactVerifier:
         return VerificationResult(ok=not issues, issues=tuple(issues))
 
     def _script_has_provenance(self, relative_path: str, path: Path) -> bool:
-        current_hash = _sha256(path)
+        current_hash = file_sha256(path)
         key = self._key(relative_path)
         return any(
             record.status == "ok"
@@ -157,13 +139,15 @@ class ArtifactVerifier:
         )
 
     def _csv_has_provenance(self, relative_path: str, path: Path) -> bool:
-        current_hash = _sha256(path)
+        current_hash = file_sha256(path)
         key = self._key(relative_path)
+        expected_scripts = self._current_expected_script_hashes()
         for record in self.journal.records:
             if (
                 record.status != "ok"
                 or not record.script_path
                 or not record.script_sha256
+                or expected_scripts.get(self._key(record.script_path)) != record.script_sha256
                 or not any(self._key(item) == key for item in record.changed_artifacts)
             ):
                 continue
@@ -171,6 +155,16 @@ class ArtifactVerifier:
             if after is not None and after.sha256 == current_hash:
                 return True
         return False
+
+    def _current_expected_script_hashes(self) -> dict[str, str]:
+        scripts: dict[str, str] = {}
+        for relative_path in self.contract.expected_files:
+            if Path(relative_path).suffix.casefold() != ".py":
+                continue
+            path = self._resolve(relative_path)
+            if path is not None and path.is_file():
+                scripts[self._key(relative_path)] = file_sha256(path)
+        return scripts
 
     def _verify_csv_constraint(
         self,
@@ -194,7 +188,7 @@ class ArtifactVerifier:
         try:
             path = (self.workspace_root / relative_path).resolve(strict=False)
             path.relative_to(self.workspace_root)
-            _public_path(path.relative_to(self.workspace_root).as_posix())
+            normalize_public_relative_path(path.relative_to(self.workspace_root).as_posix())
         except (OSError, RuntimeError, ValueError):
             return None
         return path
@@ -205,7 +199,7 @@ class ArtifactVerifier:
 
     @staticmethod
     def _key(path: str) -> str:
-        return os.path.normcase(path.replace("\\", "/"))
+        return _path_key(path)
 
     @staticmethod
     def _issue(code: str, path: str, message: str) -> VerificationIssue:

@@ -58,6 +58,8 @@ def register_process_tools(
     journal: ExecutionJournal | None = None,
 ) -> None:
     root = workspace_root.expanduser().resolve()
+    if journal is not None and journal.workspace_root != root:
+        raise ValueError("execution journal workspace does not match process workspace")
     visibility = PathVisibilityPolicy(root)
     executable_allowlist = frozenset(path.expanduser().resolve() for path in allowed_executables)
 
@@ -106,6 +108,7 @@ def register_process_tools(
         script_sha256: str | None = None
         if journal is not None:
             try:
+                journal.validate_cwd(resolved_cwd)
                 artifacts_before = journal.snapshot_artifacts()
                 script_path, script_sha256 = journal.snapshot_script(tuple(argv), resolved_cwd)
             except (OSError, RuntimeError, ExecutionJournalError):

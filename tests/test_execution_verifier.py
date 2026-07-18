@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -54,6 +55,7 @@ def _run_call(
     *,
     argv: list[str],
     timeout: int = 30,
+    cwd: str = ".",
 ) -> str:
     registry = ToolRegistry()
     register_process_tools(
@@ -64,7 +66,7 @@ def _run_call(
     )
     call = ToolCall(
         tool_name="process.run",
-        args={"argv": [sys.executable, *argv], "cwd": ".", "timeout": timeout},
+        args={"argv": [sys.executable, *argv], "cwd": cwd, "timeout": timeout},
     )
     context = PolicyContext(tmp_path, [], False, profile_spec(AgentProfile.PRBENCH))
     return ToolRuntime(registry).run(call, context, approved=True).tool_result.status
@@ -179,6 +181,61 @@ def test_successful_process_without_script_provenance_cannot_claim_csv(tmp_path:
 
     assert not result.ok
     assert {issue.code for issue in result.issues} == {"csv_without_provenance"}
+
+
+def test_csv_provenance_must_share_record_with_current_script_hash(tmp_path: Path) -> None:
+    (tmp_path / "reproduction").mkdir()
+    script = tmp_path / "reproduction/generate.py"
+    script.write_text(
+        "import pathlib\n"
+        "pathlib.Path('data').mkdir(exist_ok=True)\n"
+        "pathlib.Path('data/output.csv').write_text('a,b\\n1,2\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    journal = ExecutionJournal(tmp_path, ("data/output.csv",))
+    assert _run_python(tmp_path, journal) == "ok"
+    script.write_text("pass\n", encoding="utf-8")
+
+    assert _run_python(tmp_path, journal) == "ok"
+    result = ArtifactVerifier(tmp_path, _contract(), journal).verify()
+
+    assert not result.ok
+    assert {issue.code for issue in result.issues} == {"csv_without_provenance"}
+
+
+def test_any_current_expected_script_can_support_csv_in_same_record(tmp_path: Path) -> None:
+    (tmp_path / "reproduction").mkdir()
+    passive_script = tmp_path / "reproduction/passive.py"
+    passive_script.write_text("pass\n", encoding="utf-8")
+    generating_script = tmp_path / "reproduction/generate.py"
+    generating_script.write_text(
+        "import pathlib\n"
+        "pathlib.Path('data').mkdir(exist_ok=True)\n"
+        "pathlib.Path('data/output.csv').write_text('a,b\\n1,2\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=(
+            "reproduction/passive.py",
+            "reproduction/generate.py",
+            "data/output.csv",
+        ),
+        constraints=(
+            ArtifactConstraint(
+                path="data/output.csv",
+                csv_header=("a", "b"),
+                csv_rows=(("1", "2"),),
+            ),
+        ),
+    )
+    journal = ExecutionJournal(tmp_path, ("data/output.csv",))
+
+    assert _run_call(tmp_path, journal, argv=["reproduction/passive.py"]) == "ok"
+    assert _run_call(tmp_path, journal, argv=["reproduction/generate.py"]) == "ok"
+
+    assert ArtifactVerifier(tmp_path, contract, journal).verify().ok
 
 
 def test_timeout_cannot_establish_csv_provenance(tmp_path: Path) -> None:
@@ -390,7 +447,7 @@ def test_verifier_turns_read_oserror_into_structured_issue(
     def fail_hash(path: Path) -> str:
         raise OSError("test-only unreadable artifact")
 
-    monkeypatch.setattr("phycode.prbench_contract._sha256", fail_hash)
+    monkeypatch.setattr("phycode.prbench_contract.file_sha256", fail_hash)
     contract = TaskContract(
         instruction_file="instruction.md",
         paper_file="paper.md",
@@ -432,8 +489,127 @@ def test_execution_jsonl_contains_only_relative_sanitized_paths(
     assert credential_path not in raw
     assert ".env" not in raw
     assert payload["cwd"] == "."
-    assert payload["argv"][1:] == ["reproduction/generate.py", "[REDACTED_PATH]"]
+    assert payload["argv"][1:] == ["reproduction/generate.py", "[REDACTED_ARG]"]
     assert all(not Path(snapshot["path"]).is_absolute() for snapshot in payload["artifacts_after"])
+
+
+def test_execution_argv_uses_minimum_disclosure_for_url_token_and_resolved_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "reproduction").mkdir()
+    script = tmp_path / "reproduction/generate.py"
+    script.write_text(
+        "import pathlib\n"
+        "pathlib.Path('data').mkdir(exist_ok=True)\n"
+        "pathlib.Path('data/output.csv').write_text('a,b\\n1,2\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    hidden_target = tmp_path / "_ground_truth/private-token.txt"
+    hidden_target.parent.mkdir()
+    hidden_target.write_text("not-read", encoding="utf-8")
+    alias = tmp_path / "public-alias.txt"
+    url = "https://private-provider.example/v1"
+    opaque_token = "opaque-review-token-948215"
+    journal = ExecutionJournal(tmp_path, ("data/output.csv",))
+    original_resolve = Path.resolve
+
+    def resolve_alias(path: Path, *args, **kwargs) -> Path:
+        if path == alias:
+            return hidden_target
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_alias)
+
+    assert _run_call(
+        tmp_path,
+        journal,
+        argv=["reproduction/generate.py", url, opaque_token, str(alias)],
+    ) == "ok"
+    raw = (tmp_path / ".phycode/prbench/execution.jsonl").read_text(encoding="utf-8")
+    record = journal.records[-1]
+
+    assert record.argv[1:] == (
+        "reproduction/generate.py",
+        "[REDACTED_ARG]",
+        "[REDACTED_ARG]",
+        "[REDACTED_ARG]",
+    )
+    for secret in (url, opaque_token, "_ground_truth", "private-token.txt"):
+        assert secret not in raw
+        assert secret not in json.dumps(record.model_dump(mode="json"))
+
+
+@pytest.mark.parametrize("sensitive_cwd", [".ssh", ".aws", ".env"])
+def test_sensitive_cwd_is_rejected_before_script_execution(
+    tmp_path: Path,
+    sensitive_cwd: str,
+) -> None:
+    (tmp_path / sensitive_cwd).mkdir()
+    (tmp_path / "reproduction").mkdir()
+    script = tmp_path / "reproduction/sentinel.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        "(Path(__file__).resolve().parents[1] / 'executed.txt').write_text('unsafe', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    journal = ExecutionJournal(tmp_path, ())
+
+    status = _run_call(tmp_path, journal, argv=[str(script)], cwd=sensitive_cwd)
+
+    assert status == "invalid_tool_args"
+    assert not (tmp_path / "executed.txt").exists()
+    assert journal.records == []
+
+
+def test_resolved_sensitive_cwd_alias_is_rejected_before_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hidden_cwd = tmp_path / ".ssh"
+    hidden_cwd.mkdir()
+    alias = tmp_path / "public-cwd"
+    (tmp_path / "reproduction").mkdir()
+    script = tmp_path / "reproduction/sentinel.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        "(Path(__file__).resolve().parents[1] / 'executed.txt').write_text('unsafe', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    journal = ExecutionJournal(tmp_path, ())
+    original_resolve = Path.resolve
+
+    def resolve_alias(path: Path, *args, **kwargs) -> Path:
+        if path == alias:
+            return hidden_cwd
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_alias)
+
+    status = _run_call(tmp_path, journal, argv=[str(script)], cwd="public-cwd")
+
+    assert status == "invalid_tool_args"
+    assert not (tmp_path / "executed.txt").exists()
+    assert journal.records == []
+
+
+def test_process_registration_rejects_journal_from_different_workspace(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    journal_root = tmp_path / "journal"
+    runtime_root.mkdir()
+    journal_root.mkdir()
+    registry = ToolRegistry()
+    journal = ExecutionJournal(journal_root, ())
+
+    with pytest.raises(ValueError, match="workspace"):
+        register_process_tools(
+            registry,
+            runtime_root,
+            frozenset({Path(sys.executable).resolve()}),
+            journal=journal,
+        )
+
+    assert registry.spec_for("process.run") is None
 
 
 def test_csv_constraints_compare_header_and_rows_exactly(tmp_path: Path) -> None:
@@ -451,3 +627,47 @@ def test_csv_constraints_compare_header_and_rows_exactly(tmp_path: Path) -> None
 
     assert not result.ok
     assert {issue.code for issue in result.issues} == {"csv_header_mismatch", "csv_rows_mismatch"}
+
+
+def test_constraint_path_must_belong_to_expected_files() -> None:
+    with pytest.raises(ValidationError, match="expected_files"):
+        TaskContract(
+            instruction_file="instruction.md",
+            paper_file="paper.md",
+            expected_files=("result.txt",),
+            constraints=(ArtifactConstraint(path="constraint-only.csv", csv_header=("a",)),),
+        )
+
+
+def test_duplicate_expected_paths_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="duplicate"):
+        TaskContract(
+            instruction_file="instruction.md",
+            paper_file="paper.md",
+            expected_files=("data/output.csv", "data/output.csv"),
+        )
+
+
+def test_duplicate_constraint_paths_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="duplicate"):
+        TaskContract(
+            instruction_file="instruction.md",
+            paper_file="paper.md",
+            expected_files=("data/output.csv",),
+            constraints=(
+                ArtifactConstraint(path="data/output.csv", csv_header=("a",)),
+                ArtifactConstraint(path="data/output.csv", csv_header=("b",)),
+            ),
+        )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows paths are case-insensitive")
+def test_constraint_path_membership_uses_windows_case_semantics() -> None:
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=("Data/Output.csv",),
+        constraints=(ArtifactConstraint(path="data/output.CSV", csv_header=("a",)),),
+    )
+
+    assert contract.constraints[0].path == "data/output.CSV"
