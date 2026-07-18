@@ -1,18 +1,23 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 import re
-import tempfile
 import time
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
-from pydantic import BaseModel, ConfigDict, model_validator
-
+from phycode.approval_store import ApprovalRequestStore, read_approval_document
+from phycode.approval_types import (
+    ApprovalDocument,
+    ApprovalGrant,
+    ApprovalKey,
+    FileApprovalKey,
+    ProcessApprovalBaseKey,
+    canonical_path,
+    canonical_process_argv,
+    file_sha256,
+)
 from phycode.models import PolicyAction, PolicyDecision, ToolCall
 from phycode.redaction import redact_text
 from phycode.visibility import (
@@ -22,101 +27,8 @@ from phycode.visibility import (
     is_sensitive_path,
 )
 
-
-class ApprovalGrant(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    tool_name: str
-    path: str | None = None
-    argv: tuple[str, ...] | None = None
-    cwd: str | None = None
-    script_sha256: str | None = None
-
-    @model_validator(mode="after")
-    def validate_target(self) -> ApprovalGrant:
-        if self.tool_name in {"file.write", "file.edit"}:
-            if (
-                self.path is None
-                or self.argv is not None
-                or self.cwd is not None
-                or self.script_sha256 is not None
-            ):
-                raise ValueError("file approval grants require only path")
-            if not self.path or "\x00" in self.path:
-                raise ValueError("file approval path must be non-empty and contain no NUL")
-            return self
-        if self.tool_name == "process.run":
-            if self.path is not None or self.argv is None or self.cwd is None:
-                raise ValueError("process.run approval grants require argv and cwd")
-            if (
-                not self.argv
-                or any(not item or "\x00" in item for item in self.argv)
-                or not Path(self.argv[0]).is_absolute()
-            ):
-                raise ValueError(
-                    "process.run approval argv must contain an absolute executable and valid strings"
-                )
-            if not self.cwd or "\x00" in self.cwd:
-                raise ValueError("process.run approval cwd must be non-empty and contain no NUL")
-            if self.script_sha256 is not None and re.fullmatch(
-                r"[0-9a-f]{64}", self.script_sha256
-            ) is None:
-                raise ValueError("process.run script_sha256 must be a lowercase SHA-256 digest")
-            return self
-        raise ValueError(f"unsupported approval tool: {self.tool_name}")
-
-
-class _ApprovalDocument(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    grants: tuple[ApprovalGrant, ...]
-
-
-FileApprovalKey = tuple[str, str]
-ProcessApprovalBaseKey = tuple[str, tuple[str, ...], str]
-ProcessApprovalKey = tuple[str, tuple[str, ...], str, str | None]
-ApprovalKey = FileApprovalKey | ProcessApprovalKey
 Clock = Callable[[], float]
 Sleeper = Callable[[float], None]
-
-
-def _canonical_path(visibility: PathVisibilityPolicy, path: str | Path) -> str:
-    return os.path.normcase(str(visibility.resolve(path)))
-
-
-def _canonical_relative_path(visibility: PathVisibilityPolicy, path: Path) -> str:
-    resolved = visibility.resolve(path)
-    relative = resolved.relative_to(visibility.workspace_root).as_posix()
-    return relative.casefold() if os.name == "nt" else relative
-
-
-def _canonical_process_argv(
-    visibility: PathVisibilityPolicy,
-    argv: tuple[str, ...],
-    cwd: str,
-) -> tuple[str, ...]:
-    executable = os.path.normcase(str(Path(argv[0]).expanduser().resolve(strict=False)))
-    canonical = [executable]
-    resolved_cwd = visibility.resolve(cwd)
-    for index, argument in enumerate(argv[1:], start=1):
-        raw_path = Path(argument).expanduser()
-        if index == 1 and argument.casefold().endswith(".py"):
-            candidate = raw_path if raw_path.is_absolute() else resolved_cwd / raw_path
-            canonical.append(_canonical_relative_path(visibility, candidate))
-            continue
-        if raw_path.is_absolute():
-            canonical.append(_canonical_relative_path(visibility, raw_path))
-            continue
-        canonical.append(argument)
-    return tuple(canonical)
-
-
-def _file_sha256(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
 
 
 class ApprovalManifest:
@@ -151,7 +63,12 @@ class ApprovalManifest:
         self._sleeper = sleeper
         self._poll_interval_seconds = float(poll_interval_seconds)
         self._consumed: Counter[ApprovalKey] = Counter()
-        self._request_path = visibility.workspace_root / ".phycode/prbench/approval-request.json"
+        self._execution_expectations: dict[
+            str,
+            tuple[ProcessApprovalBaseKey, str | None],
+        ] = {}
+        self._request_store = ApprovalRequestStore(visibility)
+        self._request_path = self._request_store.path
 
     @classmethod
     def from_json(
@@ -168,7 +85,14 @@ class ApprovalManifest:
             workspace_root,
             hidden_components=PRBENCH_HIDDEN_PATH_COMPONENTS,
         )
-        manifest_path = visibility.resolve(path)
+        raw_manifest_path = Path(path).expanduser()
+        manifest_path = Path(
+            os.path.abspath(
+                raw_manifest_path
+                if raw_manifest_path.is_absolute()
+                else visibility.workspace_root / raw_manifest_path
+            )
+        )
         grants = cls._read_grants(manifest_path, visibility)
         return cls(
             grants,
@@ -187,19 +111,26 @@ class ApprovalManifest:
             return False
         try:
             call_key = self._call_key(call)
-            self._refresh()
         except Exception:
             self._cleanup_request()
             return False
         if call_key is None:
             return False
-        if self._consume_matching(call_key):
-            return True
         if call.tool_name != "process.run" or self._approval_wait_seconds == 0:
-            return False
+            return self._consume_matching(call_key, call_id=call.id)
 
         try:
             request = self._approval_request(call_key)
+            self._refresh()
+        except Exception:
+            return False
+        if self._consume_matching(
+            call_key,
+            call_id=call.id,
+            require_script_hash=True,
+        ):
+            return True
+        try:
             self._write_request(request)
         except Exception:
             self._cleanup_request()
@@ -216,7 +147,11 @@ class ApprovalManifest:
                     self._refresh()
                 except Exception:
                     return False
-                if self._consume_matching(call_key, require_script_hash=True):
+                if self._consume_matching(
+                    call_key,
+                    call_id=call.id,
+                    require_script_hash=True,
+                ):
                     return self._cleanup_request()
         finally:
             self._cleanup_request()
@@ -226,8 +161,8 @@ class ApprovalManifest:
         manifest_path: Path,
         visibility: PathVisibilityPolicy,
     ) -> tuple[ApprovalGrant, ...]:
-        payload: Any = json.loads(manifest_path.read_text(encoding="utf-8"))
-        document = _ApprovalDocument.model_validate(payload)
+        payload = read_approval_document(visibility, manifest_path)
+        document = ApprovalDocument.model_validate(payload)
         return tuple(
             ApprovalManifest._canonicalize_grant(grant, visibility)
             for grant in document.grants
@@ -243,12 +178,12 @@ class ApprovalManifest:
     ) -> ApprovalGrant:
         updates: dict[str, object] = {}
         if grant.path is not None:
-            updates["path"] = _canonical_path(visibility, grant.path)
+            updates["path"] = canonical_path(visibility, grant.path)
         if grant.cwd is not None:
-            canonical_cwd = _canonical_path(visibility, grant.cwd)
+            canonical_cwd = canonical_path(visibility, grant.cwd)
             updates["cwd"] = canonical_cwd
             assert grant.argv is not None
-            updates["argv"] = _canonical_process_argv(
+            updates["argv"] = canonical_process_argv(
                 visibility,
                 grant.argv,
                 canonical_cwd,
@@ -263,7 +198,7 @@ class ApprovalManifest:
             content = call.args.get("content")
             if not isinstance(path, str) or not path or "\x00" in path or not isinstance(content, str):
                 return None
-            return call.tool_name, _canonical_path(self._visibility, path)
+            return call.tool_name, canonical_path(self._visibility, path)
         if call.tool_name == "file.edit":
             if set(call.args) != {"path", "old", "new"}:
                 return None
@@ -278,7 +213,7 @@ class ApprovalManifest:
                 or not isinstance(new, str)
             ):
                 return None
-            return call.tool_name, _canonical_path(self._visibility, path)
+            return call.tool_name, canonical_path(self._visibility, path)
         if call.tool_name == "process.run":
             if set(call.args) - {"argv", "cwd", "timeout"}:
                 return None
@@ -298,10 +233,10 @@ class ApprovalManifest:
                 or not 1 <= timeout <= 300
             ):
                 return None
-            canonical_cwd = _canonical_path(self._visibility, cwd)
+            canonical_cwd = canonical_path(self._visibility, cwd)
             return (
                 call.tool_name,
-                _canonical_process_argv(self._visibility, tuple(argv), canonical_cwd),
+                canonical_process_argv(self._visibility, tuple(argv), canonical_cwd),
                 canonical_cwd,
             )
         return None
@@ -310,6 +245,7 @@ class ApprovalManifest:
         self,
         call_key: FileApprovalKey | ProcessApprovalBaseKey,
         *,
+        call_id: str,
         require_script_hash: bool = False,
     ) -> bool:
         occurrences: Counter[ApprovalKey] = Counter()
@@ -338,8 +274,30 @@ class ApprovalManifest:
                     if snapshot is None or snapshot[1] != grant.script_sha256:
                         continue
             self._consumed[grant_key] += 1
+            if grant.path is None:
+                assert len(call_key) == 3
+                self._execution_expectations[call_id] = (
+                    call_key,
+                    grant.script_sha256,
+                )
             return True
         return False
+
+    def validate_execution(self, call: ToolCall) -> bool:
+        expectation = self._execution_expectations.pop(call.id, None)
+        if expectation is None:
+            return False
+        expected_key, expected_hash = expectation
+        try:
+            call_key = self._call_key(call)
+        except Exception:
+            return False
+        if call_key is None or call_key != expected_key:
+            return False
+        if expected_hash is None:
+            return self._approval_wait_seconds == 0
+        snapshot = self._script_snapshot(call_key)
+        return snapshot is not None and snapshot[1] == expected_hash
 
     def _script_snapshot(
         self,
@@ -355,7 +313,7 @@ class ApprovalManifest:
             resolved = self._visibility.resolve(script_path)
             if not resolved.is_file():
                 return None
-            return script_path, _file_sha256(resolved)
+            return script_path, file_sha256(resolved)
         except (OSError, RuntimeError, VisibilityViolation):
             return None
 
@@ -367,6 +325,11 @@ class ApprovalManifest:
         if len(call_key) != 3 or snapshot is None:
             raise ValueError("process approval requires a visible Python script")
         tool_name, argv, canonical_cwd = call_key
+        if len(argv) != 2 or re.fullmatch(
+            r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?",
+            Path(argv[0]).name.casefold(),
+        ) is None:
+            raise ValueError("dynamic approval requires an exact Python script invocation")
         executable = Path(argv[0])
         try:
             executable.relative_to(self._visibility.workspace_root)
@@ -397,33 +360,12 @@ class ApprovalManifest:
         }
 
     def _write_request(self, payload: dict[str, object]) -> None:
-        request_parent = self._visibility.resolve(self._request_path.parent)
-        request_parent.mkdir(parents=True, exist_ok=True)
-        request_parent = self._visibility.resolve(request_parent)
-        temporary: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=request_parent,
-                prefix=".approval-request-",
-                suffix=".tmp",
-                delete=False,
-            ) as handle:
-                temporary = Path(handle.name)
-                handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
-            temporary.replace(self._request_path)
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
+        self._request_store.path = self._request_path
+        self._request_store.write(payload)
 
     def _cleanup_request(self) -> bool:
-        try:
-            self._visibility.resolve(self._request_path)
-            self._request_path.unlink(missing_ok=True)
-        except (OSError, RuntimeError, VisibilityViolation):
-            return False
-        return True
+        self._request_store.path = self._request_path
+        return self._request_store.cleanup()
 
     @staticmethod
     def _grant_key(grant: ApprovalGrant) -> ApprovalKey:

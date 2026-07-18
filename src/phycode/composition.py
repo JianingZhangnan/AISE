@@ -4,6 +4,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from phycode.agent import AgentLoop, CompletionVerification
 from phycode.config import AgentConfig, LLMConfig, ProjectConfig, TestConfig, WorkspaceConfig
@@ -12,7 +13,7 @@ from phycode.context import ContextBuilder, MemoryStore, SessionStore
 from phycode.credentials import CredentialStore
 from phycode.execution import ExecutionJournal
 from phycode.llm import EchoLLM, LLMClient, OpenAICompatibleChatAdapter
-from phycode.models import AgentProfile, Session, SessionMode
+from phycode.models import AgentProfile, Session, SessionMode, ToolCall
 from phycode.policy import PolicyContext
 from phycode.profiles import profile_spec
 from phycode.tools import ToolRegistry, ToolRuntime
@@ -43,6 +44,7 @@ def build_default_registry(
     vision_inspector=None,
     visibility: PathVisibilityPolicy | None = None,
     execution_journal: ExecutionJournal | None = None,
+    process_execution_guard: Callable[[ToolCall], bool] | None = None,
 ) -> ToolRegistry:
     """Compose the built-in registry without consulting project config when dependencies are explicit."""
     registry = ToolRegistry()
@@ -67,6 +69,7 @@ def build_default_registry(
         root,
         frozenset({Path(sys.executable).resolve()}),
         journal=execution_journal,
+        execution_guard=process_execution_guard,
     )
     register_shell_tools(registry, workspace_root=root, test_command=configured_test_command)
     register_state_tools(registry, workspace_root=root, memory_store=memory_store)
@@ -147,6 +150,11 @@ def build_agent(
         interactive=mode == SessionMode.INTERACTIVE,
         profile_spec=spec,
     )
+    candidate_execution_guard = getattr(approval_handler, "validate_execution", None)
+    process_execution_guard = cast(
+        Callable[[ToolCall], bool] | None,
+        candidate_execution_guard if callable(candidate_execution_guard) else None,
+    )
     registry = build_default_registry(
         root,
         config.test.command,
@@ -154,6 +162,7 @@ def build_agent(
         configured_vision,
         visibility=policy_context.visibility,
         execution_journal=execution_journal,
+        process_execution_guard=process_execution_guard,
     )
     registry = registry_subset(registry, spec.tool_names)
     return AgentLoop(

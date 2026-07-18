@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -56,6 +57,7 @@ def register_process_tools(
     workspace_root: Path,
     allowed_executables: frozenset[Path],
     journal: ExecutionJournal | None = None,
+    execution_guard: Callable[[ToolCall], bool] | None = None,
 ) -> None:
     root = workspace_root.expanduser().resolve()
     if journal is not None and journal.workspace_root != root:
@@ -132,6 +134,13 @@ def register_process_tools(
             except (OSError, RuntimeError, ExecutionJournalError):
                 return _result(call, "tool_error", stderr="execution journal update failed")
             return None
+
+        if execution_guard is not None:
+            try:
+                if not execution_guard(call):
+                    return _invalid(call, "process execution approval is no longer valid")
+            except Exception:
+                return _invalid(call, "process execution approval could not be validated")
 
         try:
             completed = subprocess.run(

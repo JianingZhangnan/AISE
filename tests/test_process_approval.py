@@ -550,6 +550,47 @@ def test_dynamic_request_never_writes_an_executable_path_inside_workspace(
     assert not (tmp_path / ".phycode/prbench/approval-request.json").exists()
 
 
+def test_dynamic_request_rejects_runtime_parent_symlink_seam_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "a.py").write_text("print('blocked')\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    runtime_parent = tmp_path / ".phycode"
+    clock = _FakeClock()
+    sleeps = 0
+    original_is_symlink = Path.is_symlink
+
+    def mark_runtime_parent(path: Path) -> bool:
+        if path == runtime_parent:
+            return True
+        return original_is_symlink(path)
+
+    def unexpected_sleep(seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        clock.advance(seconds)
+
+    manifest = ApprovalManifest.from_json(
+        approvals,
+        tmp_path,
+        approval_wait_seconds=1,
+        clock=clock,
+        sleeper=unexpected_sleep,
+    )
+    monkeypatch.setattr(Path, "is_symlink", mark_runtime_parent)
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert not manifest(call, decision)
+    assert sleeps == 0
+    assert not runtime_parent.exists()
+
+
 def test_zero_wait_keeps_missing_process_grant_fail_closed_without_pending_request(
     tmp_path: Path,
 ) -> None:
@@ -557,6 +598,70 @@ def test_zero_wait_keeps_missing_process_grant_fail_closed_without_pending_reque
     approvals = tmp_path / "approvals.json"
     approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
     manifest = ApprovalManifest.from_json(approvals, tmp_path)
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert not manifest(call, decision)
+    assert not (tmp_path / ".phycode/prbench/approval-request.json").exists()
+
+
+def test_zero_wait_uses_constructor_snapshot_and_ignores_later_grants(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("print('blocked')\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    manifest = ApprovalManifest.from_json(approvals, tmp_path)
+    approvals.write_text(
+        json.dumps(
+            {
+                "grants": [
+                    {
+                        "tool_name": "process.run",
+                        "argv": [sys.executable, "a.py"],
+                        "cwd": ".",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert not manifest(call, decision)
+
+
+def test_waiting_manifest_rejects_preloaded_process_grant_without_hash(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("print('blocked')\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(
+        json.dumps(
+            {
+                "grants": [
+                    {
+                        "tool_name": "process.run",
+                        "argv": [sys.executable, "a.py"],
+                        "cwd": ".",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    clock = _FakeClock()
+    manifest = ApprovalManifest.from_json(
+        approvals,
+        tmp_path,
+        approval_wait_seconds=0.01,
+        clock=clock,
+        sleeper=clock.advance,
+        poll_interval_seconds=0.01,
+    )
     call = ToolCall(
         tool_name="process.run",
         args={"argv": [sys.executable, "a.py"], "cwd": "."},
@@ -632,6 +737,35 @@ def test_pending_request_cleanup_fails_closed_if_runtime_target_resolves_outside
 
     assert not manifest(call, decision)
     assert sentinel.read_text(encoding="utf-8") == "must remain"
+
+
+def test_pending_request_cleanup_rejects_destination_symlink_seam(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "a.py").write_text("print('blocked')\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    request_path = tmp_path / ".phycode/prbench/approval-request.json"
+    request_path.parent.mkdir(parents=True)
+    request_path.write_text("must remain", encoding="utf-8")
+    manifest = ApprovalManifest.from_json(approvals, tmp_path)
+    original_is_symlink = Path.is_symlink
+
+    def mark_destination(path: Path) -> bool:
+        if path == request_path:
+            return True
+        return original_is_symlink(path)
+
+    monkeypatch.setattr(Path, "is_symlink", mark_destination)
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert not manifest(call, decision)
+    assert request_path.read_text(encoding="utf-8") == "must remain"
 
 
 def test_hash_bound_process_grant_rejects_script_changed_while_waiting(tmp_path: Path) -> None:
@@ -733,6 +867,80 @@ def test_dynamic_refresh_rejects_a_new_process_grant_without_script_hash(
     assert not request_path.exists()
 
 
+def test_dynamic_request_rejects_extra_opaque_argv_before_persisting(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("print('blocked')\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    request_path = tmp_path / ".phycode/prbench/approval-request.json"
+    clock = _FakeClock()
+    sleeps = 0
+
+    def unexpected_sleep(seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        clock.advance(seconds)
+
+    manifest = ApprovalManifest.from_json(
+        approvals,
+        tmp_path,
+        approval_wait_seconds=1,
+        clock=clock,
+        sleeper=unexpected_sleep,
+    )
+    call = ToolCall(
+        tool_name="process.run",
+        args={
+            "argv": [sys.executable, "a.py", "opaque-review-token"],
+            "cwd": ".",
+        },
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert not manifest(call, decision)
+    assert sleeps == 0
+    assert not request_path.exists()
+
+
+def test_waiting_manifest_rejects_preloaded_hash_grant_with_extra_argv(tmp_path: Path) -> None:
+    script = tmp_path / "a.py"
+    script.write_text("print('blocked')\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(
+        json.dumps(
+            {
+                "grants": [
+                    {
+                        "tool_name": "process.run",
+                        "argv": [sys.executable, "a.py", "opaque-review-token"],
+                        "cwd": ".",
+                        "script_sha256": hashlib.sha256(script.read_bytes()).hexdigest(),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    clock = _FakeClock()
+    manifest = ApprovalManifest.from_json(
+        approvals,
+        tmp_path,
+        approval_wait_seconds=0.01,
+        clock=clock,
+        sleeper=clock.advance,
+        poll_interval_seconds=0.01,
+    )
+    call = ToolCall(
+        tool_name="process.run",
+        args={
+            "argv": [sys.executable, "a.py", "opaque-review-token"],
+            "cwd": ".",
+        },
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert not manifest(call, decision)
+
+
 def test_reloading_manifest_does_not_revive_consumed_hash_bound_grant(tmp_path: Path) -> None:
     script = tmp_path / "a.py"
     script.write_text("print('once')\n", encoding="utf-8")
@@ -745,7 +953,15 @@ def test_reloading_manifest_does_not_revive_consumed_hash_bound_grant(tmp_path: 
     }
     approvals = tmp_path / "approvals.json"
     approvals.write_text(json.dumps({"grants": [grant]}), encoding="utf-8")
-    manifest = ApprovalManifest.from_json(approvals, tmp_path)
+    clock = _FakeClock()
+    manifest = ApprovalManifest.from_json(
+        approvals,
+        tmp_path,
+        approval_wait_seconds=0.01,
+        clock=clock,
+        sleeper=clock.advance,
+        poll_interval_seconds=0.01,
+    )
     call = ToolCall(
         tool_name="process.run",
         args={"argv": [sys.executable, "a.py"], "cwd": "."},
@@ -758,6 +974,128 @@ def test_reloading_manifest_does_not_revive_consumed_hash_bound_grant(tmp_path: 
     approvals.write_text(json.dumps({"grants": [grant, grant]}), encoding="utf-8")
     assert manifest(call, decision)
     assert not manifest(call, decision)
+
+
+def test_refresh_rejects_manifest_target_changed_outside_workspace(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("print('blocked')\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    script_hash = hashlib.sha256((tmp_path / "a.py").read_bytes()).hexdigest()
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-approvals.json"
+    outside.write_text(
+        json.dumps(
+            {
+                "grants": [
+                    {
+                        "tool_name": "process.run",
+                        "argv": [sys.executable, "a.py"],
+                        "cwd": ".",
+                        "script_sha256": script_hash,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    clock = _FakeClock()
+    manifest = ApprovalManifest.from_json(
+        approvals,
+        tmp_path,
+        approval_wait_seconds=0.01,
+        clock=clock,
+        sleeper=clock.advance,
+        poll_interval_seconds=0.01,
+    )
+    setattr(manifest, "_manifest_path", outside)
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    try:
+        assert not manifest(call, decision)
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+def test_refresh_rejects_manifest_file_symlink_seam(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "a.py").write_text("print('blocked')\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    clock = _FakeClock()
+    manifest = ApprovalManifest.from_json(
+        approvals,
+        tmp_path,
+        approval_wait_seconds=0.01,
+        clock=clock,
+        sleeper=clock.advance,
+        poll_interval_seconds=0.01,
+    )
+    script_hash = hashlib.sha256((tmp_path / "a.py").read_bytes()).hexdigest()
+    approvals.write_text(
+        json.dumps(
+            {
+                "grants": [
+                    {
+                        "tool_name": "process.run",
+                        "argv": [sys.executable, "a.py"],
+                        "cwd": ".",
+                        "script_sha256": script_hash,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_is_symlink = Path.is_symlink
+
+    def mark_manifest(path: Path) -> bool:
+        if path == approvals:
+            return True
+        return original_is_symlink(path)
+
+    monkeypatch.setattr(Path, "is_symlink", mark_manifest)
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert not manifest(call, decision)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink replacement semantics")
+def test_refresh_rejects_real_manifest_symlink_replacement(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("print('blocked')\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    clock = _FakeClock()
+    manifest = ApprovalManifest.from_json(
+        approvals,
+        tmp_path,
+        approval_wait_seconds=0.01,
+        clock=clock,
+        sleeper=clock.advance,
+        poll_interval_seconds=0.01,
+    )
+    outside = tmp_path.parent / f"{tmp_path.name}-symlink-approvals.json"
+    outside.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    approvals.unlink()
+    approvals.symlink_to(outside)
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    try:
+        assert not manifest(call, decision)
+    finally:
+        outside.unlink(missing_ok=True)
 
 
 def test_malformed_refresh_fails_closed_and_cleans_pending_request(tmp_path: Path) -> None:
@@ -860,6 +1198,115 @@ def test_process_approval_grant_rejects_invalid_script_hash(tmp_path: Path) -> N
 
     with pytest.raises(ValidationError):
         ApprovalManifest.from_json(approvals, tmp_path)
+
+
+def test_composed_process_guard_rehashes_after_approval_before_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from phycode.composition import build_agent
+
+    script = tmp_path / "a.py"
+    script.write_text(
+        "from pathlib import Path\nPath('original.txt').write_text('ORIGINAL')\n",
+        encoding="utf-8",
+    )
+    script_hash = hashlib.sha256(script.read_bytes()).hexdigest()
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(
+        json.dumps(
+            {
+                "grants": [
+                    {
+                        "tool_name": "process.run",
+                        "argv": [sys.executable, "a.py"],
+                        "cwd": ".",
+                        "script_sha256": script_hash,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = ApprovalManifest.from_json(approvals, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    loop = build_agent(
+        SessionMode.NON_INTERACTIVE,
+        llm=EchoLLM(),
+        approval_handler=manifest,
+        profile=AgentProfile.PRBENCH,
+    )
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, loop.policy_context)
+    assert manifest(call, decision)
+    script.write_text(
+        "from pathlib import Path\n"
+        "Path('changed.txt').write_text('CHANGED_AFTER_APPROVAL')\n"
+        "print('CHANGED_AFTER_APPROVAL')\n",
+        encoding="utf-8",
+    )
+
+    result = loop.tool_runtime.run(call, loop.policy_context, approved=True)
+
+    assert result.tool_result.status != "ok"
+    assert "CHANGED_AFTER_APPROVAL" not in result.tool_result.stdout
+    assert not (tmp_path / "original.txt").exists()
+    assert not (tmp_path / "changed.txt").exists()
+
+
+def test_composed_process_guard_keeps_zero_wait_hashless_grant_compatible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from phycode.composition import build_agent
+
+    (tmp_path / "a.py").write_text(
+        "from pathlib import Path\nPath('ran.txt').write_text('ok')\n",
+        encoding="utf-8",
+    )
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(
+        json.dumps(
+            {
+                "grants": [
+                    {
+                        "tool_name": "process.run",
+                        "argv": [sys.executable, "a.py"],
+                        "cwd": ".",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = ApprovalManifest.from_json(approvals, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    loop = build_agent(
+        SessionMode.NON_INTERACTIVE,
+        llm=EchoLLM(),
+        approval_handler=manifest,
+        profile=AgentProfile.PRBENCH,
+    )
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, loop.policy_context)
+    assert manifest(call, decision)
+
+    result = loop.tool_runtime.run(call, loop.policy_context, approved=True)
+
+    assert result.tool_result.status == "ok"
+    assert (tmp_path / "ran.txt").read_text(encoding="utf-8") == "ok"
+    (tmp_path / "ran.txt").unlink()
+
+    repeated = loop.tool_runtime.run(call, loop.policy_context, approved=True)
+
+    assert repeated.tool_result.status != "ok"
+    assert not (tmp_path / "ran.txt").exists()
 
 
 def test_file_approval_matches_resolved_path(tmp_path: Path) -> None:
