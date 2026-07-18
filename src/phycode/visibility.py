@@ -7,7 +7,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 PRBENCH_HIDDEN_PATH_COMPONENTS = frozenset({"_ground_truth"})
 _CREDENTIAL_COMPONENTS = frozenset(
-    {".ssh", ".aws", ".env", ".env.local", "id_rsa", "id_ed25519", "credentials"}
+    {".ssh", ".aws", ".env", ".env.local", ".netrc", "id_rsa", "id_ed25519", "credentials"}
 )
 
 

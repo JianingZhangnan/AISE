@@ -86,6 +86,18 @@ def test_policy_classifies_resolved_credential_target_at_visibility_boundary(tmp
     assert decision.rule_id == "credential.read_blocked"
 
 
+def test_policy_blocks_netrc_file_read(tmp_path: Path) -> None:
+    (tmp_path / ".netrc").write_text("NETRC_SENTINEL", encoding="utf-8")
+
+    decision = PolicyEngine().decide(
+        ToolCall(tool_name="file.read", args={"path": ".netrc"}),
+        PolicyContext(tmp_path, [], False),
+    )
+
+    assert decision.decision == PolicyAction.DENY
+    assert decision.rule_id == "credential.read_blocked"
+
+
 def test_prbench_policy_denies_explicit_hidden_path(tmp_path: Path) -> None:
     context = PolicyContext(
         tmp_path,
@@ -117,6 +129,22 @@ def test_search_tools_do_not_expose_hidden_tree(tmp_path: Path, tool_name: str) 
     )
     assert "sentinel.txt" not in result.tool_result.stdout
     assert "SENTINEL" not in result.tool_result.stdout
+
+
+@pytest.mark.parametrize("tool_name", ["search.grep", "search.glob"])
+def test_search_tools_do_not_expose_netrc(tmp_path: Path, tool_name: str) -> None:
+    (tmp_path / ".netrc").write_text("NETRC_SENTINEL", encoding="utf-8")
+    registry = ToolRegistry()
+    register_search_tools(registry, workspace_root=tmp_path)
+    args = {"pattern": "NETRC_SENTINEL"} if tool_name == "search.grep" else {"pattern": "**/*"}
+
+    result = ToolRuntime(registry).run(
+        ToolCall(tool_name=tool_name, args=args),
+        PolicyContext(tmp_path, [], False),
+    )
+
+    assert ".netrc" not in result.tool_result.stdout
+    assert "NETRC_SENTINEL" not in result.tool_result.stdout
 
 
 def test_build_agent_reuses_one_profile_spec_for_runtime_settings(tmp_path: Path, monkeypatch) -> None:

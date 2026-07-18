@@ -16,6 +16,7 @@ from phycode.prbench_contract import ArtifactConstraint, ArtifactVerifier, TaskC
 from phycode.profiles import profile_spec
 from phycode.tools import ToolRegistry, ToolRuntime
 from phycode.tools.process_tools import register_process_tools
+from phycode.visibility import is_credential_path
 
 
 def _contract() -> TaskContract:
@@ -324,6 +325,25 @@ def test_contract_rejects_non_public_paths(path: str) -> None:
             paper_file="paper.md",
             expected_files=(path,),
         )
+
+
+def test_netrc_is_classified_as_a_shared_credential_path() -> None:
+    assert is_credential_path(".netrc")
+    assert is_credential_path("nested/.netrc")
+
+
+def test_contract_rejects_netrc_expected_artifact() -> None:
+    with pytest.raises(ValidationError):
+        TaskContract(
+            instruction_file="instruction.md",
+            paper_file="paper.md",
+            expected_files=(".netrc",),
+        )
+
+
+def test_execution_journal_rejects_netrc_artifact(tmp_path: Path) -> None:
+    with pytest.raises(ExecutionJournalError):
+        ExecutionJournal(tmp_path, (".netrc",))
 
 
 def test_contract_and_journal_reject_absolute_artifact_path(tmp_path: Path) -> None:
