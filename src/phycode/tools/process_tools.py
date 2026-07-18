@@ -79,8 +79,8 @@ def register_process_tools(
             return _invalid(call, "cwd must be a non-empty string without NUL characters")
         try:
             resolved_cwd = visibility.resolve(cwd)
-        except (OSError, RuntimeError, VisibilityViolation) as exc:
-            return _invalid(call, f"cwd is not visible: {exc}")
+        except (OSError, RuntimeError, VisibilityViolation):
+            return _invalid(call, "cwd is not visible")
 
         timeout = call.args.get("timeout", 30)
         if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 300:
@@ -91,10 +91,10 @@ def register_process_tools(
             return _invalid(call, "executable path must be absolute")
         try:
             executable = requested_executable.resolve()
-        except (OSError, RuntimeError) as exc:
-            return _invalid(call, f"executable path cannot be resolved: {exc}")
+        except (OSError, RuntimeError):
+            return _invalid(call, "executable path cannot be resolved")
         if executable not in executable_allowlist:
-            return _invalid(call, f"executable is not allowed: {executable}")
+            return _invalid(call, f"executable is not allowed: {executable.name}")
         argv = [str(executable), *argv[1:]]
         minimal_environment = {
             name: value

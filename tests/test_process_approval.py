@@ -115,8 +115,61 @@ def test_process_run_rejects_executable_outside_allowlist(tmp_path: Path) -> Non
     result = ToolRuntime(registry).run(call, _prbench_context(tmp_path), approved=True)
 
     assert result.tool_result.status == "invalid_tool_args"
-    assert "not allowed" in result.tool_result.stderr
+    assert result.tool_result.stderr == f"executable is not allowed: {Path(sys.executable).name}"
     assert "unreachable" not in result.tool_result.stdout
+
+
+def test_process_executor_cwd_resolution_error_is_generic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = ToolRegistry()
+    _register_python(registry, tmp_path)
+    executor = registry.executor_for("process.run")
+    assert executor is not None
+    original_resolve = PathVisibilityPolicy.resolve
+
+    def fail_cwd(policy: PathVisibilityPolicy, path: str | Path) -> Path:
+        if str(path) == "resolution-error":
+            raise OSError("C:\\private\\cwd-secret")
+        return original_resolve(policy, path)
+
+    monkeypatch.setattr(PathVisibilityPolicy, "resolve", fail_cwd)
+    result = executor(
+        ToolCall(
+            tool_name="process.run",
+            args={"argv": [sys.executable, "script.py"], "cwd": "resolution-error"},
+        )
+    )
+
+    assert result.status == "invalid_tool_args"
+    assert result.stderr == "cwd is not visible"
+
+
+def test_process_executor_executable_resolution_error_is_generic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = ToolRegistry()
+    _register_python(registry, tmp_path)
+    executor = registry.executor_for("process.run")
+    assert executor is not None
+    requested = tmp_path / "broken-command.exe"
+    original_resolve = Path.resolve
+
+    def fail_executable(path: Path, *args, **kwargs) -> Path:
+        if path == requested:
+            raise OSError("C:\\private\\executable-secret")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", fail_executable)
+    result = executor(
+        ToolCall(
+            tool_name="process.run",
+            args={"argv": [str(requested), "script.py"], "cwd": "."},
+        )
+    )
+
+    assert result.status == "invalid_tool_args"
+    assert result.stderr == "executable path cannot be resolved"
 
 
 def test_process_run_rejects_different_absolute_executable_with_same_basename(tmp_path: Path) -> None:

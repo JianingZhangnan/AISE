@@ -589,6 +589,110 @@ def test_recursive_event_projection_redacts_external_absolute_path_fields(tmp_pa
     assert projected.payload["nested"]["path"] == "[REDACTED_PATH]"
 
 
+def test_recursive_event_projection_resolves_relative_path_fields_from_workspace(
+    tmp_path: Path,
+) -> None:
+    from phycode.event_projection import project_agent_event
+    from phycode.models import AgentEvent, AgentEventType
+
+    event = AgentEvent(
+        session_id="relative-projection-test",
+        type=AgentEventType.ERROR,
+        payload={
+            "inside": {"path": "reports/result.txt"},
+            "root": {"cwd": "."},
+            "escape": {"path": "../outside-secret.txt"},
+        },
+    )
+
+    projected = project_agent_event(event, tmp_path.resolve())
+
+    assert projected.payload["inside"]["path"] == "reports/result.txt"
+    assert projected.payload["root"]["cwd"] == "."
+    assert projected.payload["escape"]["path"] == "[REDACTED_PATH]"
+
+
+def test_recursive_event_projection_blocks_relative_symlink_escape_deterministically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from phycode.event_projection import project_agent_event
+    from phycode.models import AgentEvent, AgentEventType
+
+    workspace = tmp_path.resolve()
+    candidate = workspace / "linked" / "secret.txt"
+    outside = (tmp_path.parent / "outside-linked" / "secret.txt").resolve()
+    original_resolve = Path.resolve
+
+    def resolve_alias(path: Path, *args, **kwargs) -> Path:
+        if path == candidate:
+            return outside
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_alias)
+    event = AgentEvent(
+        session_id="symlink-projection-test",
+        type=AgentEventType.ERROR,
+        payload={"path": "linked/secret.txt"},
+    )
+
+    projected = project_agent_event(event, workspace)
+
+    assert projected.payload["path"] == "[REDACTED_PATH]"
+
+
+def test_disallowed_executable_feedback_discloses_only_basename(
+    tmp_path: Path,
+) -> None:
+    contract, approvals = write_text_task_files(tmp_path)
+    outside_executable = (tmp_path.parent / "external-command.exe").resolve()
+    argv = [str(outside_executable), "reproduce.py"]
+    approvals.write_text(
+        json.dumps(
+            {
+                "grants": [
+                    {"tool_name": "process.run", "argv": argv, "cwd": "."},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class TwoTurnRecorder:
+        def __init__(self) -> None:
+            self.messages = []
+
+        def generate(self, messages, tools):
+            del tools
+            self.messages.append(messages)
+            if len(self.messages) == 1:
+                events = [
+                    {
+                        "type": "tool_call_requested",
+                        "payload": {
+                            "tool_name": "process.run",
+                            "args": {"argv": argv, "cwd": "."},
+                        },
+                    }
+                ]
+            else:
+                events = [{"type": "assistant_final", "payload": {"text": "done"}}]
+            return ScriptedLLM([events]).generate([], [])
+
+    llm = TwoTurnRecorder()
+
+    result = run_prbench(tmp_path, contract, approvals, llm=llm, max_tool_calls=4)
+
+    assert result.exit_code != 0
+    trace = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (tmp_path / ".phycode/prbench/traces").glob("*.jsonl")
+    )
+    combined = (trace + json.dumps(llm.messages[1])).replace("\\\\", "\\")
+    assert str(outside_executable) not in combined
+    assert outside_executable.name in combined
+    assert "invalid_tool_args" in combined
+
+
 def test_fatal_verifier_at_tool_budget_maps_to_artifact_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

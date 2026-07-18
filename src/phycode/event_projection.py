@@ -73,18 +73,19 @@ def _replace_workspace_mentions(value: str, workspace_root: Path) -> str:
 def _project_string(value: str, key: str | None, workspace_root: Path) -> str:
     if _is_path_field(key):
         candidate = Path(value)
-        if candidate.is_absolute():
-            try:
-                resolved = candidate.resolve(strict=False)
-                relative = resolved.relative_to(workspace_root)
-            except (OSError, RuntimeError, ValueError):
-                return _REDACTED_PATH
-            if not relative.parts:
-                return "."
-            try:
-                return normalize_public_relative_path(relative.as_posix())
-            except VisibilityViolation:
-                return _REDACTED_PATH
+        if not candidate.is_absolute():
+            candidate = workspace_root / candidate
+        try:
+            resolved = candidate.resolve(strict=False)
+            relative = resolved.relative_to(workspace_root)
+        except (OSError, RuntimeError, ValueError):
+            return _REDACTED_PATH
+        if not relative.parts:
+            return "."
+        try:
+            return normalize_public_relative_path(relative.as_posix())
+        except VisibilityViolation:
+            return _REDACTED_PATH
     return _replace_workspace_mentions(value, workspace_root)
 
 
