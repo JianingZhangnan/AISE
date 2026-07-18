@@ -79,6 +79,14 @@ child environment 中收到一次性的 `OPENCODE_CONFIG_CONTENT`：其中只注
 启动 `OSError` 和超时都会在 `finally` 中清空 provider、inline config 与完整 child
 environment 映射。
 
+`setup_docker_environment()` 从容器 `start()` 到全部 CLI 安装完成使用同一个资源
+事务边界。health check、PhyCode/OpenCode 安装或其他 setup 步骤一旦失败，只对本次
+刚构造的 `DockerEnvironment` 调用一次 `stop()`，由它按精确 container 对象执行
+force remove 并清空 `container` / `container_id`；cleanup 自身失败不会遮蔽原始
+setup 异常，也不会把异常文本或 provider 值写入日志。由于失败调用不会完成外层
+`docker_env = setup_docker_environment(...)` 赋值，evaluation 的外层 `finally`
+只会看到 `container_id=None`，不会再次删除该容器或触碰其他容器。
+
 `launch_evaluation()` 在任何 workspace/Docker 准备前检查报告路径：本 evaluator
 留下的旧普通文件、file symlink 或 dangling symlink 会通过 exact-path unlink
 移除；目录、路径逃逸或无法删除会 fail closed。任务发送后仅接受 `lstat` 判定为

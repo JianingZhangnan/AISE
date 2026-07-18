@@ -252,29 +252,103 @@ index c705de8..49a4cb5 100644
 +            if "phycode" in needed_types
 +            else None
 +        ),
-@@ -285 +430,8 @@ def setup_docker_environment(
+@@ -276,35 +421,53 @@ def setup_docker_environment(
+-    logger.info("Creating Docker environment...")
+-    docker_env.start()
+-
+-    if not docker_env.check_health():
+-        raise RuntimeError("Docker health check failed")
+-    logger.info("Docker: Python environment ready.")
+-
+-    # Install all needed CLIs
+-    for agent_type in sorted(needed_types):
 -        if agent_type == "codex":
-+        if agent_type == "phycode":
-+            logger.info("Docker: Installing PhyCode wheel...")
-+            if not docker_env.install_phycode():
-+                raise RuntimeError("Failed to install PhyCode wheel in Docker")
-+            if not docker_env.check_phycode_health():
-+                raise RuntimeError("PhyCode CLI verification failed in Docker")
-+            logger.info("Docker: PhyCode ready.")
-+        elif agent_type == "codex":
-@@ -295 +447,3 @@ def setup_docker_environment(
+-            logger.info("Docker: Installing OpenAI Codex CLI (Node.js + npm)...")
+-            success = docker_env.install_codex()
+-            if not success:
+-                raise RuntimeError("Failed to install OpenAI Codex CLI in Docker")
+-            if not docker_env.check_codex_health():
+-                raise RuntimeError("OpenAI Codex CLI verification failed in Docker")
+-            logger.info("Docker: OpenAI Codex CLI ready.")
+-        elif agent_type == "opencode":
+-            logger.info("Docker: Installing OpenCode CLI (Node.js + npm + git)...")
 -            success = docker_env.install_opencode()
-+            success = docker_env.install_opencode(
-+                install_openai_compatible=defer_green_env and agent_type == green_agent_type
-+            )
-@@ -322,0 +477,3 @@ async def launch_evaluation(
+-            if not success:
+-                raise RuntimeError("Failed to install OpenCode CLI in Docker")
+-            if not docker_env.check_opencode_health():
+-                raise RuntimeError("OpenCode CLI verification failed in Docker")
+-            logger.info("Docker: OpenCode CLI ready.")
+-        else:  # claude
+-            logger.info("Docker: Installing Claude Code CLI (Node.js + npm)...")
+-            success = docker_env.install_claude_code()
+-            if not success:
+-                raise RuntimeError("Failed to install Claude Code CLI in Docker")
+-            if not docker_env.check_claude_health():
+-                raise RuntimeError("Claude Code CLI verification failed in Docker")
+-            logger.info("Docker: Claude Code CLI ready.")
+-
+-    return docker_env
++    try:
++        logger.info("Creating Docker environment...")
++        docker_env.start()
++
++        if not docker_env.check_health():
++            raise RuntimeError("Docker health check failed")
++        logger.info("Docker: Python environment ready.")
++
++        # Install all needed CLIs
++        for agent_type in sorted(needed_types):
++            if agent_type == "phycode":
++                logger.info("Docker: Installing PhyCode wheel...")
++                if not docker_env.install_phycode():
++                    raise RuntimeError("Failed to install PhyCode wheel in Docker")
++                if not docker_env.check_phycode_health():
++                    raise RuntimeError("PhyCode CLI verification failed in Docker")
++                logger.info("Docker: PhyCode ready.")
++            elif agent_type == "codex":
++                logger.info("Docker: Installing OpenAI Codex CLI (Node.js + npm)...")
++                success = docker_env.install_codex()
++                if not success:
++                    raise RuntimeError("Failed to install OpenAI Codex CLI in Docker")
++                if not docker_env.check_codex_health():
++                    raise RuntimeError("OpenAI Codex CLI verification failed in Docker")
++                logger.info("Docker: OpenAI Codex CLI ready.")
++            elif agent_type == "opencode":
++                logger.info("Docker: Installing OpenCode CLI (Node.js + npm + git)...")
++                success = docker_env.install_opencode(
++                    install_openai_compatible=(
++                        defer_green_env and agent_type == green_agent_type
++                    )
++                )
++                if not success:
++                    raise RuntimeError("Failed to install OpenCode CLI in Docker")
++                if not docker_env.check_opencode_health():
++                    raise RuntimeError("OpenCode CLI verification failed in Docker")
++                logger.info("Docker: OpenCode CLI ready.")
++            else:  # claude
++                logger.info("Docker: Installing Claude Code CLI (Node.js + npm)...")
++                success = docker_env.install_claude_code()
++                if not success:
++                    raise RuntimeError("Failed to install Claude Code CLI in Docker")
++                if not docker_env.check_claude_health():
++                    raise RuntimeError("Claude Code CLI verification failed in Docker")
++                logger.info("Docker: Claude Code CLI ready.")
++
++        return docker_env
++    except BaseException:
++        try:
++            docker_env.stop()
++        except BaseException:
++            logger.warning("Docker cleanup failed after setup error")
++        raise
+@@ -322,0 +486,3 @@ async def launch_evaluation(
 +    phycode_contract: str | None = None,
 +    phycode_approvals: str | None = None,
 +    approval_wait_seconds: int = 0,
-@@ -325 +482 @@ async def launch_evaluation(
+@@ -325 +491 @@ async def launch_evaluation(
 -):
 +) -> bool:
-@@ -337,0 +495,9 @@ async def launch_evaluation(
+@@ -337,0 +504,9 @@ async def launch_evaluation(
 +    if not 0 <= approval_wait_seconds <= 900:
 +        raise ValueError("approval wait seconds must be between 0 and 900")
 +    if effective_green_type == "phycode":
@@ -284,13 +358,13 @@ index c705de8..49a4cb5 100644
 +    phycode_provider_env = (
 +        resolve_env("phycode") if effective_white_type == "phycode" else {}
 +    )
-@@ -357 +523 @@ async def launch_evaluation(
+@@ -357 +532 @@ async def launch_evaluation(
 -        return
 +        return False
-@@ -362 +528 @@ async def launch_evaluation(
+@@ -362 +537 @@ async def launch_evaluation(
 -        return
 +        return False
-@@ -374,0 +541,10 @@ async def launch_evaluation(
+@@ -374,0 +550,10 @@ async def launch_evaluation(
 +    report_path = os.path.join(workspace_dir, "eval_logs", "eval_report.json")
 +    run_result_path = os.path.join(
 +        workspace_dir, ".phycode", "prbench", "run_result.json"
@@ -301,7 +375,7 @@ index c705de8..49a4cb5 100644
 +    if effective_white_type == "phycode":
 +        _remove_stale_output(workspace_dir, run_result_path)
 +
-@@ -393,0 +570,10 @@ async def launch_evaluation(
+@@ -393,0 +579,10 @@ async def launch_evaluation(
 +    if effective_white_type == "phycode":
 +        _copy_phycode_controls(
 +            task_config,
@@ -312,23 +386,23 @@ index c705de8..49a4cb5 100644
 +            code_only,
 +        )
 +
-@@ -397,0 +584 @@ async def launch_evaluation(
+@@ -397,0 +593 @@ async def launch_evaluation(
 +    evaluation_succeeded = False
-@@ -420 +607,2 @@ async def launch_evaluation(
+@@ -420 +616,2 @@ async def launch_evaluation(
 -            args=("prbench_green_agent", green_host, green_port, container_id, effective_green_type),
 +            args=("prbench_green_agent", green_host, green_port, container_id,
 +                  effective_green_type, effective_white_type == "phycode"),
-@@ -423 +611 @@ async def launch_evaluation(
+@@ -423 +620 @@ async def launch_evaluation(
 -        p_green.start()
 +        _start_without_phycode_environment(p_green)
-@@ -427 +615 @@ async def launch_evaluation(
+@@ -427 +624 @@ async def launch_evaluation(
 -            return
 +            return False
-@@ -436 +624,2 @@ async def launch_evaluation(
+@@ -436 +633,2 @@ async def launch_evaluation(
 -                  workspace_dir, container_id, effective_white_type),
 +                  workspace_dir, container_id, effective_white_type,
 +                  phycode_provider_env, approval_wait_seconds),
-@@ -439 +628,7 @@ async def launch_evaluation(
+@@ -439 +637,7 @@ async def launch_evaluation(
 -        p_white.start()
 +        if effective_white_type == "phycode":
 +            run_with_phycode_cleanup(
@@ -337,21 +411,21 @@ index c705de8..49a4cb5 100644
 +            )
 +        else:
 +            _start_without_phycode_environment(p_white)
-@@ -443 +638 @@ async def launch_evaluation(
+@@ -443 +647 @@ async def launch_evaluation(
 -            return
 +            return False
-@@ -466,0 +662 @@ async def launch_evaluation(
+@@ -466,0 +671 @@ async def launch_evaluation(
 +        send_succeeded = False
-@@ -469,0 +666 @@ async def launch_evaluation(
+@@ -469,0 +675 @@ async def launch_evaluation(
 +            send_succeeded = True
-@@ -478,4 +675,2 @@ async def launch_evaluation(
+@@ -478,4 +684,2 @@ async def launch_evaluation(
 -        report_path = os.path.join(workspace_dir, "eval_logs", "eval_report.json")
 -        if os.path.exists(report_path):
 -            with open(report_path, "r") as f:
 -                report = json.load(f)
 +        report_valid, report = _load_verified_json(workspace_dir, report_path)
 +        if report_valid:
-@@ -488,0 +684,17 @@ async def launch_evaluation(
+@@ -488,0 +693,17 @@ async def launch_evaluation(
 +        phycode_succeeded = True
 +        if effective_white_type == "phycode":
 +            run_result_valid, run_result = _load_verified_json(
@@ -369,12 +443,12 @@ index c705de8..49a4cb5 100644
 +            send_succeeded and report_valid and phycode_succeeded
 +        )
 +
-@@ -534,0 +747 @@ async def launch_evaluation(
+@@ -534,0 +756 @@ async def launch_evaluation(
 +    return evaluation_succeeded
-@@ -558 +771 @@ async def batch_evaluate(
+@@ -558 +780 @@ async def batch_evaluate(
 -                await launch_evaluation(
 +                succeeded = await launch_evaluation(
-@@ -569 +782,4 @@ async def batch_evaluate(
+@@ -569 +791,4 @@ async def batch_evaluate(
 -                print(f"[BATCH] Completed: {task_id}", flush=True)
 +                if succeeded:
 +                    print(f"[BATCH] Completed: {task_id}", flush=True)

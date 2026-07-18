@@ -626,6 +626,195 @@ def test_official_phycode_setup_defers_green_credentials_until_grading(
 
 
 @pytest.mark.parametrize(
+    ("failure_mode", "cleanup_raises"),
+    [
+        ("adapter_install", False),
+        ("post_start_exception", False),
+        ("post_start_exception", True),
+    ],
+)
+def test_official_setup_cleans_only_its_started_container_and_preserves_error(
+    patched_official_evaluator: Path,
+    caplog: pytest.LogCaptureFixture,
+    failure_mode: str,
+    cleanup_raises: bool,
+) -> None:
+    original_error = RuntimeError("original setup synthetic-secret")
+    owned_remove_calls: list[bool] = []
+    unrelated_remove_calls: list[bool] = []
+    stop_calls: list[str] = []
+    instances: list[object] = []
+
+    class FakeContainer:
+        def __init__(self, identifier: str, calls: list[bool]) -> None:
+            self.id = identifier
+            self._calls = calls
+
+        def remove(self, force: bool = False) -> None:
+            self._calls.append(force)
+            if cleanup_raises and self.id == "owned-container":
+                raise RuntimeError("cleanup synthetic-secret")
+
+    unrelated_container = FakeContainer("unrelated-container", unrelated_remove_calls)
+
+    class FakeDockerEnvironment:
+        def __init__(self, **_kwargs: object) -> None:
+            self.container: FakeContainer | None = None
+            self.container_id: str | None = None
+            instances.append(self)
+
+        def start(self) -> None:
+            self.container = FakeContainer("owned-container", owned_remove_calls)
+            self.container_id = self.container.id
+
+        def check_health(self) -> bool:
+            if failure_mode == "post_start_exception":
+                raise original_error
+            return True
+
+        def install_phycode(self) -> bool:
+            return True
+
+        def check_phycode_health(self) -> bool:
+            return True
+
+        def install_opencode(self, install_openai_compatible: bool = False) -> bool:
+            assert install_openai_compatible is True
+            return False
+
+        def check_opencode_health(self) -> bool:
+            return True
+
+        def stop(self) -> None:
+            stop_calls.append(self.container_id or "none")
+            try:
+                if self.container is not None:
+                    self.container.remove(force=True)
+            finally:
+                self.container = None
+                self.container_id = None
+
+    setup = _load_function(
+        patched_official_evaluator / "src/launcher.py",
+        "setup_docker_environment",
+        {
+            "DockerEnvironment": FakeDockerEnvironment,
+            "PROJECT_ROOT": str(patched_official_evaluator),
+            "logger": logging.getLogger("test.patched.launcher-setup"),
+            "os": os,
+            "resolve_env": lambda _agent_type: {},
+        },
+    )
+    caplog.set_level(logging.WARNING, logger="test.patched.launcher-setup")
+
+    with pytest.raises(RuntimeError) as raised:
+        setup(
+            {"docker": {}},
+            "task",
+            "workspace",
+            "phycode",
+            "opencode",
+        )
+
+    if failure_mode == "post_start_exception":
+        assert raised.value is original_error
+    else:
+        assert str(raised.value) == "Failed to install OpenCode CLI in Docker"
+    assert stop_calls == ["owned-container"]
+    assert owned_remove_calls == [True]
+    assert unrelated_remove_calls == []
+    assert unrelated_container.id == "unrelated-container"
+    assert len(instances) == 1
+    assert instances[0].container is None  # type: ignore[attr-defined]
+    assert instances[0].container_id is None  # type: ignore[attr-defined]
+    assert "synthetic-secret" not in caplog.text
+
+
+def test_official_launcher_does_not_double_remove_after_setup_self_cleanup(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+) -> None:
+    task_root = tmp_path / "tasks/public-task"
+    task_root.mkdir(parents=True)
+    (task_root / "task.yaml").write_text("public task", encoding="utf-8")
+    owned_remove_calls: list[bool] = []
+    outer_remove_calls: list[str | None] = []
+    setup_error = RuntimeError("setup failed after owned cleanup")
+
+    def self_cleaning_setup(*_args: object, **_kwargs: object) -> object:
+        owned_remove_calls.append(True)
+        raise setup_error
+
+    launcher_path = patched_official_evaluator / "src/launcher.py"
+    output_helpers = _load_launcher_output_helpers(launcher_path, os)
+    launch_evaluation = _load_function(
+        launcher_path,
+        "launch_evaluation",
+        {
+            "DATA_DIR": str(tmp_path / "tasks"),
+            **output_helpers,
+            "_archive_trace": lambda *_args: None,
+            "_archive_workspace": lambda *_args: "archive-destination",
+            "_copy_input_files": lambda *_args: None,
+            "_copy_paper_images": lambda *_args: None,
+            "_copy_paper_markdown": lambda *_args: None,
+            "_copy_phycode_controls": lambda *_args: None,
+            "_export_traces_for_type": lambda *_args: None,
+            "_kill_process": lambda *_args: None,
+            "_remove_container": lambda container_id: outer_remove_calls.append(
+                container_id
+            ),
+            "find_free_port_pair": lambda: (9001, 9002),
+            "json": json,
+            "logger": types.SimpleNamespace(
+                error=lambda *_: None,
+                info=lambda *_: None,
+                warning=lambda *_: None,
+            ),
+            "logging": types.SimpleNamespace(
+                INFO=20,
+                basicConfig=lambda **_kwargs: None,
+                FileHandler=lambda *_args: object(),
+                StreamHandler=lambda *_args: object(),
+            ),
+            "open": open,
+            "os": os,
+            "resolve_env": lambda _agent_type: {},
+            "setup_docker_environment": self_cleaning_setup,
+            "stat": stat,
+            "yaml": types.SimpleNamespace(
+                safe_load=lambda _handle: {
+                    "docker": {},
+                    "paper": {
+                        "title": "Public task",
+                        "author": "Public author",
+                    },
+                }
+            ),
+        },
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        asyncio.run(
+            cast(
+                Coroutine[object, object, object],
+                launch_evaluation(
+                    task_id="public-task",
+                    green_port=9001,
+                    white_port=9002,
+                    white_agent_type="phycode",
+                    green_agent_type="opencode",
+                    archive=False,
+                ),
+            )
+        )
+
+    assert raised.value is setup_error
+    assert owned_remove_calls == [True]
+    assert outer_remove_calls == [None]
+
+
+@pytest.mark.parametrize(
     ("adapter_exit", "expected_success"),
     [(0, True), (23, False)],
 )
