@@ -134,8 +134,7 @@ class AgentLoop:
                 events = self.llm.generate(messages, specs)
             except Exception as exc:  # provider failure -> error event, defer to stop controller
                 error_event = self._new_event(AgentEventType.ERROR, {"message": str(exc)})
-                self._record(error_event)
-                all_events.append(error_event)
+                self._record_and_collect(error_event, all_events)
                 return AgentRunResult(final_text, all_events, "error", "provider_error")
 
             feedback_barrier = False
@@ -153,8 +152,7 @@ class AgentLoop:
                         return AgentRunResult(candidate_text, all_events, "completed")
                     assert verification.feedback_event is not None
                     feedback_event = verification.feedback_event
-                    self._record(feedback_event)
-                    all_events.append(feedback_event)
+                    self._record_and_collect(feedback_event, all_events)
                     if verification.fatal:
                         return AgentRunResult(
                             None,
@@ -213,8 +211,7 @@ class AgentLoop:
                         if verification.ok:
                             return AgentRunResult(None, all_events, "completed")
                         assert verification.feedback_event is not None
-                        self._record(verification.feedback_event)
-                        all_events.append(verification.feedback_event)
+                        self._record_and_collect(verification.feedback_event, all_events)
                         feedback_barrier = True
                         if verification.fatal:
                             return AgentRunResult(
@@ -254,8 +251,7 @@ class AgentLoop:
                                 "suggested_next_step": suggested_next_step,
                             },
                         )
-                        self._record(budget_event)
-                        all_events.append(budget_event)
+                        self._record_and_collect(budget_event, all_events)
                     if skipped_by_barrier:
                         if tool_call_count >= self.max_tool_calls:
                             return self._finish_tool_budget(
@@ -274,8 +270,7 @@ class AgentLoop:
                                 AgentEventType.ERROR,
                                 {"message": "Progress fingerprint failed"},
                             )
-                            self._record(error_event)
-                            all_events.append(error_event)
+                            self._record_and_collect(error_event, all_events)
                             return AgentRunResult(None, all_events, "error", "provider_error")
                         if self.progress_fingerprint is not None:
                             if progress_fingerprint != last_progress_fingerprint:
@@ -333,8 +328,7 @@ class AgentLoop:
             if verification.ok:
                 return AgentRunResult(None, all_events, "completed")
             assert verification.feedback_event is not None
-            self._record(verification.feedback_event)
-            all_events.append(verification.feedback_event)
+            self._record_and_collect(verification.feedback_event, all_events)
             return AgentRunResult(
                 None,
                 all_events,
@@ -355,8 +349,7 @@ class AgentLoop:
         if verification.ok:
             return AgentRunResult(None, all_events, "completed")
         assert verification.feedback_event is not None
-        self._record(verification.feedback_event)
-        all_events.append(verification.feedback_event)
+        self._record_and_collect(verification.feedback_event, all_events)
         if verification.fatal:
             return AgentRunResult(
                 None,
@@ -658,3 +651,12 @@ class AgentLoop:
         self.session_store.add_event(safe)
         self.trace_store.append(safe)
         return safe
+
+    def _record_and_collect(
+        self,
+        event: AgentEvent,
+        all_events: list[AgentEvent],
+    ) -> AgentEvent:
+        recorded = self._record(event)
+        all_events.append(recorded)
+        return recorded

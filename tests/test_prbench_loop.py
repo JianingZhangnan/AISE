@@ -938,6 +938,59 @@ def test_failed_verification_at_max_steps_returns_artifact_failure_and_redacts_e
     assert secret_env not in serialized_events + serialized_trace
 
 
+def test_failed_verification_returns_projected_issue_path_in_result_events(
+    tmp_path: Path,
+) -> None:
+    absolute_issue_path = tmp_path / "result.txt"
+    failed = VerificationResult(
+        ok=False,
+        issues=(
+            VerificationIssue(
+                code="missing_artifact",
+                path=str(absolute_issue_path),
+                message="Artifact is missing",
+            ),
+        ),
+    )
+    llm = ScriptedLLM([[{"type": "assistant_final", "payload": {"text": "done"}}]])
+    loop = _build_loop(
+        tmp_path,
+        llm,
+        expected_files=("result.txt",),
+        completion_verifier=lambda: failed,
+        max_steps=1,
+    )
+
+    result = loop.run("finish")
+
+    result_feedback = next(
+        event
+        for event in result.events
+        if event.type == AgentEventType.FEEDBACK_SIGNAL
+        and event.payload.get("kind") == "artifact_verification_failed"
+    )
+    session_feedback = next(
+        event
+        for event in loop.session_store.events
+        if event.type == AgentEventType.FEEDBACK_SIGNAL
+        and event.payload.get("kind") == "artifact_verification_failed"
+    )
+    trace_feedback = next(
+        event
+        for event in loop.trace_store.read_events_raw(loop.session_store.session.id)
+        if event["type"] == AgentEventType.FEEDBACK_SIGNAL.value
+        and event["payload"].get("kind") == "artifact_verification_failed"
+    )
+    result_path = result_feedback.payload["evidence"]["issues"][0]["path"]
+    session_path = session_feedback.payload["evidence"]["issues"][0]["path"]
+    trace_path = trace_feedback["payload"]["evidence"]["issues"][0]["path"]
+    assert result_path == session_path == trace_path == "result.txt"
+    assert str(absolute_issue_path) not in json.dumps(
+        [event.model_dump(mode="json") for event in result.events],
+        default=str,
+    )
+
+
 def test_verifier_exception_fails_closed_without_leaking_exception(tmp_path: Path) -> None:
     secret = "sk-verifier-crash-123456789"
 
