@@ -119,7 +119,7 @@ class AgentLoop:
         final_text: str | None = None
         specs = self.tool_runtime.registry.list_specs()
         failure_streak = 0
-        last_failure_key: tuple[str, str] | None = None
+        last_failure_key: tuple[_ActionIdentity, str] | None = None
         last_action_result_key: str | None = None
         consecutive_repeat_count = 0
         last_progress_fingerprint: str | None = None
@@ -308,7 +308,7 @@ class AgentLoop:
                             consecutive_repeat_count = 0
                     if tool_call_count >= self.max_tool_calls:
                         return self._finish_tool_budget(user_input, all_events, current_blocker)
-                    failure_key = self._failure_key(normalized, tool_events)
+                    failure_key = self._failure_key(action_identity, tool_events)
                     if failure_key is None:
                         failure_streak = 0
                         last_failure_key = None
@@ -521,14 +521,17 @@ class AgentLoop:
         spec = self.tool_runtime.registry.spec_for(str(request.payload.get("tool_name", "")))
         return bool(spec is not None and spec.mutates_state)
 
-    def _failure_key(self, request: AgentEvent, tool_events: list[AgentEvent]) -> tuple[str, str] | None:
-        tool_name = str(request.payload.get("tool_name", ""))
+    def _failure_key(
+        self,
+        action: _ActionIdentity,
+        tool_events: list[AgentEvent],
+    ) -> tuple[_ActionIdentity, str] | None:
         for item in tool_events:
             if item.type != AgentEventType.FEEDBACK_SIGNAL:
                 continue
             kind = str(item.payload.get("kind", ""))
             if kind in _FAILURE_KINDS:
-                return (tool_name, kind)
+                return (action, kind)
         return None
 
     def _updated_blocker(

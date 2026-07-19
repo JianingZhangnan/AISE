@@ -308,3 +308,24 @@
   `3e5bee4545cad2138832f06302e9c98bd81f5216`：`uv run pytest` 为 **577 passed / 14
   skipped**，`uvx pyright` 为 0 errors / 0 warnings，`uv build` 成功生成
   sdist/wheel，`git diff --check` 通过；测试后 upstream source 仍为 clean。
+
+## 2026-07-18 Task 24：重复失败绑定完整动作身份
+
+- subagent `runtime_task22_approval_refresh` 接续执行 Task 24，使用本地 Superpowers
+  `systematic-debugging`、`test-driven-development` 与
+  `verification-before-completion`；未读取凭据、未调用真实 API、未接触 evaluator。
+- final review 确认 `_failure_key()` 只返回 `(tool_name, feedback_kind)`。因此模型对
+  同一个工具连续尝试不同参数时，即使每次都是新的纠错动作，也会累计同一 failure
+  streak；默认阈值 3 会在第三次失败后误停，模型无法执行下一次正确修复。
+- TDD RED 使用真实 `file.edit`：对同一文件依次提交三个不同且不存在的 `old` 文本，
+  然后提交可成功的第四个 edit 并 final。旧实现实际返回 `repeated_failure`，而不是
+  预期的 `final`，精确复现误停。既有测试继续要求完全相同的失败 edit 连续达到阈值
+  时返回 `repeated_failure`。
+- 最小 GREEN 未调整任何阈值，也未新增平行身份算法。AgentLoop 已在每个工具调用
+  执行前生成 `_ActionIdentity`，其中包含 tool name、规范序列化 args 的 SHA-256，且
+  `process.run` 额外绑定执行前脚本 SHA-256；现在 failure kind 与该完整身份共同作为
+  streak key。不同动作会把 streak 重新计为 1，完全相同的动作/脚本/失败类型仍连续
+  累计并按原阈值停机。
+- GREEN 证据：新增恢复用例与既有重复失败用例为 2 passed；完整
+  `tests/test_agent_loop.py tests/test_prbench_loop.py` 为 58 passed；`uvx pyright`
+  为 0 errors / 0 warnings。

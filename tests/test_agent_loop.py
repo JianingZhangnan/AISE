@@ -243,6 +243,55 @@ def test_agent_loop_stops_on_repeated_failure(tmp_path: Path):
     assert result.stopped_reason == "repeated_failure"
 
 
+def test_agent_loop_allows_distinct_failed_actions_to_recover(tmp_path: Path) -> None:
+    (tmp_path / "bug.py").write_text("value = 0\n", encoding="utf-8")
+    failed_edits = [
+        [
+            {
+                "type": "tool_call_requested",
+                "payload": {
+                    "tool_name": "file.edit",
+                    "args": {
+                        "path": "bug.py",
+                        "old": f"missing = {attempt}",
+                        "new": "value = 1",
+                    },
+                },
+            }
+        ]
+        for attempt in range(3)
+    ]
+    successful_edit = [
+        {
+            "type": "tool_call_requested",
+            "payload": {
+                "tool_name": "file.edit",
+                "args": {"path": "bug.py", "old": "value = 0", "new": "value = 1"},
+            },
+        }
+    ]
+    final = [{"type": "assistant_final", "payload": {"text": "fixed"}}]
+    loop = build_loop(
+        tmp_path,
+        ScriptedLLM([*failed_edits, successful_edit, final]),
+        approval_handler=AUTO_APPROVE,
+        max_steps=6,
+    )
+
+    result = loop.run("try distinct corrections")
+
+    assert result.stopped_reason == "final"
+    assert result.final_text == "fixed"
+    assert (tmp_path / "bug.py").read_text(encoding="utf-8") == "value = 1\n"
+    failure_kinds = [
+        event.payload.get("kind")
+        for event in result.events
+        if event.type == AgentEventType.FEEDBACK_SIGNAL
+        and event.payload.get("kind") == "tool_error"
+    ]
+    assert failure_kinds == ["tool_error", "tool_error", "tool_error"]
+
+
 def test_agent_loop_finalizes_on_repeated_successful_action(tmp_path: Path):
     (tmp_path / "README.md").write_text("same", encoding="utf-8")
     repeated = [

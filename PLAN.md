@@ -2444,9 +2444,21 @@ Task 2 完成后，以下任务可在独立 worktree 中并行进行：
 - [x] 安全 Python alias 与 normalizer identity 门禁：commits `84ee1e8`、`a2fce92`；独立复审 Critical 0 / Important 0。
 - [x] Task 22：审批清单瞬时无效时安全继续轮询。commit：`8954cbd`。
 - [x] Task 23：审批 request/grant 严格单一 schema。commit：`9c37d04`。
+- [x] Task 24：将连续重复失败绑定到完整动作身份。commit：本任务提交
+  `fix(agent): bind repeated failures to action identity [runtime_task24]`。
+  - 目标：同一工具使用不同参数或不同脚本内容进行纠错时，不因共享 tool/feedback
+    类型而被误判为重复失败；完全相同动作连续失败达到阈值仍必须停机。
+  - 文件：`src/phycode/agent.py`、`tests/test_agent_loop.py`、`AGENT_LOG.md`、
+    `PLAN.md`。
+  - TDD RED：同一路径连续三次使用不同 `old` 参数执行失败的 `file.edit`，然后执行
+    正确 edit 并 final；旧实现第三次失败后提前返回 `repeated_failure`。
+  - 实现：复用执行前已有的 `_ActionIdentity`（tool name、args SHA-256，以及
+    `process.run` 的脚本 SHA-256），与 feedback kind 共同构成 failure streak key。
+  - 验证：新恢复用例与既有相同动作重复停机用例同时通过；完整 agent/prbench loop
+    回归和 pyright 通过。
 - [x] 官方真实验收：固定 evaluator commit 上 `aaatest_helloworld`、`bbbtest_alphabet` 均由白色 runner `completed`，绿色 grader 均为 1.0；trace/journal/artifact/hash 与凭据泄漏扫描全部通过。
 
-基础依赖关系为 Task 14 → 15 → 16 → 17 → 18 → 19 → 20；真实运行反馈再依次触发原生对话/因果状态、安全 alias、Task 22 与 Task 23。实现任务由独立 subagent 按 TDD 完成并接受复审；最终由主 agent 在不暴露凭据的前提下使用真实 `deepseek-v4-pro` 和固定官方 evaluator commit 完成双任务验收。
+基础依赖关系为 Task 14 → 15 → 16 → 17 → 18 → 19 → 20；真实运行反馈再依次触发原生对话/因果状态、安全 alias、Task 22 与 Task 23，最终 review 触发 Task 24。实现任务由独立 subagent 按 TDD 完成并接受复审；最终由主 agent 在不暴露凭据的前提下使用真实 `deepseek-v4-pro` 和固定官方 evaluator commit 完成双任务验收。
 
 本批 PRBench 运行时真正重构明确拒绝继续维护旧 parser：字符串级 shell
 lexer/state machine 无法覆盖解释器拼接、变量展开、symlink 和不同 shell 语义，
