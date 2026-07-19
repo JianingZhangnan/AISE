@@ -129,9 +129,13 @@ def build_agent(
     verify_after_successful_tool: bool = False,
     trace_dir: Path | None = None,
     runtime_settings: AgentRuntimeSettings | None = None,
+    max_context_chars: int | None = None,
 ) -> AgentLoop:
     """Compose an agent loop from explicit runtime dependencies or normal project config."""
     spec = profile_spec(profile)
+    effective_context_chars = (
+        max_context_chars if max_context_chars is not None else spec.max_context_chars
+    )
     config = (
         runtime_settings.project_config
         if runtime_settings is not None
@@ -175,7 +179,7 @@ def build_agent(
         context_builder=ContextBuilder(
             session_store,
             memory_store,
-            max_chars=spec.max_context_chars,
+            max_chars=effective_context_chars,
             system_prompt=spec.system_prompt,
             workspace_label=(
                 runtime_settings.workspace_label if runtime_settings is not None else None

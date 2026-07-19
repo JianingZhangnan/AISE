@@ -24,6 +24,18 @@ from prbench_test_support import (
 )
 
 
+class _PromptRecorder:
+    def __init__(self) -> None:
+        self.messages = []
+
+    def generate(self, messages, tools):
+        del tools
+        self.messages.append(messages)
+        return ScriptedLLM(
+            [[{"type": "assistant_final", "payload": {"text": "done"}}]]
+        ).generate([], [])
+
+
 def test_prbench_run_status_has_exact_public_values() -> None:
     assert {status.value for status in PRBenchRunStatus} == {
         "completed",
@@ -61,6 +73,41 @@ def test_runner_rejects_approval_wait_outside_public_bounds(
         approvals,
         llm=llm,
         approval_wait_seconds=approval_wait_seconds,
+    )
+
+    assert result.status == PRBenchRunStatus.POLICY_BLOCKED
+    assert llm.calls == 0
+
+
+def test_build_agent_applies_explicit_prbench_context_budget(tmp_path: Path) -> None:
+    from phycode.composition import build_agent, trusted_prbench_runtime_settings
+    from phycode.models import AgentProfile, SessionMode
+
+    trace_dir = tmp_path / ".phycode/prbench/traces"
+    loop = build_agent(
+        SessionMode.NON_INTERACTIVE,
+        llm=ScriptedLLM([]),
+        profile=AgentProfile.PRBENCH,
+        max_context_chars=24_000,
+        runtime_settings=trusted_prbench_runtime_settings(tmp_path, trace_dir),
+    )
+
+    assert loop.context_builder.max_chars == 24_000
+
+
+@pytest.mark.parametrize("max_context_chars", [999, 64_001])
+def test_runner_rejects_context_budget_outside_public_bounds(
+    tmp_path: Path, max_context_chars: int
+) -> None:
+    contract, approvals = _write_public_task_files(tmp_path, approvals=False)
+    llm = _RecordingFinalLLM()
+
+    result = run_prbench(
+        tmp_path,
+        contract,
+        approvals,
+        llm=llm,
+        max_context_chars=max_context_chars,
     )
 
     assert result.status == PRBenchRunStatus.POLICY_BLOCKED
@@ -791,32 +838,43 @@ def test_runner_constructs_provider_only_from_phycode_environment(
     assert "provider.example" not in persisted
 
 
-def test_prompt_contains_only_public_instruction_paper_and_input_names(tmp_path: Path) -> None:
+def test_task_brief_lists_contract_without_inlining_public_documents(tmp_path: Path) -> None:
+    from phycode.prbench_eval import build_prbench_task_brief
+    from phycode.prbench_contract import TaskContract
+
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="white1993.md",
+        expected_files=tuple(f"reproduction/file_{index}.py" for index in range(12)),
+        execution_entrypoints=("reproduction/file_11.py",),
+    )
+
+    brief = build_prbench_task_brief(contract)
+
+    assert len(brief) < 4_000
+    assert "instruction.md" in brief
+    assert "white1993.md" in brief
+    assert "reproduction/file_0.py" in brief
+    assert "reproduction/file_11.py" in brief
+    assert "file.read" in brief
+    assert "search.grep" in brief
+
+
+def test_prompt_references_public_files_without_inlining_contents(tmp_path: Path) -> None:
     contract, approvals = _write_public_task_files(tmp_path, approvals=False)
-    (tmp_path / "input.txt").write_text("public input", encoding="utf-8")
-    payload = json.loads(contract.read_text(encoding="utf-8"))
-    payload["input_files"] = ["input.txt"]
-    contract.write_text(json.dumps(payload), encoding="utf-8")
-
-    class _PromptRecorder:
-        def __init__(self) -> None:
-            self.messages = []
-
-        def generate(self, messages, tools):
-            del tools
-            self.messages.append(messages)
-            return ScriptedLLM(
-                [[{"type": "assistant_final", "payload": {"text": "done"}}]]
-            ).generate([], [])
-
+    instruction_secret = "PUBLIC-INSTRUCTION-BODY-MUST-NOT-BE-INLINED"
+    paper_secret = "PUBLIC-PAPER-BODY-MUST-NOT-BE-INLINED"
+    (tmp_path / "instruction.md").write_text(instruction_secret, encoding="utf-8")
+    (tmp_path / "paper.md").write_text(paper_secret, encoding="utf-8")
     llm = _PromptRecorder()
 
     run_prbench(tmp_path, contract, approvals, llm=llm)
 
     rendered = json.dumps(llm.messages)
-    assert "Create reproduce.py" in rendered
-    assert "Public paper" in rendered
-    assert "input.txt" in rendered
+    assert "instruction.md" in rendered
+    assert "paper.md" in rendered
+    assert instruction_secret not in rendered
+    assert paper_secret not in rendered
 
 
 def test_unknown_stop_reason_fails_closed_as_provider_error() -> None:

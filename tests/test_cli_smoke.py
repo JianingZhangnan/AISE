@@ -46,6 +46,7 @@ def test_prbench_run_help_exposes_required_paths():
     assert "--workspace" in help_text
     assert "--contract" in help_text
     assert "--approvals" in help_text
+    assert "--max-context-chars" in help_text
     # Rich shortens long option labels to fit its fixed help-table width.
     assert "--approval-wait-sec" in help_text
 

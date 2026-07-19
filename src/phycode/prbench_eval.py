@@ -278,6 +278,30 @@ def _validate_internal_directory(workspace: Path, path: Path) -> Path:
     return resolved
 
 
+def build_prbench_task_brief(contract: TaskContract) -> str:
+    expected = "\n".join(f"- {path}" for path in contract.expected_files)
+    entrypoints = (
+        "\n".join(f"- {path}" for path in contract.execution_entrypoints) or "- (none)"
+    )
+    inputs = ", ".join(contract.input_files) or "(none)"
+    brief = (
+        "Complete this public PRBench task using only visible workspace files.\n"
+        f"Read the full instruction with file.read: {contract.instruction_file}\n"
+        f"Read or search the public paper in bounded chunks: {contract.paper_file}\n"
+        f"Public input files: {inputs}\n"
+        "Required artifacts:\n"
+        f"{expected}\n"
+        "Execution entrypoints:\n"
+        f"{entrypoints}\n"
+        "Use file.read and search.grep to recover details from the public files. "
+        "Implement core modules before entrypoints. Request process.run for each entrypoint; "
+        "completion is accepted only after deterministic artifact verification."
+    )
+    if len(brief) >= 4_000:
+        raise ValueError("PRBench task brief exceeds the public context boundary")
+    return brief
+
+
 def run_prbench(
     workspace: Path,
     contract_path: Path,
@@ -285,6 +309,7 @@ def run_prbench(
     *,
     llm: LLMClient | None = None,
     max_tool_calls: int | None = None,
+    max_context_chars: int | None = None,
     approval_wait_seconds: int = 0,
 ) -> PRBenchRunResult:
     model_name = _safe_model_name(llm)
@@ -308,6 +333,12 @@ def run_prbench(
         or not 0 <= approval_wait_seconds <= 900
     ):
         return _policy_failure(root, model_name)
+    if max_context_chars is not None and (
+        isinstance(max_context_chars, bool)
+        or not isinstance(max_context_chars, int)
+        or not 1_000 <= max_context_chars <= 64_000
+    ):
+        return _policy_failure(root, model_name)
     try:
         _ensure_no_ground_truth(root)
         _result_directory(root)
@@ -318,12 +349,10 @@ def run_prbench(
         safe_contract_path = _resolve_workspace_path(root, contract_path, require_file=True)
         safe_approvals_path = _resolve_workspace_path(root, approvals_path, require_file=True)
         contract = TaskContract.model_validate_json(safe_contract_path.read_text(encoding="utf-8"))
-        instruction_path = _resolve_workspace_path(root, contract.instruction_file, require_file=True)
-        paper_path = _resolve_workspace_path(root, contract.paper_file, require_file=True)
-        input_paths = tuple(
+        _resolve_workspace_path(root, contract.instruction_file, require_file=True)
+        _resolve_workspace_path(root, contract.paper_file, require_file=True)
+        for input_file in contract.input_files:
             _resolve_workspace_path(root, input_file, require_file=True)
-            for input_file in contract.input_files
-        )
         for expected_file in contract.expected_files:
             _resolve_workspace_path(root, expected_file, require_file=False)
         approvals = ApprovalManifest.from_json(
@@ -331,6 +360,7 @@ def run_prbench(
             root,
             approval_wait_seconds=approval_wait_seconds,
         )
+        prompt = build_prbench_task_brief(contract)
     except Exception:
         return _policy_failure(root, model_name)
 
@@ -364,29 +394,13 @@ def run_prbench(
             return _persist_if_safe(root, result)
 
     try:
-        instruction_path = _resolve_workspace_path(root, instruction_path, require_file=True)
-        instruction = instruction_path.read_text(encoding="utf-8")
-        paper_path = _resolve_workspace_path(root, paper_path, require_file=True)
-        paper = paper_path.read_text(encoding="utf-8")
-        for input_path in input_paths:
-            _resolve_workspace_path(root, input_path, require_file=True)
-    except Exception:
-        return _policy_failure(root, model_name)
-
-    prompt = (
-        "PRBench public task instruction:\n"
-        f"{instruction}\n\n"
-        "PRBench public paper:\n"
-        f"{paper}\n\n"
-        f"Public input files: {', '.join(contract.input_files) or '(none)'}"
-    )
-    try:
         loop = build_agent(
             SessionMode.NON_INTERACTIVE,
             llm=_SanitizedProvider(resolved_llm),
             approval_handler=approvals,
             profile=AgentProfile.PRBENCH,
             max_tool_calls=max_tool_calls,
+            max_context_chars=max_context_chars,
             execution_journal=journal,
             completion_verifier=verifier.verify,
             progress_fingerprint=lambda: _progress_fingerprint(journal),
@@ -448,6 +462,12 @@ def prbench_run(
     contract: Path = typer.Option(..., help="Public task contract JSON"),
     approvals: Path = typer.Option(..., help="Exact one-time approval manifest JSON"),
     max_tool_calls: int | None = typer.Option(None, min=1, help="Tool-call budget override"),
+    max_context_chars: int | None = typer.Option(
+        None,
+        min=1_000,
+        max=64_000,
+        help="Context character budget override",
+    ),
     approval_wait_seconds: int = typer.Option(
         0,
         min=0,
@@ -460,6 +480,7 @@ def prbench_run(
         contract,
         approvals,
         max_tool_calls=max_tool_calls,
+        max_context_chars=max_context_chars,
         approval_wait_seconds=approval_wait_seconds,
     )
     for line in prbench_result_lines(result):
