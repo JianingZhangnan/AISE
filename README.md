@@ -133,7 +133,11 @@ workspace 内的 `.phycode/prbench/approval-request.json` 并暂停等待。
 清单、重复消费或 900 秒超时都会 fail closed。CSV 只能由已审核脚本执行生成，
 不会从 `expected_files` 推导授权；PRBench policy 对 workspace 的
 `data/**/*.csv` 执行 `file.write` / `file.edit` 都确定性拒绝，即使 manifest 误含
-对应 grant 也不能绕过。
+对应 grant 也不能绕过。分类使用跨平台 Win32 alias view：每个路径 component
+先去除尾随 ASCII space/dot 再 casefold，因此 `data. /OUTPUT.CSV... ` 不能伪装；
+非盘符位置的冒号按 NTFS alternate data stream fail closed，
+`data/output.csv::$DATA` 同样在审批前拒绝。原始路径仍先经过 visibility、hidden 与
+escape 检查，alias view 不会改写实际工具路径；普通 coding/GAIA policy 不变。
 
 固定 upstream 的 `pyproject.toml` 对 `a2a-sdk` 只有下界；2026-07-18 在 fresh
 环境执行普通解析会选到 `a2a-sdk 1.1.1`，与该 commit 的 import API 不兼容。

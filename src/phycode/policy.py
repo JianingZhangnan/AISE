@@ -128,6 +128,17 @@ class PolicyEngine:
             if (
                 context.profile_spec.profile == AgentProfile.PRBENCH
                 and call.tool_name in {"file.write", "file.edit"}
+                and _has_non_drive_colon(path)
+            ):
+                return PolicyDecision(
+                    tool_call_id=call.id,
+                    decision=PolicyAction.DENY,
+                    rule_id="prbench.win32_stream_blocked",
+                    reason="Win32 alternate data stream paths cannot be mutated in PRBench",
+                )
+            if (
+                context.profile_spec.profile == AgentProfile.PRBENCH
+                and call.tool_name in {"file.write", "file.edit"}
                 and _is_prbench_data_csv(path, resolved_path, context.workspace_root)
             ):
                 return PolicyDecision(
@@ -208,19 +219,37 @@ def _is_prbench_data_csv(path: str, resolved_path: Path, workspace_root: Path) -
     except ValueError:
         pass
     else:
-        candidates.append(tuple(part.casefold() for part in relative.parts))
+        candidates.append(_win32_alias_view(relative.as_posix())[0])
 
     normalized = posixpath.normpath(path.replace("\\", "/"))
     if not normalized.startswith("/"):
-        candidates.append(
-            tuple(
-                part.casefold()
-                for part in normalized.split("/")
-                if part not in {"", "."}
-            )
-        )
+        candidates.append(_win32_alias_view(normalized)[0])
 
     return any(
-        len(parts) >= 2 and parts[0] == "data" and parts[-1].endswith(".csv")
+        parts
+        and parts[0] == "data"
+        and len(parts) >= 2
+        and parts[-1].endswith(".csv")
         for parts in candidates
     )
+
+
+def _has_non_drive_colon(path: str) -> bool:
+    normalized = posixpath.normpath(path.replace("\\", "/"))
+    return _win32_alias_view(normalized)[1]
+
+
+def _win32_alias_view(path: str) -> tuple[tuple[str, ...], bool]:
+    parts: list[str] = []
+    has_non_drive_colon = False
+    for index, component in enumerate(path.replace("\\", "/").split("/")):
+        if component in {"", "."}:
+            continue
+        is_drive_prefix = index == 0 and re.fullmatch(r"[A-Za-z]:", component) is not None
+        if ":" in component and not is_drive_prefix:
+            has_non_drive_colon = True
+            component = component.split(":", 1)[0]
+        canonical = component.rstrip(" .").casefold()
+        if canonical:
+            parts.append(canonical)
+    return tuple(parts), has_non_drive_colon

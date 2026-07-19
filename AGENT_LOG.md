@@ -217,3 +217,27 @@
 - 最终门禁：`uv run pytest` 为 **420 passed / 71 skipped**；补齐测试中的 Optional
   类型收窄后 `uvx pyright` 为 0 errors；`uv build` 成功生成 sdist/wheel；PowerShell
   AST、`git diff --check` 与 tracked `.env` / PEM / key 清单检查通过。
+
+### 独立复审 Important：Win32 path alias canonicalization
+
+- `bd854c7` 后的独立复审指出 `c8b4d73` 的 direct CSV 分类只有 casefold，尾随 ASCII
+  space/dot 和 NTFS ADS 可绕过 lexical `.csv` 判断。按 `systematic-debugging` 复现后
+  发现该缺口还依赖目标是否已经存在：简单 alias 在既有文件上可能被 Win32
+  `Path.resolve()` 偶然归一，而多 component / 反斜杠 alias 在错误 exact grant 下仍
+  返回 ASK，不能把现有文件状态当成安全机制。
+- TDD RED 覆盖 6 种 alias × write/edit 的纯 policy 分类、同一矩阵的真实
+  `ToolRuntime + ApprovalManifest` wrong-grant 回放、escape/hidden 原路径优先级、
+  coding/GAIA 兼容，以及非 drive colon 与正常绝对 drive prefix 的区分。真实回放
+  预置 `data/output.csv` sentinel 并快照 workspace tree，要求拒绝后 bytes/tree 均
+  不变。
+- 最小 GREEN 仅修改 PRBench 分类：原始 path 仍先走 visibility；classification-only
+  view 对每个 component 执行 `rstrip(" .")` + casefold。任何非 drive prefix 冒号
+  以 `prbench.win32_stream_blocked` fail closed，覆盖
+  `data/output.csv::$DATA`；view 不传入 executor，不改 approval key。POSIX 也采用同一
+  fail-safe，coding/GAIA 不变。本 subagent 未读取凭据、未调用真实 API，也未修改
+  temporary evaluator。
+- 最终门禁使用 fresh、clean、固定 HEAD
+  `3e5bee4545cad2138832f06302e9c98bd81f5216` 的 official evaluator source：
+  `uv run pytest` 为 **514 passed / 14 skipped**，运行后 source 仍为 0 dirty；
+  `uvx pyright` 为 0 errors；`uv build` 成功；`git diff --check` 与 tracked
+  credential-like file scan 通过。

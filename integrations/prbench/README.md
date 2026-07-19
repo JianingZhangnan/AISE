@@ -55,7 +55,11 @@ PRBench 的确定性 policy 还在审批前拒绝 workspace `data/**/*.csv` 的
 `file.write` / `file.edit`，rule 为 `prbench.direct_csv_mutation_blocked`。reason 和
 结构化 feedback 只给出“修正 reproduction 脚本，再请求 `process.run`”的固定恢复
 步骤，不包含目标路径、期望数据值或凭据；因此错误加入 manifest 的 CSV grant 也
-无法绕过 execution provenance。
+无法绕过 execution provenance。PRBench 分类还把每个 component 按 Win32 规则
+去除尾随 ASCII space/dot 后再 casefold，并把非 drive prefix 的冒号作为 alternate
+data stream fail closed；尾随别名、嵌套反斜杠别名与
+`data/output.csv::$DATA` 都在 approval handler 前 DENY。原路径的 visibility / hidden /
+escape 决策仍先执行，非 PRBench profile 不采用该 alias view。
 adapter 在白色 agent 启动前把 contract、审批清单、公开 instruction、paper 和
 显式 input files 放入 `/workspace`。容器内始终调用同一个
 `phycode prbench run`；runner 只收到 `PHYCODE_API_KEY`、

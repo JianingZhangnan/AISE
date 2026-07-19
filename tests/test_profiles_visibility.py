@@ -14,6 +14,16 @@ from phycode.tools.search_tools import register_search_tools
 from phycode.visibility import PathVisibilityPolicy, VisibilityViolation
 
 
+WIN32_CSV_ALIAS_PATHS = (
+    "data/output.csv ",
+    "data/output.csv...   ",
+    "data. /output.csv",
+    "DATA... /Nested. /OUTPUT.CSV... ",
+    r"DATA. \nested... \output.csv. ",
+    "data/output.csv::$DATA",
+)
+
+
 def test_prbench_profile_is_single_source_of_runtime_limits() -> None:
     spec = profile_spec(AgentProfile.PRBENCH)
     assert spec.max_context_chars == 12_000
@@ -36,6 +46,7 @@ def test_prbench_profile_is_single_source_of_runtime_limits() -> None:
         "data/nested/output.csv",
         r"data\nested\output.csv",
         "data/temporary/../output.csv",
+        *WIN32_CSV_ALIAS_PATHS,
     ],
 )
 def test_prbench_policy_denies_direct_csv_mutation(
@@ -58,9 +69,13 @@ def test_prbench_policy_denies_direct_csv_mutation(
     )
 
     assert decision.decision == PolicyAction.DENY
-    assert decision.rule_id == "prbench.direct_csv_mutation_blocked"
-    assert "reproduction script" in decision.reason
-    assert "process.run" in decision.reason
+    if ":" in path:
+        assert decision.rule_id == "prbench.win32_stream_blocked"
+        assert "alternate data stream" in decision.reason
+    else:
+        assert decision.rule_id == "prbench.direct_csv_mutation_blocked"
+        assert "reproduction script" in decision.reason
+        assert "process.run" in decision.reason
 
 
 def test_prbench_direct_csv_grant_cannot_bypass_policy(tmp_path: Path) -> None:
@@ -95,6 +110,51 @@ def test_prbench_direct_csv_grant_cannot_bypass_policy(tmp_path: Path) -> None:
     assert not (tmp_path / "data/output.csv").exists()
 
 
+@pytest.mark.parametrize("tool_name", ["file.write", "file.edit"])
+@pytest.mark.parametrize("alias_path", WIN32_CSV_ALIAS_PATHS)
+def test_prbench_win32_csv_alias_exact_grant_cannot_mutate_real_output(
+    tmp_path: Path,
+    tool_name: str,
+    alias_path: str,
+) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    output = data / "output.csv"
+    output.write_text("sentinel\n", encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(
+        json.dumps({"grants": [{"tool_name": tool_name, "path": alias_path}]}),
+        encoding="utf-8",
+    )
+    manifest = ApprovalManifest.from_json(approvals, tmp_path)
+    before = sorted(
+        path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*")
+    )
+    registry = ToolRegistry()
+    register_file_tools(registry)
+    args = {"path": alias_path, "content": "mutated\n"}
+    if tool_name == "file.edit":
+        args = {"path": alias_path, "old": "sentinel", "new": "mutated"}
+
+    result = ToolRuntime(registry).run(
+        ToolCall(tool_name=tool_name, args=args),
+        PolicyContext(
+            tmp_path,
+            [],
+            False,
+            profile_spec=profile_spec(AgentProfile.PRBENCH),
+        ),
+        approval_handler=manifest,
+    )
+
+    assert result.policy.decision == PolicyAction.DENY
+    assert result.tool_result.status == "policy_blocked"
+    assert output.read_text(encoding="utf-8") == "sentinel\n"
+    assert sorted(
+        path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*")
+    ) == before
+
+
 @pytest.mark.parametrize("profile", [AgentProfile.CODING, AgentProfile.GAIA])
 def test_direct_csv_policy_is_prbench_only(tmp_path: Path, profile: AgentProfile) -> None:
     decision = PolicyEngine().decide(
@@ -107,6 +167,115 @@ def test_direct_csv_policy_is_prbench_only(tmp_path: Path, profile: AgentProfile
 
     assert decision.decision == PolicyAction.ASK
     assert decision.rule_id == "tool.risky_default"
+
+
+@pytest.mark.parametrize("profile", [AgentProfile.CODING, AgentProfile.GAIA])
+@pytest.mark.parametrize("tool_name", ["file.write", "file.edit"])
+@pytest.mark.parametrize("alias_path", ["data/output.csv... ", "data/output.csv::$DATA"])
+def test_win32_alias_fail_safe_is_prbench_only(
+    tmp_path: Path,
+    profile: AgentProfile,
+    tool_name: str,
+    alias_path: str,
+) -> None:
+    args = {"path": alias_path, "content": "content"}
+    if tool_name == "file.edit":
+        args = {"path": alias_path, "old": "before", "new": "after"}
+
+    decision = PolicyEngine().decide(
+        ToolCall(tool_name=tool_name, args=args),
+        PolicyContext(tmp_path, [], False, profile_spec=profile_spec(profile)),
+    )
+
+    assert decision.decision == PolicyAction.ASK
+    assert decision.rule_id == "tool.risky_default"
+
+
+@pytest.mark.parametrize(
+    ("path", "expected_rule"),
+    [
+        ("../data/output.csv. ", "workspace.path_escape"),
+        ("_ground_truth/data/output.csv. ", "prbench.hidden_path_blocked"),
+    ],
+)
+def test_prbench_win32_alias_keeps_visibility_decision_first(
+    tmp_path: Path,
+    path: str,
+    expected_rule: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[str] = []
+    original_resolve = PathVisibilityPolicy.resolve
+
+    def record_original_path(policy: PathVisibilityPolicy, candidate: str | Path) -> Path:
+        observed.append(str(candidate))
+        return original_resolve(policy, candidate)
+
+    monkeypatch.setattr(PathVisibilityPolicy, "resolve", record_original_path)
+    decision = PolicyEngine().decide(
+        ToolCall(tool_name="file.write", args={"path": path, "content": "blocked"}),
+        PolicyContext(
+            tmp_path,
+            [],
+            False,
+            profile_spec=profile_spec(AgentProfile.PRBENCH),
+        ),
+    )
+
+    assert observed == [path]
+    assert decision.decision == PolicyAction.DENY
+    assert decision.rule_id == expected_rule
+
+
+@pytest.mark.parametrize("tool_name", ["file.write", "file.edit"])
+def test_prbench_non_drive_colon_fails_closed_but_drive_prefix_does_not(
+    tmp_path: Path,
+    tool_name: str,
+) -> None:
+    context = PolicyContext(
+        tmp_path,
+        [],
+        False,
+        profile_spec=profile_spec(AgentProfile.PRBENCH),
+    )
+    stream = PolicyEngine().decide(
+        ToolCall(
+            tool_name=tool_name,
+            args=(
+                {"path": "reproduction/script.py::$DATA", "content": "blocked"}
+                if tool_name == "file.write"
+                else {
+                    "path": "reproduction/script.py::$DATA",
+                    "old": "before",
+                    "new": "after",
+                }
+            ),
+        ),
+        context,
+    )
+    ordinary_absolute = PolicyEngine().decide(
+        ToolCall(
+            tool_name=tool_name,
+            args=(
+                {
+                    "path": str(tmp_path / "reproduction/script.py"),
+                    "content": "approval required",
+                }
+                if tool_name == "file.write"
+                else {
+                    "path": str(tmp_path / "reproduction/script.py"),
+                    "old": "before",
+                    "new": "after",
+                }
+            ),
+        ),
+        context,
+    )
+
+    assert stream.decision == PolicyAction.DENY
+    assert stream.rule_id == "prbench.win32_stream_blocked"
+    assert ordinary_absolute.decision == PolicyAction.ASK
+    assert ordinary_absolute.rule_id == "tool.risky_default"
 
 
 def test_visibility_rejects_resolved_file_symlink_into_hidden_tree(tmp_path: Path) -> None:

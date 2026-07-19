@@ -114,8 +114,13 @@ process.run(
 审批不能授予 expected CSV 的直接写入能力。PRBench `PolicyEngine` 在审批处理前，
 对 workspace-relative `data/**/*.csv` 的 `file.write` / `file.edit` 以确定性 rule
 `prbench.direct_csv_mutation_blocked` 拒绝；路径大小写、Windows 分隔符、规范化后的
-路径和既有 visibility / escape / hidden 规则都不能形成绕过。固定 reason 不包含
-contract 数值、文件内容或凭据。对应结构化 feedback 明确引导模型修改或重写
+路径和既有 visibility / escape / hidden 规则都不能形成绕过。原始 path 必须先走
+visibility，再只为 PRBench 分类构造 Win32 alias view：每个 component 去除尾随
+ASCII space/dot 后 casefold；非 drive prefix 的冒号以
+`prbench.win32_stream_blocked` fail closed，覆盖 NTFS ADS/default stream
+`data/output.csv::$DATA`。alias view 不得传给 executor 或改写审批 key，POSIX 上即使
+这些字符可形成独立文件也采用同一跨平台 fail-safe；coding/GAIA 语义保持不变。
+固定 reason 不包含 contract 数值、文件内容或凭据。对应结构化 feedback 明确引导模型修改或重写
 reproduction 脚本并请求 `process.run`，不泛化为向用户索取普通文件写审批。
 
 ### 6.3 `ExecutionJournal`

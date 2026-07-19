@@ -245,6 +245,14 @@ write/edit，大小写、Windows 分隔符、规范化路径与既有 escape/hid
 SHA-256，批准后真实执行建立 provenance，并由既有即时 verifier 在下一轮模型调用前
 返回 `completed`。
 
+独立复审随后指出首版分类仍只做 casefold，未覆盖 Win32 尾随空格/点别名与 NTFS
+ADS。该 Important 被采纳，因为 exact grant 与目标存在性会影响 `Path.resolve()`
+结果，使同一个逻辑目标在不同 workspace 状态下可能得到 ASK 或 DENY。修订保持原
+path 先走 visibility，仅额外构造不进入 executor 的分类 view：逐 component
+`rstrip(" .")` 后 casefold；非盘符冒号 fail closed。确定性 wrong-grant 回放覆盖
+write/edit、多个尾随字符、每层 component、大小写、反斜杠、嵌套路径与
+`data/output.csv::$DATA`，同时证明 coding/GAIA 与正常 drive prefix 不受影响。
+
 ## 仓库平台记录
 
 助教尚未最终确认期末项目应提交到 GitHub 还是 NJU Git。当前为了开发、提交、review 和过程记录顺畅，先使用 GitHub 仓库 `JianingZhangnan/AISE`。如课程后续明确要求 NJU Git，将以 GitHub 仓库完整历史为源迁移或镜像，并在本文件和 `AGENT_LOG.md` 中记录切换原因与关键操作。
