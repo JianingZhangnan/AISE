@@ -61,6 +61,7 @@ def _build_loop(
     configure_registry: Callable[[ToolRegistry], None] | None = None,
     max_steps: int = 12,
     max_tool_calls: int = 10,
+    max_repeated_failures: int = 3,
     max_repeated_actions: int = 3,
     use_completion_verifier: bool = True,
     verify_after_successful_tool: bool = False,
@@ -98,6 +99,7 @@ def _build_loop(
         approval_handler=approval_handler,
         max_steps=max_steps,
         max_tool_calls=max_tool_calls,
+        max_repeated_failures=max_repeated_failures,
         max_repeated_actions=max_repeated_actions,
         completion_verifier=completion_verifier,
         progress_fingerprint=progress_fingerprint,
@@ -376,6 +378,82 @@ def test_skipped_stale_calls_do_not_trigger_repeated_failure_before_feedback_tur
     ]
 
 
+def test_stale_batch_is_neutral_and_preserves_the_prior_failure_cause(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside-stale-root.txt"
+    denied = {
+        "type": "tool_call_requested",
+        "payload": {"tool_name": "file.read", "args": {"path": str(outside)}},
+    }
+    batch = [
+        denied,
+        {
+            "type": "tool_call_requested",
+            "payload": {"tool_name": "file.read", "args": {"path": "ignored-a.txt"}},
+        },
+        {
+            "type": "tool_call_requested",
+            "payload": {"tool_name": "file.read", "args": {"path": "ignored-b.txt"}},
+        },
+    ]
+    result = _build_loop(
+        tmp_path,
+        ScriptedLLM([batch, [denied]]),
+        expected_files=("result.txt",),
+        max_repeated_failures=2,
+        max_tool_calls=5,
+    ).run("retain the causal denial")
+
+    assert result.stopped_reason == "repeated_failure"
+    assert result.terminal_blocker == "policy_blocked"
+
+
+def test_ok_result_with_non_success_feedback_establishes_batch_barrier(tmp_path: Path) -> None:
+    def configure_registry(registry: ToolRegistry) -> None:
+        registry.register(
+            ToolSpec(
+                name="workspace.status",
+                description="Return deliberately truncated evidence",
+                input_schema={"type": "object", "properties": {}},
+                risk_level=ToolRiskLevel.SAFE,
+            ),
+            lambda call: ToolResult(
+                tool_call_id=call.id,
+                status="ok",
+                stdout="partial",
+                truncated=True,
+            ),
+        )
+
+    result = _build_loop(
+        tmp_path,
+        ScriptedLLM(
+            [
+                [
+                    {
+                        "type": "tool_call_requested",
+                        "payload": {"tool_name": "workspace.status", "args": {}},
+                    },
+                    {
+                        "type": "tool_call_requested",
+                        "payload": {
+                            "tool_name": "file.write",
+                            "args": {"path": "must-not-run.txt", "content": "stale"},
+                        },
+                    },
+                ],
+                [{"type": "incomplete", "payload": {"reason": "feedback observed"}}],
+            ]
+        ),
+        expected_files=("result.txt",),
+        configure_registry=configure_registry,
+    ).run("respect truncated feedback")
+
+    assert result.stopped_reason == "incomplete"
+    assert not (tmp_path / "must-not-run.txt").exists()
+    outputs = [event for event in result.events if event.type == AgentEventType.TOOL_CALL_OUTPUT]
+    assert [event.payload["status"] for event in outputs] == ["ok", "stale_tool_batch"]
+
+
 def test_verifier_backed_budget_warning_requires_only_missing_artifact_work(
     tmp_path: Path,
 ) -> None:
@@ -573,6 +651,9 @@ def test_interleaved_success_cycle_stops_within_unchanged_progress_epoch(
             read("a.txt"),
             read("b.txt"),
             read("c.txt"),
+            read("a.txt"),
+            read("b.txt"),
+            read("c.txt"),
             [{"type": "assistant_final", "payload": {"text": "must not run"}}],
         ]
     )
@@ -583,14 +664,33 @@ def test_interleaved_success_cycle_stops_within_unchanged_progress_epoch(
         llm,
         expected_files=tracked,
         progress_fingerprint=lambda: _artifact_fingerprint(tmp_path, tracked),
-        max_tool_calls=6,
+        max_tool_calls=9,
     ).run("inspect without looping")
 
     assert result.stopped_reason == "repeated_no_progress"
     assert result.terminal_blocker == "repeated_no_progress"
     assert len(
         [event for event in result.events if event.type == AgentEventType.TOOL_CALL_REQUESTED]
-    ) == 6
+    ) == 9
+
+
+def test_no_progress_cycles_require_the_configured_number_of_contiguous_repeats(
+    tmp_path: Path,
+) -> None:
+    loop = _build_loop(
+        tmp_path,
+        ScriptedLLM([]),
+        expected_files=("result.txt",),
+        max_repeated_actions=3,
+    )
+
+    assert loop._progress_epoch_repeats(["A", "B", "A", "C", "A"]) is False
+    assert loop._progress_epoch_repeats(["A", "B", "A", "B"]) is False
+    assert loop._progress_epoch_repeats(["A", "B", "A", "B", "A", "B"]) is True
+    assert loop._progress_epoch_repeats(["A", "B", "C", "A", "B", "C"]) is False
+    assert loop._progress_epoch_repeats(
+        ["A", "B", "C", "A", "B", "C", "A", "B", "C"]
+    ) is True
 
 
 def test_repeated_success_with_verifier_does_not_use_unverified_legacy_final(
@@ -914,6 +1014,54 @@ def test_tool_budget_with_failed_verifier_does_not_request_successful_final(tmp_
     assert not any(event.type == AgentEventType.ASSISTANT_FINAL for event in result.events)
 
 
+def test_last_budgeted_success_verifies_and_backfeeds_exactly_once(tmp_path: Path) -> None:
+    (tmp_path / "status.txt").write_text("ready", encoding="utf-8")
+    verifier_calls = 0
+
+    def failed_verifier() -> VerificationResult:
+        nonlocal verifier_calls
+        verifier_calls += 1
+        return VerificationResult(
+            ok=False,
+            issues=(
+                VerificationIssue(
+                    code="missing_artifact",
+                    path="result.txt",
+                    message="result missing",
+                ),
+            ),
+        )
+
+    result = _build_loop(
+        tmp_path,
+        ScriptedLLM(
+            [
+                [
+                    {
+                        "type": "tool_call_requested",
+                        "payload": {"tool_name": "file.read", "args": {"path": "status.txt"}},
+                    }
+                ]
+            ]
+        ),
+        expected_files=("result.txt",),
+        completion_verifier=failed_verifier,
+        verify_after_successful_tool=True,
+        max_tool_calls=1,
+    ).run("use the final call")
+
+    assert result.stopped_reason == "artifact_verification_failed"
+    assert verifier_calls == 1
+    assert len(
+        [
+            event
+            for event in result.events
+            if event.type == AgentEventType.FEEDBACK_SIGNAL
+            and event.payload.get("kind") == "artifact_verification_failed"
+        ]
+    ) == 1
+
+
 def test_tool_budget_with_successful_verifier_completes_without_synthetic_final(tmp_path: Path) -> None:
     (tmp_path / "result.txt").write_text("ready", encoding="utf-8")
     llm = ScriptedLLM(
@@ -1108,6 +1256,140 @@ def test_successful_script_mutation_advances_past_direct_csv_policy_blocker(
     assert result.stopped_reason == "artifact_verification_failed"
     assert result.terminal_blocker == "tool_budget_exhausted"
     assert (tmp_path / "reproduction" / "run.py").is_file()
+
+
+def test_unrelated_mutation_does_not_clear_direct_csv_policy_blocker(tmp_path: Path) -> None:
+    result = _build_loop(
+        tmp_path,
+        ScriptedLLM(
+            [
+                [
+                    {
+                        "type": "tool_call_requested",
+                        "payload": {
+                            "tool_name": "file.write",
+                            "args": {"path": "data/output.csv", "content": "value\n1\n"},
+                        },
+                    }
+                ],
+                [
+                    {
+                        "type": "tool_call_requested",
+                        "payload": {
+                            "tool_name": "file.write",
+                            "args": {"path": "notes.txt", "content": "unrelated"},
+                        },
+                    }
+                ],
+            ]
+        ),
+        expected_files=("data/output.csv",),
+        max_tool_calls=2,
+    ).run("generate the CSV through reproduction code")
+
+    assert result.terminal_blocker == "policy_blocked"
+
+
+def test_different_process_success_does_not_clear_original_approval_blocker(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "reproduction").mkdir()
+    (tmp_path / "reproduction" / "first.py").write_text("print('first')\n", encoding="utf-8")
+    (tmp_path / "reproduction" / "second.py").write_text("print('second')\n", encoding="utf-8")
+
+    def configure_registry(registry: ToolRegistry) -> None:
+        registry.register(
+            ToolSpec(
+                name="process.run",
+                description="Test process execution",
+                input_schema={"type": "object", "properties": {}},
+                risk_level=ToolRiskLevel.RISKY,
+                mutates_state=True,
+            ),
+            lambda call: ToolResult(tool_call_id=call.id, status="ok", stdout="ran"),
+        )
+
+    approvals = iter((False, True))
+
+    def process(script: str) -> list[dict[str, object]]:
+        return [
+            {
+                "type": "tool_call_requested",
+                "payload": {
+                    "tool_name": "process.run",
+                    "args": {"argv": ["python", script], "cwd": "."},
+                },
+            }
+        ]
+
+    result = _build_loop(
+        tmp_path,
+        ScriptedLLM([process("reproduction/first.py"), process("reproduction/second.py")]),
+        expected_files=("data/output.csv",),
+        configure_registry=configure_registry,
+        approval_handler=lambda call, decision: next(approvals),
+        max_tool_calls=2,
+    ).run("run only the originally approved action")
+
+    assert result.terminal_blocker == "approval_required"
+
+
+def test_rewritten_script_does_not_clear_original_approval_blocker(tmp_path: Path) -> None:
+    (tmp_path / "reproduction").mkdir()
+    script = tmp_path / "reproduction" / "run.py"
+    script.write_text("print('old')\n", encoding="utf-8")
+
+    def configure_registry(registry: ToolRegistry) -> None:
+        registry.register(
+            ToolSpec(
+                name="process.run",
+                description="Test process execution",
+                input_schema={"type": "object", "properties": {}},
+                risk_level=ToolRiskLevel.RISKY,
+                mutates_state=True,
+            ),
+            lambda call: ToolResult(tool_call_id=call.id, status="ok", stdout="ran"),
+        )
+
+    process = [
+        {
+            "type": "tool_call_requested",
+            "payload": {
+                "tool_name": "process.run",
+                "args": {"argv": ["python", "reproduction/run.py"], "cwd": "."},
+            },
+        }
+    ]
+    approvals = iter((False, True))
+    result = _build_loop(
+        tmp_path,
+        ScriptedLLM(
+            [
+                process,
+                [
+                    {
+                        "type": "tool_call_requested",
+                        "payload": {
+                            "tool_name": "file.write",
+                            "args": {
+                                "path": "reproduction/run.py",
+                                "content": "print('new')\n",
+                            },
+                        },
+                    }
+                ],
+                process,
+            ]
+        ),
+        expected_files=("data/output.csv",),
+        configure_registry=configure_registry,
+        approval_handler=lambda call, decision: (
+            True if call.tool_name == "file.write" else next(approvals)
+        ),
+        max_tool_calls=3,
+    ).run("run the approved script identity")
+
+    assert result.terminal_blocker == "approval_required"
 
 
 def test_approval_required_survives_read_only_and_unrelated_mutation_success(

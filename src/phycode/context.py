@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from phycode.conversation import project_conversation
-from phycode.models import AgentEvent, MemoryEntry, Session, ToolSpec
+from phycode.models import AgentEvent, AgentEventType, MemoryEntry, Session, ToolSpec
 from phycode.redaction import redact_obj, redact_text
 
 CODING_SYSTEM_PROMPT = (
@@ -62,10 +62,11 @@ class MemoryStore:
         return cls(None)
 
     def append(self, entry: MemoryEntry) -> None:
+        safe_entry = MemoryEntry.model_validate(redact_obj(entry.model_dump(mode="json")))
         if self.path is None:
-            self._ephemeral_entries.append(entry)
+            self._ephemeral_entries.append(safe_entry)
             return
-        payload = redact_obj(entry.model_dump(mode="json"))
+        payload = safe_entry.model_dump(mode="json")
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
@@ -106,9 +107,18 @@ class ContextBuilder:
         self._turn_input: str | None = None
         self._turn_start_index = 0
 
-    def begin_turn(self, current_input: str) -> None:
+    def begin_turn(self, current_input: str, *, persist: bool = True) -> AgentEvent | None:
         self._turn_input = current_input
         self._turn_start_index = len(self.session_store.events)
+        if not persist:
+            return None
+        event = AgentEvent(
+            session_id=self.session_store.session.id,
+            type=AgentEventType.USER_MESSAGE,
+            payload={"text": redact_text(current_input)},
+        )
+        self.session_store.add_event(event)
+        return event
 
     def build(self, current_input: str, tools: list[ToolSpec] | None = None) -> list[dict[str, object]]:
         if self._turn_input != current_input:
@@ -151,7 +161,11 @@ class ContextBuilder:
         recent_budget = max(0, self.max_chars - len(content) - len(user_input))
         turn_start = min(self._turn_start_index, len(self.session_store.events))
         before_turn = self.session_store.events[:turn_start]
-        after_turn = self.session_store.events[turn_start:]
+        after_start = turn_start + 1 if (
+            turn_start < len(self.session_store.events)
+            and self.session_store.events[turn_start].type == AgentEventType.USER_MESSAGE
+        ) else turn_start
+        after_turn = self.session_store.events[after_start:]
         if before_turn and after_turn:
             before_budget = recent_budget // 3
         elif before_turn:

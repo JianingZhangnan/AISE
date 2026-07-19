@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from phycode.context import GAIA_SYSTEM_PROMPT, ContextBuilder, MemoryStore, SessionStore
@@ -43,6 +44,41 @@ def test_memory_store_secret_stays_valid_json(tmp_path: Path):
     entries = memory.entries()  # must not raise json.JSONDecodeError
     assert len(entries) == 1
     assert "sk-abcdef1234567890" not in memory.summary()
+
+
+def test_key_aware_redaction_reaches_trace_context_and_memory(tmp_path: Path) -> None:
+    session = Session(workspace_root=str(tmp_path), mode=SessionMode.NON_INTERACTIVE)
+    store = SessionStore(session)
+    trace = TraceStore(tmp_path / "traces")
+    event = AgentEvent(
+        session_id=session.id,
+        type=AgentEventType.FEEDBACK_SIGNAL,
+        payload={
+            "kind": "tool_error",
+            "tool_args": {"api_key": "a1b2c3d4"},
+            "tool_output": {"authorization": "eeff0011"},
+            "state": {"client_secret": "11223344"},
+        },
+    )
+    store.add_event(event)
+    trace.append(event)
+    memory = MemoryStore(tmp_path / "memory.jsonl")
+    memory.append(
+        MemoryEntry(
+            category=MemoryCategory.PROJECT_FACT,
+            content="password=55667788",
+            source="user",
+        )
+    )
+
+    trace_payload = json.loads(next((tmp_path / "traces").glob("*.jsonl")).read_text())
+    rendered = json.dumps(ContextBuilder(store, memory).build("continue"))
+    memory_line = json.loads((tmp_path / "memory.jsonl").read_text())
+
+    for secret in ("a1b2c3d4", "eeff0011", "11223344", "55667788"):
+        assert secret not in json.dumps(trace_payload)
+        assert secret not in rendered
+        assert secret not in json.dumps(memory_line)
 
 
 def test_context_redacts_current_input_before_llm_messages(tmp_path: Path):
@@ -219,6 +255,44 @@ def test_context_compacts_old_successes_and_latest_actionable_feedback(tmp_path:
     assert '"path": "target.txt"' in rendered
     assert '"success_count": 2' in rendered
     assert "Rewrite the reproduction script and run it" in rendered
+
+
+def test_actionable_feedback_coalesces_by_cause_without_stale_eviction(tmp_path: Path) -> None:
+    session = Session(workspace_root=str(tmp_path), mode=SessionMode.NON_INTERACTIVE)
+    store = SessionStore(session)
+    builder = ContextBuilder(store, MemoryStore.ephemeral(), max_chars=8_000)
+    builder.begin_turn("first")
+    store.add_event(
+        AgentEvent(
+            session_id=session.id,
+            type=AgentEventType.FEEDBACK_SIGNAL,
+            payload={"kind": "policy_blocked", "summary": "root policy cause"},
+        )
+    )
+    for index in range(5):
+        store.add_event(
+            AgentEvent(
+                session_id=session.id,
+                type=AgentEventType.FEEDBACK_SIGNAL,
+                payload={"kind": "stale_tool_batch", "summary": f"stale {index}"},
+            )
+        )
+    builder.begin_turn("second")
+    for summary in ("old verifier cause", "new verifier cause"):
+        store.add_event(
+            AgentEvent(
+                session_id=session.id,
+                type=AgentEventType.FEEDBACK_SIGNAL,
+                payload={"kind": "artifact_verification_failed", "summary": summary},
+            )
+        )
+
+    rendered = str(builder.build("second"))
+
+    assert "root policy cause" in rendered
+    assert "new verifier cause" in rendered
+    assert "old verifier cause" not in rendered
+    assert "stale 4" not in rendered
 
 
 def test_context_projection_recursively_redacts_structured_state(tmp_path: Path) -> None:

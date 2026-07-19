@@ -9,7 +9,30 @@ SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(OPENAI_API_KEY=)[^\s]+", re.IGNORECASE), r"\1[REDACTED_SECRET]"),
     (re.compile(r"(ANTHROPIC_API_KEY=)[^\s]+", re.IGNORECASE), r"\1[REDACTED_SECRET]"),
     (re.compile(r"(api[_-]?key['\"]?\s*[:=]\s*['\"]?)[^'\"\s]+", re.IGNORECASE), r"\1[REDACTED_SECRET]"),
+    (
+        re.compile(
+            r"((?:password|token|secret|authorization)['\"]?\s*[:=]\s*['\"]?)[^'\"\s]+",
+            re.IGNORECASE,
+        ),
+        r"\1[REDACTED_SECRET]",
+    ),
 ]
+
+_REDACTED_SECRET = "[REDACTED_SECRET]"
+
+
+def _is_sensitive_key(key: object) -> bool:
+    if not isinstance(key, str):
+        return False
+    normalized = key.casefold().replace("-", "_")
+    if normalized == "credential_ref":
+        return False
+    compact = normalized.replace("_", "")
+    if compact.endswith("apikey"):
+        return True
+    return normalized in {"token", "secret", "password", "authorization"} or normalized.endswith(
+        ("_token", "_secret", "_password", "_authorization")
+    )
 
 
 def redact_text(text: str) -> str:
@@ -29,7 +52,10 @@ def redact_obj(value: Any) -> Any:
     if isinstance(value, str):
         return redact_text(value)
     if isinstance(value, dict):
-        return {key: redact_obj(item) for key, item in value.items()}
+        return {
+            key: _REDACTED_SECRET if _is_sensitive_key(key) else redact_obj(item)
+            for key, item in value.items()
+        }
     if isinstance(value, list):
         return [redact_obj(item) for item in value]
     return value

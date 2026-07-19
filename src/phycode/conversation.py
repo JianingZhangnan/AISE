@@ -69,6 +69,11 @@ def _tool_call_message(event: AgentEvent, call_id: str) -> dict[str, object]:
 
 
 def _event_message(event: AgentEvent) -> dict[str, object] | None:
+    if event.type == AgentEventType.USER_MESSAGE:
+        return {
+            "role": "user",
+            "content": f"User: {redact_text(str(event.payload.get('text', '')))}",
+        }
     if event.type in {AgentEventType.ASSISTANT_COMMENTARY, AgentEventType.ASSISTANT_FINAL}:
         return {
             "role": "assistant",
@@ -85,9 +90,33 @@ def _event_message(event: AgentEvent) -> dict[str, object] | None:
     return None
 
 
+def _coalesced_actionable_feedback(events: Sequence[AgentEvent]) -> list[AgentEvent]:
+    turn = 0
+    coalesced: OrderedDict[tuple[object, ...], AgentEvent] = OrderedDict()
+    for event in events:
+        if event.type == AgentEventType.USER_MESSAGE:
+            turn += 1
+            continue
+        if event.type != AgentEventType.FEEDBACK_SIGNAL:
+            continue
+        kind = str(event.payload.get("kind", ""))
+        if kind in {"success", "stale_tool_batch"}:
+            continue
+        cause = str(event.payload.get("cause") or kind)
+        key: tuple[object, ...]
+        if kind == "artifact_verification_failed":
+            key = ("global_verifier", cause)
+        else:
+            key = (turn, cause)
+        coalesced.pop(key, None)
+        coalesced[key] = event
+    return list(coalesced.values())
+
+
 def _conversation_units(events: Sequence[AgentEvent]) -> list[list[dict[str, object]]]:
     units: list[list[dict[str, object]]] = []
     pending: deque[tuple[str, dict[str, object]]] = deque()
+    actionable_ids = {event.id for event in _coalesced_actionable_feedback(events)}
     for event in events:
         if event.type == AgentEventType.TOOL_CALL_REQUESTED:
             call_id = _call_id(event)
@@ -112,6 +141,12 @@ def _conversation_units(events: Sequence[AgentEvent]) -> list[list[dict[str, obj
                 units.append(
                     [{"role": "user", "content": json.dumps({"tool_evidence": json.loads(content)})}]
                 )
+            continue
+        if (
+            event.type == AgentEventType.FEEDBACK_SIGNAL
+            and str(event.payload.get("kind", "")) != "success"
+            and event.id not in actionable_ids
+        ):
             continue
         message = _event_message(event)
         if message is not None:
@@ -139,7 +174,6 @@ def _conversation_units(events: Sequence[AgentEvent]) -> list[list[dict[str, obj
 def _execution_state(events: Sequence[AgentEvent]) -> dict[str, object]:
     pending: deque[AgentEvent] = deque()
     successes: OrderedDict[str, dict[str, object]] = OrderedDict()
-    actionable_feedback: deque[dict[str, object]] = deque(maxlen=3)
     latest_outputs: deque[dict[str, object]] = deque(maxlen=2)
 
     for event in events:
@@ -162,15 +196,15 @@ def _execution_state(events: Sequence[AgentEvent]) -> dict[str, object]:
             action["success_count"] = previous_count + 1 if isinstance(previous_count, int) else 1
             successes[key] = action
             continue
-        if event.type == AgentEventType.FEEDBACK_SIGNAL:
-            kind = str(event.payload.get("kind", ""))
-            if kind != "success":
-                actionable_feedback.append(_compact_value(event.payload))
+    actionable_feedback = [
+        _compact_value(event.payload)
+        for event in _coalesced_actionable_feedback(events)[-3:]
+    ]
 
     return _compact_value(
         {
             "successful_actions": list(successes.values())[-20:],
-            "latest_actionable_feedback": list(actionable_feedback),
+            "latest_actionable_feedback": actionable_feedback,
             "latest_tool_outputs": list(latest_outputs),
         }
     )

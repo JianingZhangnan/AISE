@@ -13,6 +13,7 @@ def new_id(prefix: str) -> str:
 
 
 class AgentEventType(str, Enum):
+    USER_MESSAGE = "user_message"
     ASSISTANT_COMMENTARY = "assistant_commentary"
     REASONING_SUMMARY = "reasoning_summary"
     TOOL_CALL_REQUESTED = "tool_call_requested"

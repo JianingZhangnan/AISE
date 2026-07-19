@@ -4,6 +4,7 @@ import hashlib
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 from phycode.context import ContextBuilder, SessionStore
@@ -12,6 +13,7 @@ from phycode.feedback import artifact_verification_feedback, classify_feedback
 from phycode.llm import LLMClient
 from phycode.models import AgentEvent, AgentEventType, ToolCall, ToolResult
 from phycode.policy import PolicyContext
+from phycode.redaction import redact_obj
 from phycode.tools.base import ApprovalHandler, ToolRuntime
 from phycode.trace import TraceStore
 
@@ -25,6 +27,7 @@ _FAILURE_KINDS = {
     "policy_blocked",
     "policy_requires_approval",
 }
+_NON_ACTIONABLE_FEEDBACK_KINDS = {"success", "stale_tool_batch"}
 # Provider events that should terminate the loop and defer to the stop controller.
 _TERMINAL_EVENT_REASONS = {
     AgentEventType.ERROR: "error",
@@ -46,6 +49,20 @@ class _VerificationOutcome:
     ok: bool
     feedback_event: AgentEvent | None = None
     fatal: bool = False
+
+
+@dataclass(frozen=True)
+class _ActionIdentity:
+    tool_name: str
+    args_sha256: str
+    script_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class _CausalBlocker:
+    reason: str
+    rule_id: str
+    action: _ActionIdentity
 
 
 class CompletionVerification(Protocol):
@@ -94,7 +111,9 @@ class AgentLoop:
 
     def run(self, user_input: str) -> AgentRunResult:
         all_events: list[AgentEvent] = []
-        self.context_builder.begin_turn(user_input)
+        user_event = self.context_builder.begin_turn(user_input)
+        if user_event is not None:
+            self.trace_store.append(user_event)
         if self.max_tool_calls <= 0:
             return self._finish_tool_budget(user_input, all_events, None)
         final_text: str | None = None
@@ -106,7 +125,7 @@ class AgentLoop:
         last_progress_fingerprint: str | None = None
         progress_epoch_signatures: list[str] = []
         tool_call_count = 0
-        current_blocker: str | None = None
+        current_blocker: _CausalBlocker | None = None
         tool_budget_warning_at = max(1, self.max_tool_calls - 2)
 
         for _step in range(self.max_steps):
@@ -122,8 +141,8 @@ class AgentLoop:
             feedback_barrier = False
             for event in events:
                 normalized = event.model_copy(update={"session_id": self.session_store.session.id})
-                self._record(normalized)
-                all_events.append(normalized)
+                recorded = self._record(normalized)
+                all_events.append(recorded)
 
                 if normalized.type == AgentEventType.ASSISTANT_FINAL:
                     candidate_text = str(normalized.payload.get("text", ""))
@@ -165,6 +184,7 @@ class AgentLoop:
 
                 if normalized.type == AgentEventType.TOOL_CALL_REQUESTED:
                     tool_call_count += 1
+                    action_identity = self._action_identity(normalized)
                     skipped_by_barrier = feedback_barrier
                     tool_events = (
                         self._skip_stale_tool_event(normalized)
@@ -176,6 +196,7 @@ class AgentLoop:
                         current_blocker,
                         normalized,
                         tool_events,
+                        action_identity,
                     )
                     action_result_key = self._successful_action_result_key(normalized, tool_events)
                     if not skipped_by_barrier and self._establishes_feedback_barrier(
@@ -183,7 +204,11 @@ class AgentLoop:
                         tool_events,
                     ):
                         feedback_barrier = True
-                    if self.verify_after_successful_tool and action_result_key is not None:
+                    if (
+                        self.verify_after_successful_tool
+                        and action_result_key is not None
+                        and tool_call_count < self.max_tool_calls
+                    ):
                         verification = self._verify_completion()
                         if verification.ok:
                             return AgentRunResult(None, all_events, "completed")
@@ -222,6 +247,7 @@ class AgentLoop:
                             AgentEventType.FEEDBACK_SIGNAL,
                             {
                                 "kind": "tool_budget_near_limit",
+                                "cause": "tool_budget",
                                 "summary": summary,
                                 "evidence": {"used": tool_call_count, "limit": self.max_tool_calls},
                                 "retryable": retryable,
@@ -230,6 +256,14 @@ class AgentLoop:
                         )
                         self._record(budget_event)
                         all_events.append(budget_event)
+                    if skipped_by_barrier:
+                        if tool_call_count >= self.max_tool_calls:
+                            return self._finish_tool_budget(
+                                user_input,
+                                all_events,
+                                current_blocker,
+                            )
+                        continue
                     if action_result_key is not None:
                         try:
                             progress_fingerprint = (
@@ -291,7 +325,8 @@ class AgentLoop:
                                 final_text,
                                 all_events,
                                 "repeated_failure",
-                                current_blocker or "artifact_verification_failed",
+                                self._blocker_reason(current_blocker)
+                                or "artifact_verification_failed",
                             )
         if self.completion_verifier is not None:
             verification = self._verify_completion()
@@ -312,7 +347,7 @@ class AgentLoop:
         self,
         user_input: str,
         all_events: list[AgentEvent],
-        current_blocker: str | None,
+        current_blocker: _CausalBlocker | None,
     ) -> AgentRunResult:
         if self.completion_verifier is None:
             return self._finalize_from_evidence(user_input, all_events)
@@ -333,7 +368,7 @@ class AgentLoop:
             None,
             all_events,
             "artifact_verification_failed",
-            current_blocker or "tool_budget_exhausted",
+            self._blocker_reason(current_blocker) or "tool_budget_exhausted",
         )
 
     def _verify_completion(self) -> _VerificationOutcome:
@@ -352,10 +387,16 @@ class AgentLoop:
                 }
             ]
             signal = artifact_verification_feedback(issues)
-            event = self._new_event(AgentEventType.FEEDBACK_SIGNAL, signal.model_dump(mode="json"))
+            event = self._new_event(
+                AgentEventType.FEEDBACK_SIGNAL,
+                {**signal.model_dump(mode="json"), "cause": "completion_verifier"},
+            )
             return _VerificationOutcome(ok=False, feedback_event=event, fatal=True)
         signal = artifact_verification_feedback(issues)
-        event = self._new_event(AgentEventType.FEEDBACK_SIGNAL, signal.model_dump(mode="json"))
+        event = self._new_event(
+            AgentEventType.FEEDBACK_SIGNAL,
+            {**signal.model_dump(mode="json"), "cause": "completion_verifier"},
+        )
         return _VerificationOutcome(ok=False, feedback_event=event)
 
     def _finalize_from_evidence(self, user_input: str, all_events: list[AgentEvent]) -> AgentRunResult:
@@ -364,7 +405,7 @@ class AgentLoop:
             "Tool use is now disabled. Do not emit a tool call, search expression, or plan. "
             "Using only the evidence already gathered, return the best-supported answer now in the requested format."
         )
-        self.context_builder.begin_turn(finalization_input)
+        self.context_builder.begin_turn(finalization_input, persist=False)
         messages = self.context_builder.build(finalization_input, [])
         try:
             events = self.llm.generate(messages, [])
@@ -403,12 +444,11 @@ class AgentLoop:
     def _progress_epoch_repeats(self, signatures: list[str]) -> bool:
         if not signatures:
             return False
-        if signatures.count(signatures[-1]) >= self.max_repeated_actions:
-            return True
-        for cycle_length in range(2, len(signatures) // 2 + 1):
-            if (
-                signatures[-2 * cycle_length : -cycle_length]
-                == signatures[-cycle_length:]
+        required_repetitions = max(1, self.max_repeated_actions)
+        for cycle_length in range(1, len(signatures) // required_repetitions + 1):
+            cycle = signatures[-cycle_length:]
+            if signatures[-cycle_length * required_repetitions :] == (
+                cycle * required_repetitions
             ):
                 return True
         return False
@@ -429,17 +469,22 @@ class AgentLoop:
             AgentEventType.TOOL_CALL_OUTPUT, runtime_result.tool_result.model_dump(mode="json")
         )
         feedback_events = [
-            self._new_event(AgentEventType.FEEDBACK_SIGNAL, signal.model_dump(mode="json"))
+            self._new_event(
+                AgentEventType.FEEDBACK_SIGNAL,
+                {
+                    **signal.model_dump(mode="json"),
+                    "cause": (
+                        f"{call.tool_name}:{runtime_result.policy.rule_id}:{signal.kind.value}"
+                    ),
+                },
+            )
             for signal in classify_feedback(
                 runtime_result.tool_result,
                 profile=self.policy_context.profile_spec.profile,
                 policy_rule_id=runtime_result.policy.rule_id,
             )
         ]
-        emitted = [policy_event, result_event, *feedback_events]
-        for item in emitted:
-            self._record(item)
-        return emitted
+        return [self._record(item) for item in [policy_event, result_event, *feedback_events]]
 
     def _skip_stale_tool_event(self, event: AgentEvent) -> list[AgentEvent]:
         result = ToolResult(
@@ -461,16 +506,19 @@ class AgentLoop:
                 profile=self.policy_context.profile_spec.profile,
             )
         ]
-        emitted = [result_event, *feedback_events]
-        for item in emitted:
-            self._record(item)
-        return emitted
+        return [self._record(item) for item in [result_event, *feedback_events]]
 
     def _establishes_feedback_barrier(
         self,
         request: AgentEvent,
         tool_events: list[AgentEvent],
     ) -> bool:
+        if any(
+            event.type == AgentEventType.FEEDBACK_SIGNAL
+            and str(event.payload.get("kind", "")) not in _NON_ACTIONABLE_FEEDBACK_KINDS
+            for event in tool_events
+        ):
+            return True
         output = next(
             (event for event in tool_events if event.type == AgentEventType.TOOL_CALL_OUTPUT),
             None,
@@ -492,10 +540,11 @@ class AgentLoop:
 
     def _updated_blocker(
         self,
-        current: str | None,
+        current: _CausalBlocker | None,
         request: AgentEvent,
         tool_events: list[AgentEvent],
-    ) -> str | None:
+        action: _ActionIdentity,
+    ) -> _CausalBlocker | None:
         output = next(
             (event for event in tool_events if event.type == AgentEventType.TOOL_CALL_OUTPUT),
             None,
@@ -504,32 +553,108 @@ class AgentLoop:
             return current
         status = str(output.payload.get("status", ""))
         tool_name = str(request.payload.get("tool_name", ""))
-        spec = self.tool_runtime.registry.spec_for(tool_name)
-        mutates_state = bool(spec is not None and spec.mutates_state)
+        policy = next(
+            (event for event in tool_events if event.type == AgentEventType.POLICY_DECISION),
+            None,
+        )
+        rule_id = str(policy.payload.get("rule_id", "unknown")) if policy is not None else "unknown"
         if status == "policy_blocked":
-            return "policy_blocked"
+            return _CausalBlocker("policy_blocked", rule_id, action)
         if status == "policy_requires_approval":
-            return "approval_required"
+            return _CausalBlocker("approval_required", rule_id, action)
         if tool_name == "process.run" and status in {
             "command_failed",
             "timeout",
             "tool_error",
             "invalid_tool_args",
         }:
-            return "process_failed"
+            return _CausalBlocker("process_failed", rule_id, action)
         if status == "ok":
-            if current == "policy_blocked" and mutates_state:
+            if (
+                current is not None
+                and current.reason == "policy_blocked"
+                and current.rule_id == "prbench.direct_csv_mutation_blocked"
+                and self._is_reproduction_script_mutation(request)
+            ):
                 return None
-            if current == "approval_required" and tool_name == "process.run":
-                return None
-            if current == "process_failed" and tool_name == "process.run":
+            if (
+                current is not None
+                and current.reason in {"approval_required", "process_failed"}
+                and current.action == action
+            ):
                 return None
         return current
 
-    def _new_event(self, event_type: AgentEventType, payload: dict) -> AgentEvent:
-        return AgentEvent(session_id=self.session_store.session.id, type=event_type, payload=payload)
+    @staticmethod
+    def _blocker_reason(blocker: _CausalBlocker | None) -> str | None:
+        return blocker.reason if blocker is not None else None
 
-    def _record(self, event: AgentEvent) -> None:
+    def _action_identity(self, request: AgentEvent) -> _ActionIdentity:
+        tool_name = str(request.payload.get("tool_name", ""))
+        args = dict(request.payload.get("args", {}))
+        encoded = json.dumps(args, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+        script_sha256 = self._process_script_sha256(args) if tool_name == "process.run" else None
+        return _ActionIdentity(
+            tool_name=tool_name,
+            args_sha256=hashlib.sha256(encoded).hexdigest(),
+            script_sha256=script_sha256,
+        )
+
+    def _process_script_sha256(self, args: dict[str, Any]) -> str | None:
+        argv = args.get("argv")
+        if not isinstance(argv, list) or len(argv) < 2 or not isinstance(argv[1], str):
+            return None
+        cwd_value = args.get("cwd", ".")
+        if not isinstance(cwd_value, str):
+            return None
+        workspace = self.policy_context.workspace_root.resolve()
+        try:
+            cwd = Path(cwd_value)
+            if not cwd.is_absolute():
+                cwd = workspace / cwd
+            cwd = cwd.resolve(strict=False)
+            cwd.relative_to(workspace)
+            script = Path(argv[1])
+            if not script.is_absolute():
+                script = cwd / script
+            script = script.resolve(strict=False)
+            script.relative_to(workspace)
+            if not script.is_file():
+                return None
+            return hashlib.sha256(script.read_bytes()).hexdigest()
+        except (OSError, RuntimeError, ValueError):
+            return None
+
+    def _is_reproduction_script_mutation(self, request: AgentEvent) -> bool:
+        if str(request.payload.get("tool_name", "")) not in {"file.write", "file.edit"}:
+            return False
+        path_value = request.payload.get("args", {}).get("path")
+        if not isinstance(path_value, str):
+            return False
+        workspace = self.policy_context.workspace_root.resolve()
+        try:
+            candidate = Path(path_value)
+            if not candidate.is_absolute():
+                candidate = workspace / candidate
+            relative = candidate.resolve(strict=False).relative_to(workspace)
+        except (OSError, RuntimeError, ValueError):
+            return False
+        return (
+            len(relative.parts) >= 2
+            and relative.parts[0].casefold() == "reproduction"
+            and relative.suffix.casefold() == ".py"
+        )
+
+    def _new_event(self, event_type: AgentEventType, payload: dict) -> AgentEvent:
+        return AgentEvent(
+            session_id=self.session_store.session.id,
+            type=event_type,
+            payload=redact_obj(payload),
+        )
+
+    def _record(self, event: AgentEvent) -> AgentEvent:
         projected = project_agent_event(event, self.policy_context.workspace_root.resolve())
-        self.session_store.add_event(projected)
-        self.trace_store.append(projected)
+        safe = projected.model_copy(update={"payload": redact_obj(projected.payload)})
+        self.session_store.add_event(safe)
+        self.trace_store.append(safe)
+        return safe

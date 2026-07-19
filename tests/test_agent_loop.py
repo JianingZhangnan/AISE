@@ -55,6 +55,36 @@ def test_agent_routes_tool_call_and_then_final(tmp_path: Path):
     assert any(event.type == AgentEventType.FEEDBACK_SIGNAL for event in result.events)
 
 
+def test_agent_result_redacts_sensitive_keys_in_feedback_and_tool_args(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("hello", encoding="utf-8")
+    result = build_loop(
+        tmp_path,
+        ScriptedLLM(
+            [
+                [
+                    {
+                        "type": "feedback_signal",
+                        "payload": {"kind": "tool_error", "token": "aabbccdd"},
+                    },
+                    {
+                        "type": "tool_call_requested",
+                        "payload": {
+                            "tool_name": "file.read",
+                            "args": {"path": "README.md", "api_key": "1122aabb"},
+                        },
+                    },
+                ],
+                [{"type": "incomplete", "payload": {"reason": "done"}}],
+            ]
+        ),
+    ).run("inspect")
+
+    rendered = str([event.model_dump(mode="json") for event in result.events])
+    assert "aabbccdd" not in rendered
+    assert "1122aabb" not in rendered
+    assert "REDACTED_SECRET" in rendered
+
+
 def test_agent_preserves_original_user_input_after_tool_turn(tmp_path: Path):
     (tmp_path / "README.md").write_text("hello", encoding="utf-8")
 
@@ -107,6 +137,11 @@ def test_reused_loop_orders_new_user_turn_after_previous_assistant_history(tmp_p
     loop.run("second turn")
 
     second_messages = llm.messages[1]
+    first_user_index = next(
+        index
+        for index, message in enumerate(second_messages)
+        if message["role"] == "user" and "first turn" in str(message.get("content", ""))
+    )
     previous_assistant_index = next(
         index
         for index, message in enumerate(second_messages)
@@ -117,7 +152,10 @@ def test_reused_loop_orders_new_user_turn_after_previous_assistant_history(tmp_p
         for index, message in enumerate(second_messages)
         if message["role"] == "user" and "second turn" in str(message.get("content", ""))
     )
-    assert previous_assistant_index < current_user_index
+    assert first_user_index < previous_assistant_index < current_user_index
+    assert [event.type.value for event in loop.session_store.events].count("user_message") == 2
+    trace_events = loop.trace_store.read_events_raw(loop.session_store.session.id)
+    assert [event["type"] for event in trace_events].count("user_message") == 2
 
 
 AUTO_APPROVE = lambda call, decision: True  # noqa: E731
