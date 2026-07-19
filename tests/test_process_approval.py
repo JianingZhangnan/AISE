@@ -4,15 +4,18 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
 
 from phycode.approval import ApprovalManifest
+from phycode.execution import ExecutionJournal
 from phycode.llm import EchoLLM
-from phycode.models import AgentProfile, PolicyAction, SessionMode, ToolCall
+from phycode.models import AgentProfile, PolicyAction, PolicyDecision, SessionMode, ToolCall
 from phycode.policy import PolicyContext, PolicyEngine
 from phycode.profiles import profile_spec
 from phycode.tools import ToolRegistry, ToolRuntime
@@ -72,13 +75,139 @@ def test_process_run_schema_is_structured_and_bounded(tmp_path: Path) -> None:
     assert spec.input_schema == {
         "type": "object",
         "properties": {
-            "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+            "argv": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "description": (
+                    "argv[0] must be an absolute allowlisted executable, or the exact "
+                    "bare alias 'python' when exactly one Python executable is allowlisted"
+                ),
+            },
             "cwd": {"type": "string"},
             "timeout": {"type": "integer", "minimum": 1, "maximum": 300},
         },
         "required": ["argv"],
         "additionalProperties": False,
     }
+
+
+def test_process_run_canonicalizes_exact_python_alias_across_runtime_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "reproduce.py"
+    script.write_text("print('hello')\n", encoding="utf-8")
+    expected_executable = str(Path(sys.executable).resolve())
+    observed: dict[str, object] = {}
+
+    class RecordingJournal:
+        workspace_root = tmp_path.resolve()
+
+        def validate_cwd(self, cwd: Path) -> None:
+            observed["journal_cwd"] = cwd
+
+        def snapshot_artifacts(self):
+            return ()
+
+        def snapshot_script(self, argv: tuple[str, ...], cwd: Path):
+            observed["journal_snapshot_argv"] = argv
+            return "reproduce.py", hashlib.sha256(script.read_bytes()).hexdigest()
+
+        def record_process(self, **values):
+            observed["journal_record_argv"] = values["argv"]
+
+    def execution_guard(call: ToolCall) -> bool:
+        observed["guard_call"] = call
+        return True
+
+    def fake_run(argv, **kwargs):
+        observed["subprocess_argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, stdout="hello\n", stderr="")
+
+    monkeypatch.setattr("phycode.tools.process_tools.subprocess.run", fake_run)
+    registry = ToolRegistry()
+    register_process_tools(
+        registry,
+        tmp_path,
+        frozenset({Path(sys.executable).resolve()}),
+        journal=cast(ExecutionJournal, RecordingJournal()),
+        execution_guard=execution_guard,
+    )
+    original = ToolCall(
+        id="stable_call",
+        provider_call_id="stable_provider_call",
+        tool_name="process.run",
+        args={"argv": ["python", "reproduce.py"], "cwd": ".", "timeout": 17},
+    )
+
+    def approve(call: ToolCall, decision: PolicyDecision) -> bool:
+        del decision
+        observed["approval_call"] = call
+        return True
+
+    result = ToolRuntime(registry).run(
+        original,
+        _prbench_context(tmp_path),
+        approval_handler=approve,
+    )
+
+    assert result.tool_result.status == "ok"
+    approval_call = observed["approval_call"]
+    guard_call = observed["guard_call"]
+    assert isinstance(approval_call, ToolCall)
+    assert isinstance(guard_call, ToolCall)
+    assert approval_call == guard_call
+    assert guard_call.id == original.id
+    assert guard_call.provider_call_id == original.provider_call_id
+    assert guard_call.args == {
+        "argv": [expected_executable, "reproduce.py"],
+        "cwd": ".",
+        "timeout": 17,
+    }
+    assert observed["journal_snapshot_argv"] == (expected_executable, "reproduce.py")
+    assert observed["journal_record_argv"] == (expected_executable, "reproduce.py")
+    assert observed["subprocess_argv"] == [expected_executable, "reproduce.py"]
+    assert original.args["argv"][0] == "python"
+
+
+@pytest.mark.parametrize("alias", ["Python", "python3", "./python", "python.exe"])
+def test_process_run_does_not_normalize_non_exact_python_alias(
+    tmp_path: Path,
+    alias: str,
+) -> None:
+    registry = ToolRegistry()
+    _register_python(registry, tmp_path)
+    normalizer = registry.normalizer_for("process.run")
+    assert normalizer is not None
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [alias, "reproduce.py"], "cwd": "."},
+    )
+
+    assert normalizer(call) == call
+
+
+@pytest.mark.parametrize("allowlist_kind", ["multiple", "non_python"])
+def test_process_run_does_not_normalize_python_alias_without_unique_python_allowlist(
+    tmp_path: Path,
+    allowlist_kind: str,
+) -> None:
+    allowed = (
+        frozenset({Path(sys.executable), tmp_path / "other-python.exe"})
+        if allowlist_kind == "multiple"
+        else frozenset({tmp_path / "node.exe"})
+    )
+    registry = ToolRegistry()
+    register_process_tools(registry, tmp_path, allowed)
+    normalizer = registry.normalizer_for("process.run")
+    assert normalizer is not None
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": ["python", "reproduce.py"], "cwd": "."},
+    )
+
+    assert normalizer(call) == call
 
 
 @pytest.mark.parametrize(

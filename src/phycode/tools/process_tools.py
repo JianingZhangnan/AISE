@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -22,6 +23,10 @@ _MINIMAL_ENVIRONMENT_NAMES = (
     "LC_ALL",
     "PYTHONIOENCODING",
     "PYTHONUTF8",
+)
+_PYTHON_EXECUTABLE_BASENAME = re.compile(
+    r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?",
+    re.IGNORECASE,
 )
 
 
@@ -64,6 +69,30 @@ def register_process_tools(
         raise ValueError("execution journal workspace does not match process workspace")
     visibility = PathVisibilityPolicy(root)
     executable_allowlist = frozenset(path.expanduser().resolve() for path in allowed_executables)
+    only_allowed_executable = (
+        next(iter(executable_allowlist))
+        if len(allowed_executables) == 1 and len(executable_allowlist) == 1
+        else None
+    )
+    python_alias_target = (
+        only_allowed_executable
+        if only_allowed_executable is not None
+        and _PYTHON_EXECUTABLE_BASENAME.fullmatch(only_allowed_executable.name) is not None
+        else None
+    )
+
+    def normalize_process_run(call: ToolCall) -> ToolCall:
+        argv = call.args.get("argv")
+        if (
+            python_alias_target is None
+            or not isinstance(argv, list)
+            or not argv
+            or argv[0] != "python"
+        ):
+            return call
+        args = dict(call.args)
+        args["argv"] = [str(python_alias_target), *argv[1:]]
+        return call.model_copy(update={"args": args})
 
     def process_run(call: ToolCall) -> ToolResult:
         unknown_args = set(call.args) - {"argv", "cwd", "timeout"}
@@ -177,11 +206,24 @@ def register_process_tools(
     registry.register(
         ToolSpec(
             name="process.run",
-            description="Run an allowlisted executable with structured arguments and no shell",
+            description=(
+                "Run an allowlisted executable with structured arguments and no shell. "
+                "The exact bare argv[0] alias 'python' is stable only when the runtime has "
+                "exactly one allowlisted Python executable; all other executable names must "
+                "be absolute."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
-                    "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                    "argv": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "description": (
+                            "argv[0] must be an absolute allowlisted executable, or the exact "
+                            "bare alias 'python' when exactly one Python executable is allowlisted"
+                        ),
+                    },
                     "cwd": {"type": "string"},
                     "timeout": {"type": "integer", "minimum": 1, "maximum": 300},
                 },
@@ -192,4 +234,5 @@ def register_process_tools(
             mutates_state=True,
         ),
         process_run,
+        normalizer=normalize_process_run,
     )

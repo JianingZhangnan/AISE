@@ -378,6 +378,107 @@ def test_runner_recovers_from_denied_direct_csv_via_script_and_runtime_approval(
     assert trace_secret not in persisted
 
 
+def test_runner_canonicalizes_python_alias_before_dynamic_process_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import phycode.prbench_eval as prbench_eval
+
+    contract, approvals = _write_public_task_files(tmp_path, approvals=False)
+    approvals.write_text(
+        json.dumps({"grants": [{"tool_name": "file.write", "path": "reproduce.py"}]}),
+        encoding="utf-8",
+    )
+    request_path = tmp_path / ".phycode/prbench/approval-request.json"
+    observed_request: dict[str, object] = {}
+
+    class FakeClock:
+        value = 0.0
+
+        def __call__(self) -> float:
+            return self.value
+
+        def sleep(self, seconds: float) -> None:
+            observed_request.update(json.loads(request_path.read_text(encoding="utf-8")))
+            manifest = json.loads(approvals.read_text(encoding="utf-8"))
+            manifest["grants"].append(
+                {
+                    "tool_name": "process.run",
+                    "argv": observed_request["argv"],
+                    "cwd": observed_request["cwd"],
+                    "script_sha256": observed_request["script_sha256"],
+                }
+            )
+            approvals.write_text(json.dumps(manifest), encoding="utf-8")
+            self.value += seconds
+
+    clock = FakeClock()
+    original_from_json = ApprovalManifest.from_json
+
+    def deterministic_manifest(path, workspace_root, **kwargs):
+        return original_from_json(
+            path,
+            workspace_root,
+            approval_wait_seconds=kwargs["approval_wait_seconds"],
+            clock=clock,
+            sleeper=clock.sleep,
+            poll_interval_seconds=0.01,
+        )
+
+    monkeypatch.setattr(prbench_eval.ApprovalManifest, "from_json", deterministic_manifest)
+    script = (
+        "from pathlib import Path\n"
+        "Path('result.csv').write_text('message\\nhello\\n', encoding='utf-8')\n"
+    )
+    llm = ScriptedLLM(
+        [
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.write",
+                        "args": {"path": "reproduce.py", "content": script},
+                    },
+                }
+            ],
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "process.run",
+                        "args": {"argv": ["python", "reproduce.py"], "cwd": "."},
+                    },
+                }
+            ],
+        ]
+    )
+
+    result = run_prbench(
+        tmp_path,
+        contract,
+        approvals,
+        llm=llm,
+        max_tool_calls=4,
+        approval_wait_seconds=1,
+    )
+
+    assert result.status == PRBenchRunStatus.COMPLETED
+    assert result.tool_calls == 2
+    request_argv = observed_request["argv"]
+    assert isinstance(request_argv, list)
+    assert request_argv == [
+        os.path.normcase(str(Path(sys.executable).resolve())),
+        "reproduce.py",
+    ]
+    assert isinstance(request_argv[0], str)
+    assert Path(request_argv[0]).is_absolute()
+    assert observed_request["cwd"] == "."
+    assert observed_request["script_sha256"] == hashlib.sha256(
+        (tmp_path / "reproduce.py").read_bytes()
+    ).hexdigest()
+    assert not request_path.exists()
+
+
 def test_runner_blocks_lexical_ground_truth_before_calling_llm(tmp_path: Path) -> None:
     contract, approvals = _write_public_task_files(tmp_path, approvals=False)
     hidden = tmp_path / "_ground_truth"

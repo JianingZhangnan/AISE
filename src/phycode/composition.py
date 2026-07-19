@@ -85,7 +85,11 @@ def registry_subset(registry: ToolRegistry, names: frozenset[str]) -> ToolRegist
             continue
         executor = registry.executor_for(spec.name)
         if executor is not None:
-            selected.register(spec, executor)
+            selected.register(
+                spec,
+                executor,
+                normalizer=registry.normalizer_for(spec.name),
+            )
     return selected
 
 
