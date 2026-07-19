@@ -101,9 +101,13 @@ grader 子进程的 stdout/stderr 固定按 UTF-8 解码，无法解码的字节
 `grading_trace.log` 同样固定写成 UTF-8，避免 Windows 本地代码页让 reader/writer
 线程污染一次已经完成的评分。在 PhyCode 触发的延迟 green 凭据路径中，写 trace
 之前会按长度降序精确替换当前 provider mapping 的全部非空值（包括 key、base URL、
-model 和包含 URL 的 inline config）；JSON 评分仍解析未经替换的已解码 stdout，因而
-脱敏不会改变官方评分。非延迟的上游组合不执行这项 provider 脱敏，原有 transport、
-解析和日志内容语义保持不变。
+model 和包含 URL 的 inline config）。JSON 评分仍解析未经替换的已解码 stdout；
+parser 返回后、结果进入 eval report 或消息前，再对 dict key/value、list、tuple 和
+string 递归执行同一组精确替换，数字、布尔值、`None` 与容器类型保持不变。这个出口
+同时覆盖 Codex output-file 和其他 grader stdout 两条 parser 路径，也阻止
+`parse_failure` 的截断 summary 回显 provider 值；因此脱敏不会改变官方评分输入。
+非延迟的上游组合不执行这项 provider 脱敏，原有 transport、解析和日志内容语义保持
+不变。
 
 `setup_docker_environment()` 从容器 `start()` 到全部 CLI 安装完成使用同一个资源
 事务边界。health check、PhyCode/OpenCode 安装或其他 setup 步骤一旦失败，只对本次

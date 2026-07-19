@@ -106,14 +106,42 @@ index 3874429..1bfd98b 100644
 +                os.path.join(log_dir, "grading_trace.log"), "w", encoding="utf-8"
 +            ) as f:
 +                f.write(f"STDOUT:\n{trace_stdout}\n\nSTDERR:\n{trace_stderr}\n")
-@@ -776,0 +818,4 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+@@ -752,0 +794,17 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
++            def redact_grading_result(value):
++                if isinstance(value, str):
++                    for provider_value in provider_values:
++                        value = value.replace(
++                            provider_value, "[REDACTED_PROVIDER_VALUE]"
++                        )
++                    return value
++                if isinstance(value, dict):
++                    return {
++                        redact_grading_result(key): redact_grading_result(item)
++                        for key, item in value.items()
++                    }
++                if isinstance(value, list):
++                    return [redact_grading_result(item) for item in value]
++                if isinstance(value, tuple):
++                    return tuple(redact_grading_result(item) for item in value)
++                return value
+@@ -767 +826,3 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+-                return _parse_grading_json(grading_text)
++                grading_result = _parse_grading_json(grading_text)
++                return (redact_grading_result(grading_result)
++                        if defer_provider_env else grading_result)
+@@ -769 +830,3 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+-                return _parse_grading_json(result.stdout)
++                grading_result = _parse_grading_json(result.stdout)
++                return (redact_grading_result(grading_result)
++                        if defer_provider_env else grading_result)
+@@ -776,0 +839,4 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 +        finally:
 +            if defer_provider_env:
 +                from src.my_util.agent_env import clear_green_child_environment
 +                clear_green_child_environment(green_provider_env, green_process_env)
-@@ -797,0 +843 @@ def start_green_agent(
+@@ -797,0 +864 @@ def start_green_agent(
 +    defer_provider_env: bool = False,
-@@ -820,0 +867 @@ def start_green_agent(
+@@ -820,0 +888 @@ def start_green_agent(
 +            defer_provider_env=defer_provider_env,
 diff --git a/src/launcher.py b/src/launcher.py
 index c705de8..49a4cb5 100644

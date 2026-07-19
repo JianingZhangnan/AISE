@@ -2329,6 +2329,129 @@ def test_official_deferred_green_grading_decodes_invalid_utf8_and_redacts_trace(
     assert "[REDACTED_PROVIDER_VALUE]" in trace
 
 
+@pytest.mark.parametrize("parse_mode", ["valid_json", "parse_failure"])
+def test_official_deferred_green_grading_redacts_recursive_parser_result(
+    patched_official_evaluator: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    parse_mode: str,
+) -> None:
+    key = "synthetic-result-key"
+    base_url = "https://synthetic-result.invalid/v1"
+    model = "openai/result-model"
+    monkeypatch.setenv("OPENCODE_API_KEY", key)
+    monkeypatch.setenv("OPENCODE_BASE_URL", base_url)
+    monkeypatch.setenv("OPENCODE_MODEL", model)
+
+    agent_env = _load_agent_env(
+        patched_official_evaluator / "src/my_util/agent_env.py"
+    )
+    resolved = agent_env.resolve_env("opencode")
+    inline_config = agent_env._build_opencode_config_content(resolved)
+    provider_values = [
+        key,
+        base_url,
+        "openai_compat/result-model",
+        inline_config,
+    ]
+    assert all(provider_values)
+
+    src_module = types.ModuleType("src")
+    src_module.__path__ = []  # type: ignore[attr-defined]
+    util_module = types.ModuleType("src.my_util")
+    util_module.__path__ = []  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "src", src_module)
+    monkeypatch.setitem(sys.modules, "src.my_util", util_module)
+    monkeypatch.setitem(sys.modules, "src.my_util.agent_env", agent_env)
+
+    if parse_mode == "valid_json":
+        stdout = json.dumps(
+            {
+                "overall_score": 1.0,
+                f"provider-{key}": [
+                    key,
+                    {"endpoint": base_url, "config": inline_config},
+                ],
+            }
+        )
+    else:
+        stdout = "unparseable grading output: " + " | ".join(provider_values)
+
+    parser_inputs: list[str] = []
+
+    def parse_grading(text: str) -> dict[str, object]:
+        parser_inputs.append(text)
+        if parse_mode == "parse_failure":
+            return {
+                "error": "parse_failure",
+                "overall_score": 0.0,
+                "scores": {},
+                "summary": text[:500],
+            }
+        parsed = cast(dict[str, object], json.loads(text))
+        parsed["tuple_probe"] = (provider_values[2], False, None, 7)
+        return parsed
+
+    def fake_run(cmd: list[str], **kwargs: object) -> types.SimpleNamespace:
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "replace"
+        return types.SimpleNamespace(returncode=0, stdout=stdout, stderr=stdout)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    run_grading = _load_function(
+        patched_official_evaluator / "src/green_agent/agent.py",
+        "_run_grading",
+        {
+            "logger": types.SimpleNamespace(
+                info=lambda *_: None,
+                warning=lambda *_: None,
+                error=lambda *_: None,
+            ),
+            "os": os,
+            "_parse_grading_json": parse_grading,
+        },
+    )
+    method = types.MethodType(run_grading, object())
+
+    grading = method("grade this", "container-id", str(tmp_path), "opencode", True)
+
+    assert parser_inputs == [stdout]
+
+    def recursive_strings(value: object) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, dict):
+            return [
+                text
+                for item in value.items()
+                for element in item
+                for text in recursive_strings(element)
+            ]
+        if isinstance(value, (list, tuple)):
+            return [text for item in value for text in recursive_strings(item)]
+        return []
+
+    returned_strings = recursive_strings(grading)
+    trace = (tmp_path / "grading_trace.log").read_text(encoding="utf-8")
+    assert all(
+        provider_value not in text
+        for provider_value in provider_values
+        for text in returned_strings
+    )
+    assert all(provider_value not in trace for provider_value in provider_values)
+    assert any(
+        "[REDACTED_PROVIDER_VALUE]" in text for text in returned_strings
+    )
+    if parse_mode == "valid_json":
+        assert grading["overall_score"] == 1.0
+        assert grading["tuple_probe"] == (
+            "[REDACTED_PROVIDER_VALUE]",
+            False,
+            None,
+            7,
+        )
+
+
 def test_official_non_phycode_green_grading_retains_upstream_transport(
     patched_official_evaluator: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2355,7 +2478,10 @@ def test_official_non_phycode_green_grading_retains_upstream_transport(
         captured["kwargs"] = kwargs
         return types.SimpleNamespace(
             returncode=0,
-            stdout='{"overall_score": 1.0}',
+            stdout=(
+                '{"overall_score": 1.0, '
+                '"echo": "ordinary-combination-value"}'
+            ),
             stderr="",
         )
 
@@ -2375,7 +2501,9 @@ def test_official_non_phycode_green_grading_retains_upstream_transport(
     )
     method = types.MethodType(run_grading, object())
 
-    method("grade this", "container-id", str(tmp_path), "opencode", False)
+    grading = method(
+        "grade this", "container-id", str(tmp_path), "opencode", False
+    )
 
     command = captured["cmd"]
     kwargs = captured["kwargs"]
@@ -2383,6 +2511,10 @@ def test_official_non_phycode_green_grading_retains_upstream_transport(
     assert isinstance(kwargs, dict)
     assert "env" not in kwargs
     assert "OPENAI_API_KEY=ordinary-combination-value" in command
+    assert grading["echo"] == "ordinary-combination-value"
+    assert "ordinary-combination-value" in (
+        tmp_path / "grading_trace.log"
+    ).read_text(encoding="utf-8")
 
 
 def test_patch_uses_explicit_controls_and_minimal_provider_environment() -> None:
