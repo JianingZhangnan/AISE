@@ -596,6 +596,57 @@ def test_patch_changes_only_required_runtime_files() -> None:
     }
 
 
+def test_official_green_agent_text_open_calls_use_utf8(
+    patched_official_evaluator: Path,
+) -> None:
+    source = patched_official_evaluator / "src/green_agent/agent.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    missing_utf8: list[int] = []
+
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "open"
+        ):
+            continue
+        mode_node = node.args[1] if len(node.args) > 1 else None
+        mode_node = next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "mode"),
+            mode_node,
+        )
+        mode = mode_node.value if isinstance(mode_node, ast.Constant) else "r"
+        if isinstance(mode, str) and "b" in mode:
+            continue
+        encoding_node = next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "encoding"),
+            None,
+        )
+        if not (
+            isinstance(encoding_node, ast.Constant)
+            and encoding_node.value == "utf-8"
+        ):
+            missing_utf8.append(node.lineno)
+
+    assert missing_utf8 == [], (
+        "green evaluator text open calls missing encoding='utf-8' at lines "
+        f"{missing_utf8}"
+    )
+
+
+def test_official_green_agent_read_file_safe_round_trips_utf8(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+) -> None:
+    source = patched_official_evaluator / "src/green_agent/agent.py"
+    read_file_safe = _load_function(source, "read_file_safe", {"os": os})
+    expected = "replacement: \ufffd; Chinese: 中文; non-GBK: 🧪"
+    target = tmp_path / "unicode.txt"
+    target.write_text(expected, encoding="utf-8")
+
+    assert read_file_safe(str(target)) == expected
+
+
 def test_official_phycode_setup_defers_green_credentials_until_grading(
     patched_official_evaluator: Path,
 ) -> None:

@@ -45,19 +45,37 @@ index 922d52e..e51247e 100644
 +    if not succeeded:
 +        raise typer.Exit(1)
 diff --git a/src/green_agent/agent.py b/src/green_agent/agent.py
-index 3874429..1ead1da 100644
+index 3874429..308cbb2 100644
 --- a/src/green_agent/agent.py
 +++ b/src/green_agent/agent.py
+@@ -46 +46 @@ def load_task_config(task_dir: str) -> dict:
+-    with open(yaml_path, "r") as f:
++    with open(yaml_path, "r", encoding="utf-8") as f:
+@@ -54 +54 @@ def read_file_safe(path: str, max_chars: int = 50000) -> str:
+-    with open(path, "r", errors="replace") as f:
++    with open(path, "r", encoding="utf-8", errors="replace") as f:
 @@ -450 +450,2 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 -    def __init__(self, docker_container_id: str | None = None, agent_type: str = "claude"):
 +    def __init__(self, docker_container_id: str | None = None,
 +                 agent_type: str = "claude", defer_provider_env: bool = False):
 @@ -452,0 +454 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 +        self.defer_provider_env = defer_provider_env
+@@ -488 +490 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+-            with open(os.path.join(log_dir, "instruction_sent.txt"), "w") as f:
++            with open(os.path.join(log_dir, "instruction_sent.txt"), "w", encoding="utf-8") as f:
+@@ -565 +567 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+-            with open(os.path.join(log_dir, "white_agent_trace.log"), "w") as f:
++            with open(os.path.join(log_dir, "white_agent_trace.log"), "w", encoding="utf-8") as f:
+@@ -592 +594 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+-            with open(os.path.join(log_dir, "grading_prompt.txt"), "w") as f:
++            with open(os.path.join(log_dir, "grading_prompt.txt"), "w", encoding="utf-8") as f:
 @@ -597 +599,2 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 -                self._run_grading, grading_prompt, container_id, log_dir, self.agent_type
 +                self._run_grading, grading_prompt, container_id, log_dir,
 +                self.agent_type, self.defer_provider_env,
+@@ -612 +615 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+-            with open(report_path, "w") as f:
++            with open(report_path, "w", encoding="utf-8") as f:
 @@ -636 +639,2 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 -                     log_dir: str, agent_type: str = "claude") -> dict:
 +                     log_dir: str, agent_type: str = "claude",
@@ -142,6 +160,9 @@ index 3874429..1ead1da 100644
 +                    os.unlink(output_path)
 +            except OSError:
 +                pass
+@@ -648 +730 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+-        with open(prompt_path, "w") as f:
++        with open(prompt_path, "w", encoding="utf-8") as f:
 @@ -655,0 +738,8 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 +        green_provider_env: dict[str, str] = {}
 +        green_process_env: dict[str, str] = {}
@@ -246,12 +267,14 @@ index 3874429..1ead1da 100644
 +                    )
 +            except OSError:
 +                raise RuntimeError("failed to write grading trace") from None
-@@ -760 +923,4 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+@@ -760,2 +923,5 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 -                if os.path.exists(out_host):
+-                    with open(out_host) as f:
 +                if deferred_grading_text is not None:
 +                    grading_text = deferred_grading_text
 +                    logger.info(f"Green agent: Codex grading output file: {len(grading_text)} chars")
 +                elif not defer_provider_env and os.path.exists(out_host):
++                    with open(out_host, encoding="utf-8") as f:
 @@ -767 +933,3 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 -                return _parse_grading_json(grading_text)
 +                grading_result = _parse_grading_json(grading_text)
