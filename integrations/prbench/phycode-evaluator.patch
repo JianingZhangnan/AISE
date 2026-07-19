@@ -847,7 +847,7 @@ index 9c1f2b4..3a0112a 100644
 +            if uv_check["exit_code"] != 0:
 +                return False
 +            self.copy_file_to(
-+                self.phycode_wheel, "/tmp/phycode-0.1.0-py3-none-any.whl"
++                self.phycode_wheel, "/tmp/phycode-0.1.1-py3-none-any.whl"
 +            )
 +        except Exception:
 +            return False
@@ -858,7 +858,7 @@ index 9c1f2b4..3a0112a 100644
 +                except Exception:
 +                    pass
 +        result = self.exec_command(
-+            "uv pip install --system /tmp/phycode-0.1.0-py3-none-any.whl",
++            "uv pip install --system /tmp/phycode-0.1.1-py3-none-any.whl",
 +            timeout=300,
 @@ -114,0 +180,8 @@ class DockerEnvironment:
 +        return result["exit_code"] == 0

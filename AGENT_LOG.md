@@ -392,3 +392,103 @@
 - 固定 clean evaluator source 的合并后全量门禁为 **603 passed / 14 skipped**；
   `uvx pyright` 为 0 errors / 0 warnings；`uv build` 成功生成 v0.1.0 sdist/wheel；
   `git diff --cached --check` 通过，evaluator source 仍为 clean。
+
+## 2026-07-18 Task 26：交互式审批提示可见性与 0.1.1 构建
+
+- v0.1.0 发布后，用户截图与真实 Windows PTY 稳定复现：Rich `Status` 活动期间，
+  Typer `confirm` 与 Rich `Prompt` 的阻塞确认提示都会被 live render 覆盖。调用链核对
+  证明 `_run_turn()` 在 `console.status(...)` 内同步进入 `loop.run()`，后者调用审批
+  handler 时没有停止 spinner；缺陷位于 CLI 展示生命周期，不在策略判断或工具权限。
+- subagent `approval_prompt_impl` 使用本地 Superpowers `systematic-debugging`、
+  `test-driven-development` 与 `verification-before-completion`。spinner 生命周期 RED
+  命令为 `uv run pytest tests/test_cli_commands.py -k "run_turn and approval" -q`：修正
+  一次测试夹具绑定错误后，两例均因缺少 `status-stop` / `status-start` 而失败。最小
+  GREEN 在审批前停止 Status，并在审批返回或抛错时以 `finally` 重启；turn 的外层
+  `finally` 恢复原 `approval_handler`。同一聚焦命令随后为 2 passed。
+- 版本 RED 命令为
+  `uv run pytest tests/test_cli_smoke.py::test_version_command_prints_version -q`，实际输出
+  `phycode 0.1.0`，不满足 `phycode 0.1.1`；同步项目元数据、包内版本并执行 `uv lock`
+  后，同一测试 GREEN。`0.1.1` 当前仅为待发布构建，本任务不创建或发布 Release。
+- 本任务未读取凭据、未调用真实模型 API、未修改审批策略、工具权限或 PRBench
+  evaluator。
+- 提交前门禁：`uv run pytest -q` 完整进度达到 100%、exit 0；Pyright 首次指出两个
+  测试替身与 `AgentLoop` 的名义类型错误，在测试调用边界显式 cast 后，spinner 聚焦
+  测试仍为 2 passed，`uvx pyright` 为 0 errors / 0 warnings；`uv build` 成功生成
+  `phycode-0.1.1.tar.gz` 与 `phycode-0.1.1-py3-none-any.whl`；
+  `git diff --check` exit 0，仅报告 Windows 工作树 LF/CRLF 转换提示。
+- 独立 reviewer 随后指出 Important：虽然项目元数据和构建已是 `0.1.1`，PRBench
+  adapter 的严格 wheel 文件名、两份 smoke 文档以及 evaluator patch 的容器 copy /
+  install 目标仍固定 `0.1.0`，会拒绝新 wheel 并使文档化 smoke 无法消费本次构建。
+  新增版本一致性契约测试从 `pyproject.toml` 推导期望文件名，并聚合核对 adapter、
+  主 README、集成 README、patch copy 与 install 五个消费端。首次因 `integrations/`
+  不在安装包路径发生测试收集错误；改为静态提取 adapter 常量后得到有效 RED，失败 diff
+  显示五处实际均为 `phycode-0.1.0-py3-none-any.whl`、期望均为 `0.1.1`。
+- 最小 GREEN 只同步上述运行契约及受影响测试夹具到 `0.1.1`；没有替换历史上描述
+  v0.1.0 已发布事实的过程文档，也没有改动 spinner 实现、审批策略或 evaluator 逻辑。
+  版本一致性测试随后为 1 passed。
+- reviewer 修复覆盖命令
+  `uv run pytest tests/test_docs_process.py tests/test_prbench_adapter.py tests/test_cli_smoke.py -q`
+  达到 100%、exit 0；`uvx pyright` 为 0 errors / 0 warnings。按修复合同未重跑全量测试，
+  由主 agent 执行最终全量门禁。
+- Task re-review 对 `7b22800` / `8484cdc` 给出 Spec Compliance Approved、Code
+  Quality Approved、Task quality Approved；Critical 0、Important 0、Minor 0。版本契约
+  测试直接从项目元数据推导 wheel 文件名，后续版本升级遗漏任一 PRBench 消费端都会
+  失败，不再依赖手工复制版本常量。
+- 最终全分支 reviewer 首轮为 Ready to merge、Critical 0、Important 0，并提出两项
+  Minor：缺少同 turn 多次审批/同 loop 多 turn 的直接回归，以及 spinner 重启异常可能
+  覆盖原审批异常。按 final-review fix wave 一次性处理：多审批/多 turn 用例在旧实现上
+  已通过，记录为覆盖增强；双重异常用例有效 RED 为期望 `approval failed`、实际得到
+  `status restart failed`。最小修复在双重失败时保留并重新抛出原审批异常，只附加固定
+  note；审批成功后的重启失败仍传播。共享 recording helper 收敛了五组重复夹具，聚焦
+  生命周期测试为 5 passed，提交 `b900998`。
+- final re-review 确认两项 Minor 均关闭，Critical 0、Important 0、Minor 0，Ready to
+  merge；没有修改策略、工具权限、凭据或模型路径。
+- 主 agent 对最终实现运行 `uv run pytest -q`，完整进度达到 100%、exit 0；
+  `uvx pyright` 为 0 errors / 0 warnings；`uv build` 成功生成 `0.1.1` wheel/sdist；
+  `git diff --check` 通过。真实 Windows PTY 冒烟在任何输入前明确显示
+  `Approve this action? [y/N]:`，输入 `n` 后返回 `approved=False`，直接关闭用户截图中的
+  不可见症状。最终构建 SHA-256：wheel
+  `aa8e87d124c4443ec10247aa2c7d2c17ad10d569739cf548808ffa25f69b7b31`，sdist
+  `28b4fac4f9480094323ad38f6d4bb213344acf5b807b924934a1afe8a1098ba3`。
+- whole-branch final review 判定 Ready to merge，同时给出两个 Minor 生命周期加固项。
+  Finding 1 增加同一 turn 两次审批、同一 loop 连续两 turn 的事件序列与原 handler
+  身份断言；首跑聚焦集合为 3 passed，证明现实现已满足，这是覆盖增强而非有效 RED，
+  未为制造失败扭曲断言。
+- Finding 2 的有效 RED 在原审批抛出 `approval failed` 且 `status.start()` 再抛
+  `status restart failed` 时，pytest 显示实际传播后者，确认 `finally` 覆盖原异常。
+  最小 GREEN 将审批异常与成功路径分开：异常路径仍尝试 restart；若 restart 也失败，
+  只给原异常附加不含底层内容的固定 note 并重新抛出原异常。审批成功后的 restart
+  失败继续自然传播，未吞掉一般 UI 异常；turn 外层 handler 恢复保持不变。
+- 为避免测试膨胀，GREEN 后把五组重复假 Status/Console/Loop 收敛为共享记录型 helper
+  与事件序列构造器。最终
+  `uv run pytest tests/test_cli_commands.py -k "run_turn and approval" -q` 为 5 passed，
+  `uvx pyright` 为 0 errors / 0 warnings；未重跑全量测试，留给主 agent 最终门禁。
+
+## 2026-07-19 Task 27：发布前 Ubuntu CI 跨平台收口
+
+- 用户确认继续修复 PR #1 的 CI 阻塞后，主 agent 使用本地 Superpowers
+  `systematic-debugging`、`test-driven-development`、`finishing-a-development-branch`
+  以及 GitHub `gh-fix-ci` 工作流；没有读取凭据、调用真实模型 API 或修改审批权限。
+- 首次 PR workflow `test` / job `unit-test` 在 Ubuntu 24.04、Python 3.11 上得到
+  **9 failed / 543 passed / 71 skipped**，因此没有合并。失败由四项独立平台假设组成：
+  GitHub 强制样式使 ANSI 序列插入 CLI option；两个 PowerShell smoke 只创建 Windows
+  `uv.cmd`；旧相对路径测试在 POSIX 恰好使用了已被 runtime 明确支持的精确裸
+  `python` alias，且解释器 symlink 的显示名使用未解析值；NUL cwd 在 POSIX
+  `Path.resolve()` 抛 `ValueError`，不属于原 Windows 异常集合。
+- RED 在 WSL 中逐项复现：`FORCE_COLOR=1` 的三个 PRBench CLI 用例均因 ANSI 断言
+  失败；process allowlist、相对 executable 与 NUL cwd 三例分别复现解析后 basename、
+  alias 被规范化执行和未捕获 `ValueError`。GitHub job 日志同时为两个 POSIX fake-uv
+  问题提供端到端 RED。
+- 最小 GREEN 不更改精确裸 `python` alias 机制，也不跳过 POSIX smoke：CLI 测试用
+  Click `unstyle()` 后断言语义文本；fake uv 根据 `os.name` 生成 `.cmd` 或带执行位的
+  POSIX shell；相对路径反例改用不受支持的 `relative-python`，allowlist 错误按解析后
+  executable basename 断言；`PolicyEngine` 的 process cwd 可见性检查额外捕获
+  `ValueError` 并维持既有 deny / 不消耗 grant 语义。实现 commit `aa061b2`。
+- 聚焦 GREEN：强制彩色的三个 CLI 用例、Windows 的五个 PowerShell smoke 参数实例、
+  Windows/WSL 的三个 process 边界用例全部通过。完整 Windows `uv run pytest -q`
+  达到 100%、exit 0；`CI=true GITHUB_ACTIONS=true` 的 WSL 全量测试达到 100%、exit 0；
+  `uvx pyright` 为 0 errors / 0 warnings；`uv build` 成功生成 0.1.1 wheel/sdist。
+- 曾额外用 `FORCE_COLOR=1` 强制所有 Rich 控制台都视为真实终端，暴露六个与 GitHub
+  原失败清单不同的旧测试替身问题；对照 workflow 环境后，以
+  `CI=true/GITHUB_ACTIONS=true` 重跑完整 WSL 套件通过，故未把非生产门禁的过度模拟
+  扩大到本次发布修复。

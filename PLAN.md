@@ -2488,3 +2488,23 @@ upstream import API 漂移；overlay 不修改上游依赖声明。最终只有 
 才能记录真实验收成功。2026-07-18 最终验收已满足该门禁：两项 runner 均为
 `completed`、两份官方报告均为 1.0，声明/实际 trace 计数一致，journal 与 artifact
 哈希可复算，真实 URL/key 文件扫描和 Git 历史扫描均为 0 命中。
+
+---
+
+## 2026-07-19 交互式审批提示可见性修复（Task 26）
+
+批准设计：`docs/superpowers/specs/2026-07-19-interactive-approval-visibility-design.md`。
+
+逐步实施计划：`docs/superpowers/plans/2026-07-19-interactive-approval-visibility.md`。
+
+- [x] Task 26：在阻塞式审批前暂停 Rich spinner，审批结束后恢复，并保证原始
+  `approval_handler` 在正常和异常路径都被恢复；用 PTY 根因证据和确定性事件顺序
+  测试固化。修复构建版本为 `0.1.1`，不在本任务内发布 GitHub Release。commits：
+  `7b22800`、`8484cdc`、`b900998`；task spec/quality review 与最终全分支 review
+  clean（Critical 0 / Important 0 / Minor 0，Ready to merge）。
+- [x] Task 27：修复 PR #1 在 Ubuntu CI 暴露的跨平台门禁差异。CLI 断言先去除
+  ANSI 样式；PowerShell smoke 在 Windows 创建 `uv.cmd`、在 POSIX 创建可执行
+  `uv`；process runtime 测试保留精确裸 `python` alias 合同并用其他相对名验证拒绝；
+  策略层对 POSIX NUL 路径产生的 `ValueError` 失败关闭。commit：`aa061b2`。
+  TDD RED 为 GitHub Actions 的 9 failures 与 WSL 定向复现；Windows 全量测试、
+  `CI=true/GITHUB_ACTIONS=true` 的 WSL 全量测试、Pyright 和构建均通过。

@@ -256,7 +256,9 @@ def test_process_run_rejects_executable_outside_allowlist(tmp_path: Path) -> Non
     result = ToolRuntime(registry).run(call, _prbench_context(tmp_path), approved=True)
 
     assert result.tool_result.status == "invalid_tool_args"
-    assert result.tool_result.stderr == f"executable is not allowed: {Path(sys.executable).name}"
+    assert result.tool_result.stderr == (
+        f"executable is not allowed: {Path(sys.executable).resolve().name}"
+    )
     assert "unreachable" not in result.tool_result.stdout
 
 
@@ -336,7 +338,7 @@ def test_process_run_rejects_relative_executable(tmp_path: Path) -> None:
     _register_python(registry, tmp_path)
     call = ToolCall(
         tool_name="process.run",
-        args={"argv": [Path(sys.executable).name, "-c", "print('unreachable')"], "cwd": "."},
+        args={"argv": ["relative-python", "-c", "print('unreachable')"], "cwd": "."},
     )
 
     result = ToolRuntime(registry).run(call, _prbench_context(tmp_path), approved=True)

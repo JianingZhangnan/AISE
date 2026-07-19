@@ -155,7 +155,7 @@ class PolicyEngine:
             cwd = call.args.get("cwd", ".")
             try:
                 context.visibility.resolve(str(cwd))
-            except (OSError, RuntimeError, VisibilityViolation) as exc:
+            except (OSError, RuntimeError, ValueError, VisibilityViolation) as exc:
                 hidden_path = isinstance(exc, VisibilityViolation) and exc.hidden
                 return PolicyDecision(
                     tool_call_id=call.id,

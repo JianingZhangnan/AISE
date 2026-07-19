@@ -3,7 +3,9 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,43 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _read(name: str) -> str:
     return (ROOT / name).read_text(encoding="utf-8")
+
+
+def test_prbench_wheel_contract_matches_project_version():
+    project_version = tomllib.loads(_read("pyproject.toml"))["project"]["version"]
+    wheel_filename = f"phycode-{project_version}-py3-none-any.whl"
+    filename_pattern = r"phycode-\d+\.\d+\.\d+-py3-none-any\.whl"
+    adapter_filename = re.search(
+        rf'^EXPECTED_WHEEL_FILENAME = "({filename_pattern})"$',
+        _read("integrations/prbench/apply_adapter.py"),
+        flags=re.MULTILINE,
+    )
+    main_readme = re.search(filename_pattern, _read("README.md"))
+    integration_readme = re.search(
+        filename_pattern, _read("integrations/prbench/README.md")
+    )
+    patch = _read("integrations/prbench/phycode-evaluator.patch")
+    patch_copy = re.search(
+        rf'self\.phycode_wheel,\s*"/tmp/({filename_pattern})"', patch
+    )
+    patch_install = re.search(
+        rf"uv pip install --system /tmp/({filename_pattern})", patch
+    )
+    assert adapter_filename is not None
+    assert main_readme is not None
+    assert integration_readme is not None
+    assert patch_copy is not None
+    assert patch_install is not None
+
+    actual_filenames = {
+        "adapter": adapter_filename.group(1),
+        "README.md": main_readme.group(0),
+        "integrations/prbench/README.md": integration_readme.group(0),
+        "patch copy target": patch_copy.group(1),
+        "patch install target": patch_install.group(1),
+    }
+
+    assert actual_filenames == dict.fromkeys(actual_filenames, wheel_filename)
 
 
 def test_readme_documents_all_user_facing_commands():
@@ -176,20 +215,34 @@ def test_public_smoke_restores_or_removes_opencode_environment_with_fake_uv(
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    (fake_bin / "uv.cmd").write_text(
-        "@echo off\r\n"
-        "echo %* | findstr /C:\"apply_adapter.py\" >nul\r\n"
-        "if not errorlevel 1 exit /b 0\r\n"
-        "if not \"%OPENCODE_API_KEY%\"==\"fake-phycode-key\" exit /b 71\r\n"
-        "if not \"%OPENCODE_BASE_URL%\"==\"https://fake.invalid/v1\" exit /b 72\r\n"
-        "if not \"%OPENCODE_MODEL%\"==\"openai/fake-model\" exit /b 73\r\n"
-        "if \"%FAKE_UV_FAIL%\"==\"1\" exit /b 23\r\n"
-        "exit /b 0\r\n",
-        encoding="utf-8",
-    )
+    if os.name == "nt":
+        (fake_bin / "uv.cmd").write_text(
+            "@echo off\r\n"
+            "echo %* | findstr /C:\"apply_adapter.py\" >nul\r\n"
+            "if not errorlevel 1 exit /b 0\r\n"
+            "if not \"%OPENCODE_API_KEY%\"==\"fake-phycode-key\" exit /b 71\r\n"
+            "if not \"%OPENCODE_BASE_URL%\"==\"https://fake.invalid/v1\" exit /b 72\r\n"
+            "if not \"%OPENCODE_MODEL%\"==\"openai/fake-model\" exit /b 73\r\n"
+            "if \"%FAKE_UV_FAIL%\"==\"1\" exit /b 23\r\n"
+            "exit /b 0\r\n",
+            encoding="utf-8",
+        )
+    else:
+        fake_uv = fake_bin / "uv"
+        fake_uv.write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in *apply_adapter.py*) exit 0 ;; esac\n"
+            "[ \"$OPENCODE_API_KEY\" = \"fake-phycode-key\" ] || exit 71\n"
+            "[ \"$OPENCODE_BASE_URL\" = \"https://fake.invalid/v1\" ] || exit 72\n"
+            "[ \"$OPENCODE_MODEL\" = \"openai/fake-model\" ] || exit 73\n"
+            "[ \"$FAKE_UV_FAIL\" = \"1\" ] && exit 23\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
     evaluator = tmp_path / "evaluator"
     evaluator.mkdir()
-    wheel = tmp_path / "phycode-0.1.0-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.1-py3-none-any.whl"
     wheel.write_bytes(b"fake wheel")
     wrapper = tmp_path / "invoke-smoke.ps1"
     wrapper.write_text(

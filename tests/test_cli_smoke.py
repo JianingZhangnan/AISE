@@ -1,3 +1,4 @@
+from click import unstyle
 from typer.testing import CliRunner
 
 from phycode.cli import app
@@ -16,6 +17,7 @@ def test_version_command_prints_version():
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert "phycode" in result.stdout.lower()
+    assert "phycode 0.1.1" in result.stdout.lower()
 
 
 def test_tools_list_command_exists():
@@ -38,13 +40,14 @@ def test_demo_unknown_name_exits_nonzero():
 
 def test_prbench_run_help_exposes_required_paths():
     result = runner.invoke(app, ["prbench", "run", "--help"], terminal_width=160)
+    help_text = unstyle(result.stdout)
 
-    assert result.exit_code == 0, result.stdout
-    assert "--workspace" in result.stdout
-    assert "--contract" in result.stdout
-    assert "--approvals" in result.stdout
+    assert result.exit_code == 0, help_text
+    assert "--workspace" in help_text
+    assert "--contract" in help_text
+    assert "--approvals" in help_text
     # Rich shortens long option labels to fit its fixed help-table width.
-    assert "--approval-wait-sec" in result.stdout
+    assert "--approval-wait-sec" in help_text
 
 
 def test_prbench_approval_wait_option_is_bounded_before_runner_call(tmp_path, monkeypatch):
@@ -73,11 +76,12 @@ def test_prbench_approval_wait_option_is_bounded_before_runner_call(tmp_path, mo
             "901",
         ],
     )
+    error_text = unstyle(result.stderr)
 
     assert result.exit_code == 2
     assert not called
-    assert "approval-wait-seconds" in result.stderr
-    assert "0<=x<=900" in result.stderr
+    assert "approval-wait-seconds" in error_text
+    assert "0<=x<=900" in error_text
 
 
 def test_prbench_approval_wait_option_is_forwarded_to_runner(tmp_path, monkeypatch):
@@ -125,9 +129,11 @@ def test_main_cli_mounts_the_single_prbench_eval_app():
     module_help = runner.invoke(prbench_eval.prbench_app, ["run", "--help"])
     main_help = runner.invoke(cli.app, ["prbench", "run", "--help"])
     assert module_help.exit_code == main_help.exit_code == 0
+    module_help_text = unstyle(module_help.stdout)
+    main_help_text = unstyle(main_help.stdout)
     for option in ("--workspace", "--contract", "--approvals", "--max-tool-calls"):
-        assert option in module_help.stdout
-        assert option in main_help.stdout
+        assert option in module_help_text
+        assert option in main_help_text
 
 
 def test_prbench_cli_prints_only_safe_summary_and_uses_result_exit_code(

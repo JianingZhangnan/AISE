@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 EXPECTED_EVALUATOR_COMMIT = "3e5bee4545cad2138832f06302e9c98bd81f5216"
-EXPECTED_WHEEL_FILENAME = "phycode-0.1.0-py3-none-any.whl"
+EXPECTED_WHEEL_FILENAME = "phycode-0.1.1-py3-none-any.whl"
 PATCH_PATH = Path(__file__).with_name("phycode-evaluator.patch")
 
 
