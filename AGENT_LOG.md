@@ -539,3 +539,6 @@
 - 最终在进程内以真实 URL/key 固定字符串扫描 worktree、解包后的 wheel/sdist 以及
   全部 Git 历史，只输出命中计数；URL 与 key 在三类目标中均为 0 命中。默认 pytest
   与 CI 继续完全离线，真实凭据从未交给 subagent。
+- Task 31 文档与真实验收提交为 `bb6efc8`；主 `PLAN.md` 已使用实际 hash 关联
+  Task 28–31，未写占位提交。下一步是 whole-branch final review，尚未在本条记录中
+  预先声明可合并或可发布。

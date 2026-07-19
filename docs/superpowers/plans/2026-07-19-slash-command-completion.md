@@ -387,7 +387,7 @@ def test_command_completion_lists_filters_and_ranks_canonical_commands():
     assert [item.text for item in filtered] == ["/model ", "/models"]
     assert [item.display_meta_text for item in filtered] == ["切换当前模型", "列出当前凭据可用的模型"]
 
-    assert [item.display_text for item in _completions("/mdl", completer)] == ["/model <name>"]
+    assert [item.display_text for item in _completions("/mdl", completer)] == ["/model <name>", "/models"]
     assert [item.display_text for item in _completions("/lo", completer)] == ["/key"]
     assert _completions("please /model", completer) == []
 

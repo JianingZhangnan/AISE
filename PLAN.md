@@ -2508,3 +2508,28 @@ upstream import API 漂移；overlay 不修改上游依赖声明。最终只有 
   策略层对 POSIX NUL 路径产生的 `ValueError` 失败关闭。commit：`aa061b2`。
   TDD RED 为 GitHub Actions 的 9 failures 与 WSL 定向复现；Windows 全量测试、
   `CI=true/GITHUB_ACTIONS=true` 的 WSL 全量测试、Pyright 和构建均通过。
+
+---
+
+## 2026-07-19 斜杠命令实时补全（Task 28–31）
+
+批准设计：`docs/superpowers/specs/2026-07-19-slash-command-completion-design.md`。
+
+逐步实施计划：`docs/superpowers/plans/2026-07-19-slash-command-completion.md`。
+
+- [x] Task 28：建立唯一声明式斜杠命令注册表，统一规范命令、别名、参数、帮助与
+  CLI 副作用分发。commit：`47e218b`；独立审查 Critical/Important/Minor 为 0/0/0。
+- [x] Task 29：增加 `prompt-toolkit>=3.0.52,<4`、稳定模糊补全、八行候选上限与
+  线程安全的会话模型缓存。commit：`6a74122`；独立审查无 Critical/Important，记录
+  一项并发首次加载直接测试的非阻塞 Minor，交由 whole-branch review 最终裁决。
+- [x] Task 30：接入真实 TTY `PromptSession`、键盘行为、动态底栏、真实模型后台候选
+  与非 TTY 整行回退。commit：`6ebf027`；独立审查 Critical/Important/Minor 为 0/0/0。
+- [x] Task 31：补齐 README/SPEC/过程合同并完成真实 Windows PTY、真实模型枚举、
+  真实 LLM 响应、Windows/WSL 全量测试、Pyright、0.1.1 构建与凭据泄漏扫描。
+  文档与真实验收 commit：`bb6efc8`。真实验收发现并修复旧 `/models` 供应商异常可能
+  暴露凭据片段的问题，安全修复 commit：`14ec52e`；URL/key 在 worktree、解包构建物
+  与全部 Git 历史均为 0 命中。
+
+本批次不修改 AgentLoop、策略、工具权限、审批语义、trace、凭据存储、版本或 Release
+元数据；默认测试和 CI 保持离线。完成 whole-branch final review 且关闭全部分级问题后，
+再进入分支收尾、合并与发布流程。
