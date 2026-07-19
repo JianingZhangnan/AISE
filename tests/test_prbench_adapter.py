@@ -1987,16 +1987,28 @@ def test_public_smoke_stops_after_first_evaluator_failure_with_fake_uv(
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     uv_log = tmp_path / "uv-calls.log"
-    (fake_bin / "uv.cmd").write_text(
-        "@echo off\r\n"
-        ">>\"%FAKE_UV_LOG%\" echo %*\r\n"
-        "echo %* | findstr /C:\"apply_adapter.py\" >nul\r\n"
-        "if not errorlevel 1 exit /b 0\r\n"
-        "echo %* | findstr /C:\"aaatest_helloworld\" >nul\r\n"
-        "if not errorlevel 1 exit /b 23\r\n"
-        "exit /b 0\r\n",
-        encoding="utf-8",
-    )
+    if os.name == "nt":
+        (fake_bin / "uv.cmd").write_text(
+            "@echo off\r\n"
+            ">>\"%FAKE_UV_LOG%\" echo %*\r\n"
+            "echo %* | findstr /C:\"apply_adapter.py\" >nul\r\n"
+            "if not errorlevel 1 exit /b 0\r\n"
+            "echo %* | findstr /C:\"aaatest_helloworld\" >nul\r\n"
+            "if not errorlevel 1 exit /b 23\r\n"
+            "exit /b 0\r\n",
+            encoding="utf-8",
+        )
+    else:
+        fake_uv = fake_bin / "uv"
+        fake_uv.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$*\" >> \"$FAKE_UV_LOG\"\n"
+            "case \"$*\" in *apply_adapter.py*) exit 0 ;; esac\n"
+            "case \"$*\" in *aaatest_helloworld*) exit 23 ;; esac\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
     evaluator = tmp_path / "evaluator"
     evaluator.mkdir()
     wheel = tmp_path / "phycode-0.1.1-py3-none-any.whl"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tomllib
 from pathlib import Path
@@ -214,17 +215,31 @@ def test_public_smoke_restores_or_removes_opencode_environment_with_fake_uv(
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    (fake_bin / "uv.cmd").write_text(
-        "@echo off\r\n"
-        "echo %* | findstr /C:\"apply_adapter.py\" >nul\r\n"
-        "if not errorlevel 1 exit /b 0\r\n"
-        "if not \"%OPENCODE_API_KEY%\"==\"fake-phycode-key\" exit /b 71\r\n"
-        "if not \"%OPENCODE_BASE_URL%\"==\"https://fake.invalid/v1\" exit /b 72\r\n"
-        "if not \"%OPENCODE_MODEL%\"==\"openai/fake-model\" exit /b 73\r\n"
-        "if \"%FAKE_UV_FAIL%\"==\"1\" exit /b 23\r\n"
-        "exit /b 0\r\n",
-        encoding="utf-8",
-    )
+    if os.name == "nt":
+        (fake_bin / "uv.cmd").write_text(
+            "@echo off\r\n"
+            "echo %* | findstr /C:\"apply_adapter.py\" >nul\r\n"
+            "if not errorlevel 1 exit /b 0\r\n"
+            "if not \"%OPENCODE_API_KEY%\"==\"fake-phycode-key\" exit /b 71\r\n"
+            "if not \"%OPENCODE_BASE_URL%\"==\"https://fake.invalid/v1\" exit /b 72\r\n"
+            "if not \"%OPENCODE_MODEL%\"==\"openai/fake-model\" exit /b 73\r\n"
+            "if \"%FAKE_UV_FAIL%\"==\"1\" exit /b 23\r\n"
+            "exit /b 0\r\n",
+            encoding="utf-8",
+        )
+    else:
+        fake_uv = fake_bin / "uv"
+        fake_uv.write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in *apply_adapter.py*) exit 0 ;; esac\n"
+            "[ \"$OPENCODE_API_KEY\" = \"fake-phycode-key\" ] || exit 71\n"
+            "[ \"$OPENCODE_BASE_URL\" = \"https://fake.invalid/v1\" ] || exit 72\n"
+            "[ \"$OPENCODE_MODEL\" = \"openai/fake-model\" ] || exit 73\n"
+            "[ \"$FAKE_UV_FAIL\" = \"1\" ] && exit 23\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
     evaluator = tmp_path / "evaluator"
     evaluator.mkdir()
     wheel = tmp_path / "phycode-0.1.1-py3-none-any.whl"
