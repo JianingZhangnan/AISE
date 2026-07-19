@@ -647,6 +647,107 @@ def test_official_green_agent_read_file_safe_round_trips_utf8(
     assert read_file_safe(str(target)) == expected
 
 
+def test_official_white_agent_text_open_calls_use_utf8(
+    patched_official_evaluator: Path,
+) -> None:
+    source = patched_official_evaluator / "src/white_agent/agent.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    missing_utf8: list[int] = []
+
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "open"
+        ):
+            continue
+        mode_node = node.args[1] if len(node.args) > 1 else None
+        mode_node = next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "mode"),
+            mode_node,
+        )
+        mode = mode_node.value if isinstance(mode_node, ast.Constant) else "r"
+        if isinstance(mode, str) and "b" in mode:
+            continue
+        encoding_node = next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "encoding"),
+            None,
+        )
+        if not (
+            isinstance(encoding_node, ast.Constant)
+            and encoding_node.value == "utf-8"
+        ):
+            missing_utf8.append(node.lineno)
+
+    assert missing_utf8 == [], (
+        "white evaluator text open calls missing encoding='utf-8' at lines "
+        f"{missing_utf8}"
+    )
+
+
+def test_official_white_instruction_writer_round_trips_utf8(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+) -> None:
+    source = patched_official_evaluator / "src/white_agent/agent.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    executor = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "ClaudeCodeWhiteAgentExecutor"
+    )
+    execute = next(
+        node
+        for node in executor.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "execute"
+    )
+    instruction_writer = next(
+        node
+        for node in ast.walk(execute)
+        if isinstance(node, ast.With)
+        and isinstance(node.items[0].context_expr, ast.Call)
+        and isinstance(node.items[0].context_expr.func, ast.Name)
+        and node.items[0].context_expr.func.id == "open"
+        and isinstance(node.items[0].context_expr.args[0], ast.Name)
+        and node.items[0].context_expr.args[0].id == "instruction_path"
+    )
+    writer = ast.FunctionDef(
+        name="write_instruction",
+        args=ast.arguments(
+            posonlyargs=[],
+            args=[ast.arg(arg="instruction_path"), ast.arg(arg="user_input")],
+            kwonlyargs=[],
+            kw_defaults=[],
+            defaults=[],
+        ),
+        body=[instruction_writer],
+        decorator_list=[],
+    )
+    module = ast.Module(body=[writer], type_ignores=[])
+    ast.fix_missing_locations(module)
+
+    def windows_text_open(
+        path: str | os.PathLike[str],
+        mode: str = "r",
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        kwargs.setdefault("encoding", "gbk")
+        return open(path, mode, *args, **kwargs)  # type: ignore[call-overload]
+
+    namespace: dict[str, object] = {"open": windows_text_open}
+    exec(compile(module, str(source), "exec"), namespace)
+    write_instruction = namespace["write_instruction"]
+    assert callable(write_instruction)
+    expected = "minus: \u2212; replacement: \ufffd; Chinese: 中文; emoji: 🧪"
+    target = tmp_path / "instruction.md"
+
+    write_instruction(target, expected)
+
+    assert target.read_text(encoding="utf-8") == expected
+
+
 def test_official_phycode_setup_defers_green_credentials_until_grading(
     patched_official_evaluator: Path,
 ) -> None:

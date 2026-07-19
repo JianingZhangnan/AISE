@@ -961,7 +961,7 @@ index 9c1f2b4..30cb126 100644
 +                logger.warning("Container force-remove failed during cleanup")
 +        finally:
 diff --git a/src/white_agent/agent.py b/src/white_agent/agent.py
-index a1b41ff..8b4ca52 100644
+index a1b41ff..b9355f3 100644
 --- a/src/white_agent/agent.py
 +++ b/src/white_agent/agent.py
 @@ -38,0 +39,5 @@ def _export_traces(container_id: str, dest_dir: str, agent_type: str = "claude")
@@ -970,6 +970,9 @@ index a1b41ff..8b4ca52 100644
 +        # under the bind-mounted /workspace/.phycode/prbench directory.
 +        logger.info(f"PhyCode traces already available in {dest_dir}")
 +        return
+@@ -165 +170 @@ class RunningTask:
+-            with open(self.trace_path, "w") as f:
++            with open(self.trace_path, "w", encoding="utf-8") as f:
 @@ -222 +227,5 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
 -                 agent_type: str = "claude"):
 +                 agent_type: str = "claude",
@@ -982,6 +985,9 @@ index a1b41ff..8b4ca52 100644
 +        self.approval_wait_seconds = approval_wait_seconds
 +        self.max_tool_calls = int(max_tool_calls)
 +        self.max_context_chars = int(max_context_chars)
+@@ -274 +287 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
+-        with open(instruction_path, "w") as f:
++        with open(instruction_path, "w", encoding="utf-8") as f:
 @@ -297 +310,5 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
 -        from src.my_util.agent_env import build_docker_exec_env_flags, resolve_env
 +        from src.my_util.agent_env import (
