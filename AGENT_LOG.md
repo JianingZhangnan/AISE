@@ -241,3 +241,25 @@
   `uv run pytest` 为 **514 passed / 14 skipped**，运行后 source 仍为 0 dirty；
   `uvx pyright` 为 0 errors；`uv build` 成功；`git diff --check` 与 tracked
   credential-like file scan 通过。
+
+## 2026-07-18 Task 22：运行时审批清单瞬时损坏恢复
+
+- subagent `runtime_task22_approval_refresh` 使用本地 Superpowers
+  `systematic-debugging`、`test-driven-development` 与
+  `verification-before-completion`。本任务未读取凭据、未调用真实 API，也未接触正在
+  运行的临时 evaluator。
+- 根因是 `ApprovalManifest.__call__` 在等待动态 `process.run` 审批期间，每次轮询
+  `_refresh()`；清单被非原子写入而短暂出现 JSON/校验错误时，异常分支会立即返回
+  `False`。这不是授权不匹配，而是读取时序竞态，导致 deadline 内稍后发布的精确
+  hash-bound grant 没有机会被读取。
+- TDD RED：新增真实文件轮询回归，第一次 sleep 写入损坏 JSON，第二次才写入匹配
+  argv/cwd/脚本 SHA-256 的授权。旧实现以 `assert manifest(call, decision)` 失败，并且
+  只发生一次 sleep，证明失败来自过早退出而非测试配置。
+- 最小 GREEN 只将等待循环内的刷新异常改为继续下一轮轮询。异常轮次不会调用
+  `_consume_matching()`，因此瞬时无效清单和内存中的旧状态都不能触发批准；后续只有
+  成功解析且精确匹配的 grant 才能被消费。循环仍在每轮 sleep 前检查 monotonic
+  deadline，所以永久无效清单最终拒绝，初始读取、请求写入、路径可见性、symlink、
+  脚本哈希与执行前复验等 fail-closed 边界均未放宽。
+- GREEN 证据：新增单测通过；审批刷新/损坏/超时聚焦集合为 8 passed、1 skipped；
+  完整 `tests/test_process_approval.py` 通过（3 个平台相关用例 skipped）；
+  `uvx pyright` 为 0 errors / 0 warnings。

@@ -1257,6 +1257,60 @@ def test_malformed_refresh_fails_closed_and_cleans_pending_request(tmp_path: Pat
     assert not request_path.exists()
 
 
+def test_dynamic_process_approval_retries_after_transient_malformed_refresh(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("print('approved')\n", encoding="utf-8")
+    script_hash = hashlib.sha256((tmp_path / "a.py").read_bytes()).hexdigest()
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(json.dumps({"grants": []}), encoding="utf-8")
+    request_path = tmp_path / ".phycode/prbench/approval-request.json"
+    clock = _FakeClock()
+    sleeps = 0
+
+    def publish_approval_after_transient_invalid_state(seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        assert request_path.is_file()
+        if sleeps == 1:
+            approvals.write_text("{malformed", encoding="utf-8")
+        else:
+            approvals.write_text(
+                json.dumps(
+                    {
+                        "grants": [
+                            {
+                                "tool_name": "process.run",
+                                "argv": [sys.executable, "a.py"],
+                                "cwd": ".",
+                                "script_sha256": script_hash,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+        clock.advance(seconds)
+
+    manifest = ApprovalManifest.from_json(
+        approvals,
+        tmp_path,
+        approval_wait_seconds=0.03,
+        clock=clock,
+        sleeper=publish_approval_after_transient_invalid_state,
+        poll_interval_seconds=0.01,
+    )
+    call = ToolCall(
+        tool_name="process.run",
+        args={"argv": [sys.executable, "a.py"], "cwd": "."},
+    )
+    decision = PolicyEngine().decide(call, PolicyContext(tmp_path, [], False))
+
+    assert manifest(call, decision)
+    assert sleeps == 2
+    assert not request_path.exists()
+
+
 def test_dynamic_process_approval_timeout_cleans_pending_request(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("print('blocked')\n", encoding="utf-8")
     approvals = tmp_path / "approvals.json"

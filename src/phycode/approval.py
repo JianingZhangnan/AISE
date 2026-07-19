@@ -146,7 +146,7 @@ class ApprovalManifest:
                 try:
                     self._refresh()
                 except Exception:
-                    return False
+                    continue
                 if self._consume_matching(
                     call_key,
                     call_id=call.id,
