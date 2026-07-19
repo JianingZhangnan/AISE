@@ -349,3 +349,14 @@
   实际 process 调用只规范化一次。仅成功 process action 的完整 identity 相等，或双方
   可证明 target identity 相等时，才淘汰旧 `approval_required` / `process_failed`；
   read/write 与不同 target 均不能清除。
+
+## 2026-07-18 最终复审与回归收口
+
+- 独立 reviewer 对 `49db986` / `f31112e` 窄复审：Critical 0、Important 0。聚焦回归
+  证明完全相同失败仍按阈值停机，不同参数纠错不误停；同 process target 新版本成功
+  能淘汰旧 blocker，不同 target/read/write 不清除；每个实际 process 调用仍只执行
+  一次 normalizer。
+- 使用 clean、固定 upstream source
+  `3e5bee4545cad2138832f06302e9c98bd81f5216` 的最终全量回归为 **579 passed / 14
+  skipped**；`uvx pyright` 为 0 errors / 0 warnings；`uv build` 成功；
+  `git diff --check` 通过，测试后 upstream source 与当前 worktree 均为 clean。

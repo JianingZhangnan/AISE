@@ -2427,7 +2427,7 @@ Task 2 完成后，以下任务可在独立 worktree 中并行进行：
 
 ---
 
-## 2026-07-18 PRBench 运行时真正重构（Task 14-23）
+## 2026-07-18 PRBench 运行时真正重构（Task 14-25）
 
 批准设计：`docs/superpowers/specs/2026-07-18-prbench-runtime-refactor-design.md`。
 
@@ -2444,8 +2444,7 @@ Task 2 完成后，以下任务可在独立 worktree 中并行进行：
 - [x] 安全 Python alias 与 normalizer identity 门禁：commits `84ee1e8`、`a2fce92`；独立复审 Critical 0 / Important 0。
 - [x] Task 22：审批清单瞬时无效时安全继续轮询。commit：`8954cbd`。
 - [x] Task 23：审批 request/grant 严格单一 schema。commit：`9c37d04`。
-- [x] Task 24：将连续重复失败绑定到完整动作身份。commit：本任务提交
-  `fix(agent): bind repeated failures to action identity [runtime_task24]`。
+- [x] Task 24：将连续重复失败绑定到完整动作身份。commit：`49db986`。
   - 目标：同一工具使用不同参数或不同脚本内容进行纠错时，不因共享 tool/feedback
     类型而被误判为重复失败；完全相同动作连续失败达到阈值仍必须停机。
   - 文件：`src/phycode/agent.py`、`tests/test_agent_loop.py`、`AGENT_LOG.md`、
@@ -2457,7 +2456,7 @@ Task 2 完成后，以下任务可在独立 worktree 中并行进行：
   - 验证：新恢复用例与既有相同动作重复停机用例同时通过；完整 agent/prbench loop
     回归和 pyright 通过。
 - [x] Task 25：让同一 process target 的新脚本版本成功执行淘汰过期 blocker。commit：
-  本任务提交 `fix(agent): retire superseded process blockers [runtime_task25]`。
+  `f31112e`。
   - 目标：旧脚本的 `approval_required` / `process_failed` 在同一调用目标的新内容版本
     成功执行后不再污染最终状态；不同 process target 以及 read/write 成功不能清除。
   - 文件：`src/phycode/agent.py`、`tests/test_prbench_loop.py`、`AGENT_LOG.md`、
