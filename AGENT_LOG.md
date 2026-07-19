@@ -463,3 +463,32 @@
   与事件序列构造器。最终
   `uv run pytest tests/test_cli_commands.py -k "run_turn and approval" -q` 为 5 passed，
   `uvx pyright` 为 0 errors / 0 warnings；未重跑全量测试，留给主 agent 最终门禁。
+
+## 2026-07-19 Task 27：发布前 Ubuntu CI 跨平台收口
+
+- 用户确认继续修复 PR #1 的 CI 阻塞后，主 agent 使用本地 Superpowers
+  `systematic-debugging`、`test-driven-development`、`finishing-a-development-branch`
+  以及 GitHub `gh-fix-ci` 工作流；没有读取凭据、调用真实模型 API 或修改审批权限。
+- 首次 PR workflow `test` / job `unit-test` 在 Ubuntu 24.04、Python 3.11 上得到
+  **9 failed / 543 passed / 71 skipped**，因此没有合并。失败由四项独立平台假设组成：
+  GitHub 强制样式使 ANSI 序列插入 CLI option；两个 PowerShell smoke 只创建 Windows
+  `uv.cmd`；旧相对路径测试在 POSIX 恰好使用了已被 runtime 明确支持的精确裸
+  `python` alias，且解释器 symlink 的显示名使用未解析值；NUL cwd 在 POSIX
+  `Path.resolve()` 抛 `ValueError`，不属于原 Windows 异常集合。
+- RED 在 WSL 中逐项复现：`FORCE_COLOR=1` 的三个 PRBench CLI 用例均因 ANSI 断言
+  失败；process allowlist、相对 executable 与 NUL cwd 三例分别复现解析后 basename、
+  alias 被规范化执行和未捕获 `ValueError`。GitHub job 日志同时为两个 POSIX fake-uv
+  问题提供端到端 RED。
+- 最小 GREEN 不更改精确裸 `python` alias 机制，也不跳过 POSIX smoke：CLI 测试用
+  Click `unstyle()` 后断言语义文本；fake uv 根据 `os.name` 生成 `.cmd` 或带执行位的
+  POSIX shell；相对路径反例改用不受支持的 `relative-python`，allowlist 错误按解析后
+  executable basename 断言；`PolicyEngine` 的 process cwd 可见性检查额外捕获
+  `ValueError` 并维持既有 deny / 不消耗 grant 语义。实现 commit `aa061b2`。
+- 聚焦 GREEN：强制彩色的三个 CLI 用例、Windows 的五个 PowerShell smoke 参数实例、
+  Windows/WSL 的三个 process 边界用例全部通过。完整 Windows `uv run pytest -q`
+  达到 100%、exit 0；`CI=true GITHUB_ACTIONS=true` 的 WSL 全量测试达到 100%、exit 0；
+  `uvx pyright` 为 0 errors / 0 warnings；`uv build` 成功生成 0.1.1 wheel/sdist。
+- 曾额外用 `FORCE_COLOR=1` 强制所有 Rich 控制台都视为真实终端，暴露六个与 GitHub
+  原失败清单不同的旧测试替身问题；对照 workflow 环境后，以
+  `CI=true/GITHUB_ACTIONS=true` 重跑完整 WSL 套件通过，故未把非生产门禁的过度模拟
+  扩大到本次发布修复。
