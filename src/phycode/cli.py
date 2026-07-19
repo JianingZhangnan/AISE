@@ -16,6 +16,7 @@ from phycode.composition import (
 from phycode.config import load_project_config, write_config_value
 from phycode.credentials import CredentialStore
 from phycode.demos import run_feedback_demo, run_guardrail_demo, run_policy_demo
+from phycode.interactive import SlashAction, parse_slash, render_slash_help
 from phycode.models import (
     AgentEvent,
     AgentEventType,
@@ -189,47 +190,37 @@ def run(
         raise typer.Exit(code=1)
 
 
-_CHAT_HELP = (
-    "Commands:\n"
-    "  /model <name>    set the LLM model\n"
-    "  /url <base_url>  set the provider base URL\n"
-    "  /key             set the API key for the current provider (hidden input)\n"
-    "  /models          list model ids the provider/token exposes\n"
-    "  /config          show the current configuration\n"
-    "  /status          show credential status\n"
-    "  /help            show this help\n"
-    "  /exit            leave the session"
-)
+_CHAT_HELP = render_slash_help()
 
 
 def _handle_slash(line: str) -> str | None:
-    """Handle a /command typed in the chat REPL. Returns 'exit', 'reload', or None."""
-    parts = line[1:].split(maxsplit=1)
-    cmd = parts[0].lower() if parts else ""
-    arg = parts[1].strip() if len(parts) > 1 else ""
-    if len(arg) >= 2 and arg[0] == arg[-1] and arg[0] in ("'", '"'):
-        arg = arg[1:-1]  # users often wrap values in quotes like the shell; strip them
-    if cmd in ("exit", "quit"):
-        return "exit"
-    if cmd == "models":
-        _print_models()
+    """Handle a /command typed in chat; return exit, reload, refresh_models, or None."""
+    parsed = parse_slash(line)
+    if parsed.spec is None:
+        console.print(f"unknown command: /{parsed.raw_name} (try /help)", markup=False)
         return None
-    if cmd in ("help", "?", ""):
+    action = parsed.spec.action
+    if action is SlashAction.EXIT:
+        return "exit"
+    if action is SlashAction.MODELS:
+        _print_models()
+        return "refresh_models"
+    if action is SlashAction.HELP:
         console.print(_CHAT_HELP, markup=False)
         return None
-    if cmd in ("model", "url"):
-        if not arg:
-            console.print(f"usage: /{cmd} <value>", markup=False)
-            return None
-        key = "model" if cmd == "model" else "base_url"
+    if parsed.needs_argument:
+        console.print(f"usage: {parsed.spec.usage}", markup=False)
+        return None
+    if action in (SlashAction.MODEL, SlashAction.URL):
+        key = "model" if action is SlashAction.MODEL else "base_url"
         try:
-            write_config_value(Path.cwd(), "llm", key, arg)
+            write_config_value(Path.cwd(), "llm", key, parsed.argument)
         except (ValueError, TypeError, tomllib.TOMLDecodeError) as exc:
             console.print(str(exc), markup=False)
             return None
-        console.print(f"llm.{key} = {arg}", markup=False)
+        console.print(f"llm.{key} = {parsed.argument}", markup=False)
         return "reload"
-    if cmd in ("key", "login"):
+    if action is SlashAction.KEY:
         secret = typer.prompt("API key", hide_input=True)
         try:
             cleaned = _clean_api_key(secret)
@@ -240,15 +231,14 @@ def _handle_slash(line: str) -> str | None:
         CredentialStore().set_key(provider, cleaned)
         console.print(f"{provider} key stored", markup=False)
         return "reload"
-    if cmd == "config":
+    if action is SlashAction.CONFIG:
         config_read()
         return None
-    if cmd == "status":
+    if action is SlashAction.STATUS:
         provider = load_project_config(Path.cwd()).llm.provider
         console.print_json(CredentialStore().status(provider).model_dump_json())
         return None
-    console.print(f"unknown command: /{cmd} (try /help)", markup=False)
-    return None
+    raise AssertionError(f"unhandled slash action: {action}")
 
 
 @app.command()
