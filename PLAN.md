@@ -2427,7 +2427,7 @@ Task 2 完成后，以下任务可在独立 worktree 中并行进行：
 
 ---
 
-## 2026-07-18 PRBench 运行时真正重构（Task 14-20）
+## 2026-07-18 PRBench 运行时真正重构（Task 14-23）
 
 批准设计：`docs/superpowers/specs/2026-07-18-prbench-runtime-refactor-design.md`。
 
@@ -2440,8 +2440,13 @@ Task 2 完成后，以下任务可在独立 worktree 中并行进行：
 - [x] Task 18：PRBench runner 与 CLI 状态契约。commits：`537b8dc` 至 `148df4f`；spec/quality review clean。
 - [x] Task 19：固定版本官方 evaluator adapter。commits：`31f58a4`、`1b0a448`；spec/quality review clean。
 - [x] Task 20：中文文档、过程证据和可重复真实 smoke 命令。commit：本次文档提交；真实凭据与官方运行保留给主 agent。
+- [x] 真实运行反馈重构：provider 原生 tool conversation、因果 feedback/blocker、no-progress epoch、安全事件计数与 stale batch。commits：`c02de06`、`5f109de`、`9c6db1a`、`d955592`、`d5496b6`。
+- [x] 安全 Python alias 与 normalizer identity 门禁：commits `84ee1e8`、`a2fce92`；独立复审 Critical 0 / Important 0。
+- [x] Task 22：审批清单瞬时无效时安全继续轮询。commit：`8954cbd`。
+- [x] Task 23：审批 request/grant 严格单一 schema。commit：`9c37d04`。
+- [x] 官方真实验收：固定 evaluator commit 上 `aaatest_helloworld`、`bbbtest_alphabet` 均由白色 runner `completed`，绿色 grader 均为 1.0；trace/journal/artifact/hash 与凭据泄漏扫描全部通过。
 
-依赖关系为 Task 14 → 15 → 16 → 17 → 18 → 19 → 20。每项由新鲜 subagent 按 TDD 完成，并在进入下一项前通过 spec 合规与代码质量审查。最终由主 agent 在不暴露凭据的前提下使用真实 `deepseek-v4-pro` 和固定官方 evaluator commit 跑 `aaatest_helloworld`、`bbbtest_alphabet`。
+基础依赖关系为 Task 14 → 15 → 16 → 17 → 18 → 19 → 20；真实运行反馈再依次触发原生对话/因果状态、安全 alias、Task 22 与 Task 23。实现任务由独立 subagent 按 TDD 完成并接受复审；最终由主 agent 在不暴露凭据的前提下使用真实 `deepseek-v4-pro` 和固定官方 evaluator commit 完成双任务验收。
 
 本批 PRBench 运行时真正重构明确拒绝继续维护旧 parser：字符串级 shell
 lexer/state machine 无法覆盖解释器拼接、变量展开、symlink 和不同 shell 语义，
@@ -2455,4 +2460,6 @@ subagent、默认 `uv run pytest` 和 CI 均不得读取凭据或把 mock 成功
 `a2a-sdk[http-server]==0.3.8` 启动固定 commit，避免普通解析选择 1.1.1 后产生
 upstream import API 漂移；overlay 不修改上游依赖声明。最终只有 runner
 `completed`、expected outputs、官方 evaluator 报告和 key/URL 泄漏扫描全部通过，
-才能记录真实验收成功。
+才能记录真实验收成功。2026-07-18 最终验收已满足该门禁：两项 runner 均为
+`completed`、两份官方报告均为 1.0，声明/实际 trace 计数一致，journal 与 artifact
+哈希可复算，真实 URL/key 文件扫描和 Git 历史扫描均为 0 命中。

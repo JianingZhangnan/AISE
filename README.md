@@ -2,7 +2,7 @@
 
 PhyCode 是面向 AI4SE 期末项目的 CLI 优先 coding agent harness，核心是**策略感知工具运行时（Policy-Aware Tool Runtime）**：自研 agent 主循环、可注入 mock/stub 的 LLM 抽象层、确定性治理护栏、反馈闭环、记忆/上下文管理与凭据处理。核心机制在移除真实 LLM 后仍可由确定性单元测试验证。
 
-> 状态：Task 1–20 的实现与确定性验证已完成；PRBench 官方真实验收必须另行使用真实模型与 Docker 执行，不能由默认测试结果代替。
+> 状态：核心重构、确定性验证与 PRBench 官方双任务真实验收均已完成。2026-07-18 在固定 evaluator commit 上，`aaatest_helloworld` 与 `bbbtest_alphabet` 的白色 runner 均为 `completed`，官方绿色 grader 均为 `overall_score=1.0`；默认测试仍不调用真实模型。
 
 ## 快速开始
 
@@ -72,6 +72,12 @@ expected outputs 存在且 artifact verifier 通过时，runner 才返回 `compl
    PhyCode 完成任务，再由官方绿色 grader 生成报告。Docker daemon 必须已运行，
    smoke 脚本把同一组三项 provider 值临时映射给官方 OpenCode 绿色 agent；映射
    只存在于 evaluator 子进程期间，随后精确恢复或真正删除。
+
+2026-07-18 的最终真实验收使用 `deepseek-v4-pro` 和固定 upstream commit：hello
+任务经 8 次工具调用、46 个 trace 事件完成；alphabet 经 6 次工具调用、32 个 trace
+事件完成。两项 execution journal 均记录成功且 hash-bound 的 Python 执行，声明的
+trace 计数与实际 JSONL 行数一致，产物哈希可复算，官方评分均为 1.0。真实 provider
+的两组 URL/key 对项目文件、构建物、评测结果和 Git 历史的精确扫描均为 0 命中。
 
 直接 runner 的命令形态如下；三个 provider 值只从当前进程环境或安全凭据后端
 取得，不要写入仓库、命令参数或 `.env`：

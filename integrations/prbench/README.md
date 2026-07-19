@@ -48,9 +48,10 @@ agent 或与 `--code-only` 组合会在容器创建前 fail closed。
 PRBench runner 显式开启“成功工具后验收”：每个 `status=ok` 的工具结果完成回灌后，
 立即用同一个 `ArtifactVerifier` 检查 contract；只有文件路径、内容约束和 execution
 provenance 全部通过才直接以唯一成功终态 `completed` 停机，不再等待模型主动 final，
-也不再调用后续 `status/read`。非致命的未通过检查保持静默，让模型继续工作；拒绝、
-失败或超时工具不触发该成功判定，verifier 安全异常则立即 fail closed。该开关默认
-关闭，普通 coding/GAIA run 的停机语义不变。
+也不再调用后续 `status/read`。非致命的未通过检查会作为结构化
+`artifact_verification_failed` 反馈进入下一轮因果上下文，引导模型补齐脚本执行或
+产物；拒绝、失败或超时工具不触发成功判定，verifier 安全异常则立即 fail closed。
+该开关默认关闭，普通 coding/GAIA run 的停机语义不变。
 PRBench 的确定性 policy 还在审批前拒绝 workspace `data/**/*.csv` 的
 `file.write` / `file.edit`，rule 为 `prbench.direct_csv_mutation_blocked`。reason 和
 结构化 feedback 只给出“修正 reproduction 脚本，再请求 `process.run`”的固定恢复

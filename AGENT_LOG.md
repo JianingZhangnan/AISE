@@ -277,3 +277,34 @@
   `ApprovalGrant` 的 `extra="forbid"`，也不改变 absolute executable、cwd、argv 与
   `script_sha256` 的精确绑定。现在审核通过的请求对象可原样追加到 manifest 的
   `grants` 数组，并由 `ApprovalDocument` 解析、`ApprovalManifest` 匹配和一次性消费。
+
+## 2026-07-18 官方真实 API / Docker 最终验收
+
+- 主 agent 独占读取仓库外凭据文件；只在 evaluator 子进程内设置 `PHYCODE_*`，并由
+  `finally` 清除。任何 subagent、测试、命令参数、文档和日志均未接收真实值。
+- 真实失败没有被改写成成功：早期运行依次暴露扁平工具上下文导致的 `file.list`
+  循环（官方 0.5）、裸 `python` 无法形成安全审批（官方 0.3），以及一次发生在模型
+  调用前的 Docker exec 404。前两项分别触发原生 tool conversation/因果状态与严格
+  Python alias normalizer；Docker 冷启动故障未诱发产品代码补丁。
+- real8 的 `aaatest_helloworld` 经人工检查两个版本脚本并分别核对 SHA-256 后，批准
+  两个 exact absolute-argv/cwd/hash grant；runner `completed`，8 次工具调用、46 个
+  trace 事件、2 条成功 execution journal，官方 `overall_score=1.0`。
+- real8/real9 的 alphabet 脚本逻辑正确，但人工把审批 request 原样加入 manifest 时
+  多余 `script_path` 被 strict schema 拒绝，CSV 未执行生成，官方分别为 0.7/0.5。
+  这确认 Task 23 是 request/grant 接口缺陷，而不是 verifier 或模型任务能力问题；未
+  手工生成产物、未放宽 grant、未修改 grader。
+- Task 22/23 wheel 重建后，real10 的 `bbbtest_alphabet` 请求只含
+  `tool_name/argv/cwd/script_sha256`。主 agent 验证 request/script 均非链接、路径位于
+  workspace、argv 为唯一 allowlisted `/usr/local/bin/python3.11` 加目标脚本，并独立
+  复算 SHA-256；请求对象原样作为一次性 grant 后，runner `completed`，6 次工具调用、
+  32 个 trace 事件、1 条成功 execution journal，官方 `overall_score=1.0`。
+- 最终证据核验：两项 trace 声明数等于实际 JSONL 行数；run_result 中 reproduction
+  脚本与 CSV 均存在且 SHA-256 可复算一致；execution journal 的脚本 hash 与人工审批
+  版本一致；官方评测容器全部移除。
+- 安全扫描从外部凭据文件只在内存取得两组 URL/key，分别对项目源码/构建物、real8
+  与 real10 evaluator 结果和 Git 全历史做 exact scan，四项均为 0 命中。新的检查
+  进程中 `PHYCODE_*` / `OPENCODE_*` 六项均不存在，未回显任何真实值。
+- 最终固定-source 回归使用 clean upstream
+  `3e5bee4545cad2138832f06302e9c98bd81f5216`：`uv run pytest` 为 **577 passed / 14
+  skipped**，`uvx pyright` 为 0 errors / 0 warnings，`uv build` 成功生成
+  sdist/wheel，`git diff --check` 通过；测试后 upstream source 仍为 clean。

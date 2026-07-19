@@ -219,10 +219,10 @@ CSV 获得官方绿色 grader 的满分内容评价，却没有主动请求 stop
 采用的修订是在工具结果与 stop controller 的既有边界增加 PRBench 显式 opt-in：
 成功工具结果完成回灌、进程 journal 已更新后立即调用同一个 `ArtifactVerifier`；只有
 完整 contract 与 provenance 都通过才返回 `completed`。中间阶段的 nonfatal 未通过
-保持静默，避免每次正常 read/write 都制造反馈噪声；拒绝、失败和超时动作不触发即时
-成功，verifier 安全异常仍 fail closed。该开关默认关闭，因此没有把 PRBench contract
-语义扩散到普通 coding/GAIA loop，也没有新增第二套验证器、任务专用 solver 或提示词
-补丁。
+通过结构化 `artifact_verification_failed` 回灌到下一轮因果上下文，使模型知道缺少
+脚本执行或产物；拒绝、失败和超时动作不触发即时成功，verifier 安全异常仍 fail
+closed。该开关默认关闭，因此没有把 PRBench contract 语义扩散到普通 coding/GAIA
+loop，也没有新增第二套验证器、任务专用 solver 或提示词补丁。
 
 ### 第五轮修订：从“精确 CSV 审批”到不可绕过的 provenance workflow
 
@@ -253,6 +253,42 @@ path 先走 visibility，仅额外构造不进入 executor 的分类 view：逐 
 `rstrip(" .")` 后 casefold；非盘符冒号 fail closed。确定性 wrong-grant 回放覆盖
 write/edit、多个尾随字符、每层 component、大小写、反斜杠、嵌套路径与
 `data/output.csv::$DATA`，同时证明 coding/GAIA 与正常 drive prefix 不受影响。
+
+### 第六轮修订：原生工具对话、因果状态与安全别名
+
+后续真实运行证明，仅修补 policy 仍不足以让模型稳定使用 harness。一次运行中模型把
+历史工具交互看成扁平文本，反复 `file.list`，官方仅得 0.5。由此删除旧的拼接式上下文，
+独立引入 conversation projection：assistant 事件恢复为 provider 原生
+`tool_calls`，结果使用配对的 tool role，显式 user turn 与可行动反馈分别保留。成功
+动作账本、审批/进程失败 blocker 和 no-progress epoch 改为因果状态，不再依赖可能被
+截断的原始历史；同一 provider batch 在 mutation、失败或纠正反馈后剩余调用标记为
+`stale_tool_batch`，不得在过期前提下继续执行。
+
+下一次运行生成了正确脚本，却因模型使用裸 `python` 而无法形成动态审批，官方得
+0.3。修订没有恢复 shell/PATH 解析，而是在 ToolRegistry 的 policy 前增加一次性
+normalizer：只有 allowlist 中恰好存在一个 Python 绝对 executable 时，大小写精确的
+裸 `python` 才规范化为该路径；`./python`、`python.exe`、多候选和 PATH 搜索全部拒绝。
+normalizer 前先快照 id/tool/provider-call identity，原地篡改身份立即 fail closed；
+规范化后的同一调用才进入 policy、approval、executor、journal 与 guard。
+
+### 第七轮修订：审批请求与 grant 的单一契约
+
+真实 hello 任务随后达到官方 1.0，但 alphabet 审批失败暴露了接口断裂：运行时请求
+含 `script_path`，严格的 `ApprovalGrant(extra="forbid")` 却不接受该字段。主 agent
+把已核验请求原样追加后，清单刷新正确地 fail closed，官方两次分别只得到 0.7 与
+0.5；这不是模型代码错误，也不能通过手工生成 CSV 掩盖。
+
+TDD 修订做了两件事：等待期间遇到瞬时无效清单时，该轮不消费任何旧授权，但在
+deadline 内继续轮询；更关键的是删除请求中冗余的 `script_path`，让请求与 process
+grant 共用严格 schema。`argv[1]` 仍给出相对 `cwd` 的脚本，absolute executable、
+cwd、argv、SHA-256 和一次性消费均未放宽。修复后的 alphabet 白色 runner 返回
+`completed`，官方 grader 为 1.0。
+
+最终有效验收组合为 hello（real8）与 alphabet（real10）：两项官方
+`overall_score=1.0`，trace 计数、execution journal、产物存在性及哈希均复核通过。
+期间一次 Docker exec 404 发生在模型/API 启动前，按外部冷启动故障记录且未触发代码
+修改。两组真实 URL/key 对源码、构建物、两个有效 evaluator 结果和 Git 历史的精确
+扫描均为 0 命中；宿主 `PHYCODE_*` / `OPENCODE_*` 进程变量和评测容器均已清理。
 
 ## 仓库平台记录
 
