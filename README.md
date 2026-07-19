@@ -97,7 +97,7 @@ uv run phycode prbench run `
 ```powershell
 .\integrations\prbench\run_public_smoke.ps1 `
   -EvaluatorRoot D:\path\to\PRBench-Eval-Handson `
-  -WheelPath D:\path\to\AISE\dist\phycode-0.1.0-py3-none-any.whl `
+  -WheelPath D:\path\to\AISE\dist\phycode-0.1.1-py3-none-any.whl `
   -TaskIds aaatest_helloworld,bbbtest_alphabet
 ```
 

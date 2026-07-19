@@ -416,3 +416,17 @@
   测试仍为 2 passed，`uvx pyright` 为 0 errors / 0 warnings；`uv build` 成功生成
   `phycode-0.1.1.tar.gz` 与 `phycode-0.1.1-py3-none-any.whl`；
   `git diff --check` exit 0，仅报告 Windows 工作树 LF/CRLF 转换提示。
+- 独立 reviewer 随后指出 Important：虽然项目元数据和构建已是 `0.1.1`，PRBench
+  adapter 的严格 wheel 文件名、两份 smoke 文档以及 evaluator patch 的容器 copy /
+  install 目标仍固定 `0.1.0`，会拒绝新 wheel 并使文档化 smoke 无法消费本次构建。
+  新增版本一致性契约测试从 `pyproject.toml` 推导期望文件名，并聚合核对 adapter、
+  主 README、集成 README、patch copy 与 install 五个消费端。首次因 `integrations/`
+  不在安装包路径发生测试收集错误；改为静态提取 adapter 常量后得到有效 RED，失败 diff
+  显示五处实际均为 `phycode-0.1.0-py3-none-any.whl`、期望均为 `0.1.1`。
+- 最小 GREEN 只同步上述运行契约及受影响测试夹具到 `0.1.1`；没有替换历史上描述
+  v0.1.0 已发布事实的过程文档，也没有改动 spinner 实现、审批策略或 evaluator 逻辑。
+  版本一致性测试随后为 1 passed。
+- reviewer 修复覆盖命令
+  `uv run pytest tests/test_docs_process.py tests/test_prbench_adapter.py tests/test_cli_smoke.py -q`
+  达到 100%、exit 0；`uvx pyright` 为 0 errors / 0 warnings。按修复合同未重跑全量测试，
+  由主 agent 执行最终全量门禁。

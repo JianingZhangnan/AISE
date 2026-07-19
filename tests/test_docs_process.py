@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,43 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _read(name: str) -> str:
     return (ROOT / name).read_text(encoding="utf-8")
+
+
+def test_prbench_wheel_contract_matches_project_version():
+    project_version = tomllib.loads(_read("pyproject.toml"))["project"]["version"]
+    wheel_filename = f"phycode-{project_version}-py3-none-any.whl"
+    filename_pattern = r"phycode-\d+\.\d+\.\d+-py3-none-any\.whl"
+    adapter_filename = re.search(
+        rf'^EXPECTED_WHEEL_FILENAME = "({filename_pattern})"$',
+        _read("integrations/prbench/apply_adapter.py"),
+        flags=re.MULTILINE,
+    )
+    main_readme = re.search(filename_pattern, _read("README.md"))
+    integration_readme = re.search(
+        filename_pattern, _read("integrations/prbench/README.md")
+    )
+    patch = _read("integrations/prbench/phycode-evaluator.patch")
+    patch_copy = re.search(
+        rf'self\.phycode_wheel,\s*"/tmp/({filename_pattern})"', patch
+    )
+    patch_install = re.search(
+        rf"uv pip install --system /tmp/({filename_pattern})", patch
+    )
+    assert adapter_filename is not None
+    assert main_readme is not None
+    assert integration_readme is not None
+    assert patch_copy is not None
+    assert patch_install is not None
+
+    actual_filenames = {
+        "adapter": adapter_filename.group(1),
+        "README.md": main_readme.group(0),
+        "integrations/prbench/README.md": integration_readme.group(0),
+        "patch copy target": patch_copy.group(1),
+        "patch install target": patch_install.group(1),
+    }
+
+    assert actual_filenames == dict.fromkeys(actual_filenames, wheel_filename)
 
 
 def test_readme_documents_all_user_facing_commands():
@@ -189,7 +227,7 @@ def test_public_smoke_restores_or_removes_opencode_environment_with_fake_uv(
     )
     evaluator = tmp_path / "evaluator"
     evaluator.mkdir()
-    wheel = tmp_path / "phycode-0.1.0-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.1-py3-none-any.whl"
     wheel.write_bytes(b"fake wheel")
     wrapper = tmp_path / "invoke-smoke.ps1"
     wrapper.write_text(
