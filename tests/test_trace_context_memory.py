@@ -57,7 +57,7 @@ def test_key_aware_redaction_reaches_trace_context_and_memory(tmp_path: Path) ->
             "kind": "tool_error",
             "tool_args": {"api_key": "a1b2c3d4"},
             "tool_output": {"authorization": "eeff0011"},
-            "state": {"client_secret": "11223344"},
+            "state": ({"client_secret": "11223344"},),
         },
     )
     store.add_event(event)
@@ -74,11 +74,13 @@ def test_key_aware_redaction_reaches_trace_context_and_memory(tmp_path: Path) ->
     trace_payload = json.loads(next((tmp_path / "traces").glob("*.jsonl")).read_text())
     rendered = json.dumps(ContextBuilder(store, memory).build("continue"))
     memory_line = json.loads((tmp_path / "memory.jsonl").read_text())
+    session_payload = str(store.events[0].payload)
 
     for secret in ("a1b2c3d4", "eeff0011", "11223344", "55667788"):
         assert secret not in json.dumps(trace_payload)
         assert secret not in rendered
         assert secret not in json.dumps(memory_line)
+        assert secret not in session_payload
 
 
 def test_context_redacts_current_input_before_llm_messages(tmp_path: Path):

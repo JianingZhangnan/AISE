@@ -44,7 +44,8 @@ class SessionStore:
         self.events: list[AgentEvent] = []
 
     def add_event(self, event: AgentEvent) -> None:
-        self.events.append(event)
+        safe = event.model_copy(update={"payload": redact_obj(event.payload)})
+        self.events.append(safe)
 
     def recent_events(self, limit: int = 12) -> list[AgentEvent]:
         return self.events[-limit:]

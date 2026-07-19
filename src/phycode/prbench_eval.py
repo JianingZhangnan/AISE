@@ -412,7 +412,7 @@ def run_prbench(
             artifacts=tuple(_artifact_summary(item) for item in journal.snapshot_artifacts()),
             trace=PRBenchTraceSummary(
                 path=trace_path.relative_to(root).as_posix(),
-                events=len(agent_result.events),
+                events=loop.trace_store.event_count(loop.session_store.session.id),
             ),
         )
     except Exception:

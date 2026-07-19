@@ -144,8 +144,8 @@ class AgentLoop:
                 recorded = self._record(normalized)
                 all_events.append(recorded)
 
-                if normalized.type == AgentEventType.ASSISTANT_FINAL:
-                    candidate_text = str(normalized.payload.get("text", ""))
+                if recorded.type == AgentEventType.ASSISTANT_FINAL:
+                    candidate_text = str(recorded.payload.get("text", ""))
                     if self.completion_verifier is None:
                         return AgentRunResult(candidate_text, all_events, "final")
                     verification = self._verify_completion()
@@ -411,18 +411,18 @@ class AgentLoop:
             events = self.llm.generate(messages, [])
         except Exception as exc:
             error_event = self._new_event(AgentEventType.ERROR, {"message": str(exc)})
-            self._record(error_event)
-            all_events.append(error_event)
+            recorded_error = self._record(error_event)
+            all_events.append(recorded_error)
             return AgentRunResult(None, all_events, "error")
 
         for event in events:
             normalized = event.model_copy(update={"session_id": self.session_store.session.id})
-            self._record(normalized)
-            all_events.append(normalized)
-            if normalized.type == AgentEventType.ASSISTANT_FINAL:
-                return AgentRunResult(str(normalized.payload.get("text", "")), all_events, "final")
-            if normalized.type in _TERMINAL_EVENT_REASONS:
-                return AgentRunResult(None, all_events, _TERMINAL_EVENT_REASONS[normalized.type])
+            recorded = self._record(normalized)
+            all_events.append(recorded)
+            if recorded.type == AgentEventType.ASSISTANT_FINAL:
+                return AgentRunResult(str(recorded.payload.get("text", "")), all_events, "final")
+            if recorded.type in _TERMINAL_EVENT_REASONS:
+                return AgentRunResult(None, all_events, _TERMINAL_EVENT_REASONS[recorded.type])
         return AgentRunResult(None, all_events, "tool_budget")
 
     def _successful_action_result_key(self, request: AgentEvent, tool_events: list[AgentEvent]) -> str | None:

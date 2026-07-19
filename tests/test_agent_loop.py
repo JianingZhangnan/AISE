@@ -1,4 +1,7 @@
+import json
 from pathlib import Path
+
+import pytest
 
 from phycode.agent import AgentLoop
 from phycode.context import ContextBuilder, MemoryStore, SessionStore
@@ -40,6 +43,31 @@ def test_agent_returns_final_text(tmp_path: Path):
     result = loop.run("hello")
     assert result.final_text == "done"
     assert result.stopped_reason == "final"
+
+
+def test_agent_result_uses_the_recorded_safe_final_event(tmp_path: Path) -> None:
+    secret = "cafebabe"
+    llm = ScriptedLLM(
+        [
+            [
+                {
+                    "type": "assistant_final",
+                    "payload": {
+                        "text": f"password={secret}",
+                        "nested": ({"api_key": "a1b2c3d4"},),
+                    },
+                }
+            ]
+        ]
+    )
+
+    result = build_loop(tmp_path, llm).run("finish safely")
+
+    rendered = str([event.model_dump(mode="python") for event in result.events])
+    assert secret not in str(result.final_text)
+    assert secret not in rendered
+    assert "a1b2c3d4" not in rendered
+    assert "REDACTED_SECRET" in str(result.final_text) + rendered
 
 
 def test_agent_routes_tool_call_and_then_final(tmp_path: Path):
@@ -274,6 +302,54 @@ def test_tool_budget_finalization_prompt_disables_more_tool_calls(tmp_path: Path
     assert result.final_text == "answer"
     assert llm.messages[1][1] == []
     assert "Tool use is now disabled" in str(llm.messages[1][0])
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload", "expected_reason"),
+    [
+        (
+            "assistant_final",
+            {
+                "text": "password=cafebabe",
+                "nested": ({"api_key": "a1b2c3d4"},),
+            },
+            "final",
+        ),
+        (
+            "incomplete",
+            {
+                "reason": "synthetic stop",
+                "nested": ({"client_secret": "11223344"},),
+            },
+            "incomplete",
+        ),
+    ],
+)
+def test_evidence_finalization_returns_only_recorded_safe_events(
+    tmp_path: Path,
+    event_type: str,
+    payload: dict[str, object],
+    expected_reason: str,
+) -> None:
+    loop = build_loop(
+        tmp_path,
+        ScriptedLLM([[{"type": event_type, "payload": payload}]]),
+        max_tool_calls=0,
+    )
+
+    result = loop.run("finish from evidence")
+
+    result_text = str(result.final_text) + str(
+        [event.model_dump(mode="python") for event in result.events]
+    )
+    persisted_text = str(
+        [event.model_dump(mode="python") for event in loop.session_store.events]
+    ) + json.dumps(loop.trace_store.read_events_raw(loop.session_store.session.id))
+    assert result.stopped_reason == expected_reason
+    for secret in ("cafebabe", "a1b2c3d4", "11223344"):
+        assert secret not in result_text
+        assert secret not in persisted_text
+    assert "REDACTED_SECRET" in result_text
 
 
 def test_agent_loop_passes_tool_specs_to_llm(tmp_path: Path):

@@ -35,3 +35,18 @@ def test_key_aware_object_redaction_masks_entire_ordinary_secret_values() -> Non
     assert redacted["nested"]["token_count"] == 7
     assert redacted["credential_ref"] == "keyring:phycode/default"
     assert json.loads(serialized) == redacted
+
+
+def test_object_redaction_recurses_through_tuples_and_fails_closed_on_sets() -> None:
+    ordinary_hex_secret = "a1b2c3d4"
+    original = {
+        "nested": ({"api_key": ordinary_hex_secret}, "safe"),
+        "unsupported": {"password=cafebabe"},
+    }
+
+    redacted = redact_obj(original)
+
+    assert isinstance(redacted["nested"], tuple)
+    assert redacted["nested"] == ({"api_key": "[REDACTED_SECRET]"}, "safe")
+    assert redacted["unsupported"] == "[REDACTED_UNSUPPORTED_TYPE]"
+    assert ordinary_hex_secret not in str(redacted)

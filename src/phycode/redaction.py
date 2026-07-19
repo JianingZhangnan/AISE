@@ -19,6 +19,7 @@ SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 _REDACTED_SECRET = "[REDACTED_SECRET]"
+_REDACTED_UNSUPPORTED_TYPE = "[REDACTED_UNSUPPORTED_TYPE]"
 
 
 def _is_sensitive_key(key: object) -> bool:
@@ -58,4 +59,8 @@ def redact_obj(value: Any) -> Any:
         }
     if isinstance(value, list):
         return [redact_obj(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_obj(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return _REDACTED_UNSUPPORTED_TYPE
     return value

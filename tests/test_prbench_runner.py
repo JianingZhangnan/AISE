@@ -634,6 +634,30 @@ def test_run_result_contains_only_relative_artifact_and_trace_paths(tmp_path: Pa
     assert not (tmp_path / ".phycode/prbench/run_result.json.tmp").exists()
 
 
+def test_trace_summary_uses_the_persisted_jsonl_as_its_event_count_source(
+    tmp_path: Path,
+) -> None:
+    contract, approvals = _write_public_task_files(tmp_path)
+
+    result = run_prbench(
+        tmp_path,
+        contract,
+        approvals,
+        llm=_scripted_llm_that_writes_runs_reads_and_finishes(),
+        max_tool_calls=8,
+    )
+
+    assert result.trace is not None
+    trace_path = tmp_path / result.trace.path
+    persisted_events = [
+        json.loads(line)
+        for line in trace_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert persisted_events[0]["type"] == "user_message"
+    assert result.trace.events == len(persisted_events)
+
+
 def test_runner_constructs_provider_only_from_phycode_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

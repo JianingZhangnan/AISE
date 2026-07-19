@@ -33,3 +33,7 @@ class TraceStore:
             except json.JSONDecodeError:
                 continue
         return events
+
+    def event_count(self, session_id: str) -> int:
+        """Return the number of persisted JSONL events for a session."""
+        return len(self.read_events_raw(session_id))
