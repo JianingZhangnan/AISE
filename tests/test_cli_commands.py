@@ -138,6 +138,24 @@ def test_models_command_without_key_errors(tmp_path, monkeypatch):
     assert result.exit_code != 0
 
 
+def test_models_command_hides_provider_error_details(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    def fail_to_list_models():
+        raise RuntimeError(
+            "provider rejected credential sk-demo****************tail at private endpoint"
+        )
+
+    monkeypatch.setattr("phycode.cli._list_model_ids", fail_to_list_models)
+    result = runner.invoke(app, ["models"])
+
+    assert result.exit_code != 0
+    assert "模型列表暂不可用" in result.stdout
+    assert "provider rejected" not in result.stdout
+    assert "sk-demo" not in result.stdout
+    assert "private endpoint" not in result.stdout
+
+
 def test_chat_slash_help_lists_commands(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _force_no_credentials(monkeypatch)
@@ -159,6 +177,83 @@ def test_chat_slash_unknown_is_reported_and_not_sent_to_agent(tmp_path, monkeypa
     assert result.exit_code == 0
     assert "unknown command" in result.stdout.lower()
     assert "Echo:" not in result.stdout  # a slash line is never forwarded to the agent
+
+
+def test_chat_rejects_arguments_for_argumentless_commands_without_side_effects(
+    monkeypatch,
+):
+    import phycode.cli as cli
+    from phycode.agent import AgentRunResult
+
+    turns: list[str] = []
+
+    class Loop:
+        def run(self, user_input: str) -> AgentRunResult:
+            turns.append(user_input)
+            return AgentRunResult(final_text="continued", events=[], stopped_reason="final")
+
+    class FakePrompt:
+        def __init__(self) -> None:
+            self.inputs = iter(
+                [
+                    "/key accidental-secret",
+                    "/exit later",
+                    "ordinary chat",
+                    "/exit",
+                ]
+            )
+
+        def read(self) -> str:
+            return next(self.inputs)
+
+        def refresh_models(self) -> None:
+            raise AssertionError("unexpected arguments must not trigger a refresh")
+
+    def fail_hidden_prompt(*args, **kwargs):
+        raise AssertionError("unexpected /key argument must not open hidden input")
+
+    monkeypatch.setattr(cli, "build_agent", lambda *a, **k: Loop())
+    monkeypatch.setattr(cli, "create_chat_prompt", lambda *a, **k: FakePrompt())
+    monkeypatch.setattr(cli.typer, "prompt", fail_hidden_prompt)
+
+    result = runner.invoke(app, ["chat"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "usage: /key" in result.stdout
+    assert "usage: /exit" in result.stdout
+    assert turns == ["ordinary chat"]
+
+
+def test_chat_prompt_ctrl_c_recovers_and_reload_refreshes_models(tmp_path, monkeypatch):
+    import phycode.cli as cli
+
+    monkeypatch.chdir(tmp_path)
+    _force_no_credentials(monkeypatch)
+
+    class FakePrompt:
+        def __init__(self) -> None:
+            self.inputs = iter(
+                [KeyboardInterrupt(), "/model manual-model", "/exit"]
+            )
+            self.refresh_count = 0
+
+        def read(self) -> str:
+            value = next(self.inputs)
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
+        def refresh_models(self) -> None:
+            self.refresh_count += 1
+
+    prompt = FakePrompt()
+    monkeypatch.setattr(cli, "create_chat_prompt", lambda *a, **k: prompt)
+
+    result = runner.invoke(app, ["chat"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "llm.model = manual-model" in result.stdout
+    assert prompt.refresh_count == 1
 
 
 def test_interactive_approver_uses_confirm(monkeypatch):

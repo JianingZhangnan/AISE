@@ -492,3 +492,72 @@
   原失败清单不同的旧测试替身问题；对照 workflow 环境后，以
   `CI=true/GITHUB_ACTIONS=true` 重跑完整 WSL 套件通过，故未把非生产门禁的过度模拟
   扩大到本次发布修复。
+
+## 2026-07-19 Task 28–31：Claude Code 风格斜杠命令实时补全
+
+- brainstorming 对照 Claude Code 官方交互模式与命令参考、OpenCode TUI 文档和
+  prompt_toolkit 官方项目。用户选择最接近 Claude Code 的双层候选：输入区下方显示
+  规范命令用法与说明，底栏显示当前项完整参数提示。方案比较后采用
+  `prompt-toolkit>=3.0.52,<4`；手写 ANSI/终端状态机难以可靠覆盖 Windows、POSIX、
+  宽字符与重绘，全屏 TUI 又会引入第二套应用级事件循环，二者均被拒绝。
+- Task 28 由新鲜 subagent `slash_registry_impl` 按 TDD 完成声明式注册表、别名解析、
+  必填参数和派生帮助。有效 RED 为 `phycode.interactive` 尚不存在导致
+  `ModuleNotFoundError`；GREEN 为交互合同 3 passed、交互与 CLI 回归 34 passed，
+  完整套件 543 passed / 83 skipped。实现 commit `47e218b`；独立 reviewer 判定
+  spec/quality approved，Critical 0、Important 0、Minor 0。
+- Task 29 由新鲜 subagent `slash_completion_impl` 实现稳定模糊排序、八行上限与
+  会话级模型缓存。有效 RED 为 `SessionModelCatalog` / `SlashCompleter` 尚不存在的
+  ImportError；GREEN 为交互测试 7 passed，完整套件 547 passed / 83 skipped，
+  Pyright 0 errors / 0 warnings。`/mdl` 的单候选草稿与已批准的子序列算法冲突，主
+  agent 裁决保留 `/model` 与 `/models` 两个合法候选，并同步修正详细计划。实现
+  commit `6a74122`；reviewer 判定 approved，无 Critical/Important，记录一项非阻塞
+  Minor：缺少并发首次加载只调用一次的直接回归，当前锁实现经静态审查正确，留给
+  whole-branch review 决定是否需要覆盖增强。
+- Task 30 由新鲜 subagent `interactive_prompt_impl` 完成真实 TTY `PromptSession`、
+  Tab/Enter/Esc、Ctrl+C/Ctrl+D、动态底栏、后台模型补全与非 TTY `BasicPrompt`
+  回退。第一阶段 RED 为 `BasicPrompt` 等输入端口缺失，第二阶段 RED 为 CLI 尚无
+  `create_chat_prompt` 接线；GREEN 分别为交互测试 15 passed、交互与 CLI 47 passed、
+  CLI smoke 10 passed，完整 pytest 100% exit 0，Pyright 0/0。实现 commit
+  `6ebf027`；独立 reviewer 判定 approved，Critical/Important/Minor 均为 0。
+- Task 31 的中文文档合同先因 README 缺少“输入 `/`”等交互约定得到有效 RED；补充
+  实时候选、参数提示、键盘行为、动态 `/model `、隐藏 `/key` 和非 TTY 回退后，同一
+  测试 GREEN。Windows 全量 pytest 达到 100% exit 0，Pyright 0/0，`uv build`
+  成功生成 0.1.1 wheel/sdist；使用显式 WSL 路径和独立 Linux venv 的
+  `CI=true GITHUB_ACTIONS=true uv run pytest -q` 同样达到 100% exit 0。
+- 真实验收仅由主 agent 使用用户已授权的本机凭据源。首次安全状态检查确认 keyring
+  已配置，但当前 worktree 的默认 OpenAI URL 与该 key 不匹配，真实模型枚举返回
+  401；没有把该响应、URL 或 key 写入文件。主 agent 随后在单一进程内解析授权源，
+  把 key 更新到系统 keyring，仅在系统临时目录写入 URL/model 配置。真实供应商返回
+  22 个模型 ID；PTY 中 `/mo` + Tab 补成 `/model `，`deepseek-v4-p` + Tab 从真实
+  模型候选补成 `deepseek-v4-pro`，固定短提示得到精确 `PHYCODE_LIVE_OK`，`/exit`
+  正常结束。临时目录经绝对路径边界校验后删除。
+- 上述 401 还暴露旧 `/models` 会直接显示供应商异常，供应商自行打码后仍可能保留
+  凭据片段。主 agent 增加确定性安全回归，RED 证明模拟凭据片段和私有端点原样出现；
+  最小 GREEN 将模型枚举失败统一为固定通用提示，正常列表、无 key 与异常三条路径
+  3 passed。修复 commit `14ec52e`；未改变正常模型 ID 输出、模型缓存、AgentLoop、
+  审批、策略、工具权限或凭据存储。
+- 最终在进程内以真实 URL/key 固定字符串扫描 worktree、解包后的 wheel/sdist 以及
+  全部 Git 历史，只输出命中计数；URL 与 key 在三类目标中均为 0 命中。默认 pytest
+  与 CI 继续完全离线，真实凭据从未交给 subagent。
+- Task 31 文档与真实验收提交为 `bb6efc8`；主 `PLAN.md` 已使用实际 hash 关联
+  Task 28–31，未写占位提交。下一步是 whole-branch final review，尚未在本条记录中
+  预先声明可合并或可发布。
+- whole-branch final review 首轮给出三个 Important：模型 completer 把八行可见窗口
+  错做成总候选截断；`SessionModelCatalog` 持锁执行网络 loader，导致 refresh 可能阻塞
+  手工 `/model`；`/key` / `/login` 误输尾随值会进入普通内存 history。修复波先分别
+  取得真实键盘第九项缺失、两个 refresh Future timeout、parser/history/CLI `FFF` 的
+  RED，再实现完整候选、generation-aware single-flight、锁外加载、旧代失效、敏感
+  history 过滤与无参命令尾随拒绝。聚焦 54 passed、全量 100% exit 0、Pyright 0/0；
+  commit `35f9c11`。
+- 首次 re-review 进一步确认 `reserve_space_for_menu=8` 只预留布局空间，prompt-toolkit
+  3.0.52 的真实单列 `CompletionsMenuControl` Window 仍为 `max=16`。第二修复波的有效
+  RED 直接读取真实 Session layout，得到 `Dimension(min=1,max=16)`；最小实现只定位
+  唯一单列菜单 Window 并设为 `Dimension(min=1,max=8)`，没有复制私有布局或重新截断
+  候选。GREEN 同时证明 completion state 保留 10 项、九次方向键可接受第九项；commit
+  `b0428c6`。
+- 最终 whole-branch re-review 判定 Critical 0、Important 0、Minor 0，Ready to merge。
+  主 agent 随后再次执行 Windows 与独立 WSL venv 全量 pytest，均达到 100% exit 0；
+  Pyright 为 0 errors / 0 warnings，`uv build` 成功生成 0.1.1 wheel/sdist。真实 PTY 使用
+  22 个供应商模型候选跨过八行窗口后 Esc 保留输入，再用唯一前缀补全并选择
+  `deepseek-v4-pro`，真实响应精确返回 `PHYCODE_FINAL_OK`，`/exit` 正常结束。最终
+  worktree、解包构建物与 Git 历史的真实 URL/key 扫描仍全部为 0，临时配置目录已删除。

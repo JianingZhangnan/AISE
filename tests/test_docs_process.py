@@ -242,7 +242,7 @@ def test_public_smoke_restores_or_removes_opencode_environment_with_fake_uv(
         fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
     evaluator = tmp_path / "evaluator"
     evaluator.mkdir()
-    wheel = tmp_path / "phycode-0.1.1-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
     wheel.write_bytes(b"fake wheel")
     wrapper = tmp_path / "invoke-smoke.ps1"
     wrapper.write_text(
@@ -326,3 +326,27 @@ def test_public_smoke_restores_or_removes_opencode_environment_with_fake_uv(
     ):
         assert secret not in completed.stdout
         assert secret not in completed.stderr
+
+
+def test_docs_specify_interactive_slash_completion_contract() -> None:
+    readme = _read("README.md")
+    spec = _read("SPEC.md")
+    for text in (
+        "输入 `/`",
+        "实时过滤",
+        "↑/↓",
+        "Tab",
+        "Enter",
+        "Esc",
+        "`/model `",
+        "真实模型候选",
+        "非 TTY",
+    ):
+        assert text in readme
+    for text in (
+        "斜杠命令候选",
+        "参数提示",
+        "非 TTY",
+        "prompt_toolkit",
+    ):
+        assert text in spec
