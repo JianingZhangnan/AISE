@@ -18,6 +18,7 @@ from phycode.execution import ArtifactSnapshot, ExecutionJournal
 from phycode.llm import LLMClient, OpenAICompatibleChatAdapter
 from phycode.models import AgentEventType, AgentProfile, SessionMode
 from phycode.prbench_contract import ArtifactVerifier, TaskContract
+from phycode.profiles import profile_spec
 from phycode.redaction import redact_obj, redact_text
 from phycode.visibility import (
     PRBENCH_HIDDEN_PATH_COMPONENTS,
@@ -361,6 +362,14 @@ def run_prbench(
             approval_wait_seconds=approval_wait_seconds,
         )
         prompt = build_prbench_task_brief(contract)
+        effective_context_chars = (
+            max_context_chars
+            if max_context_chars is not None
+            else profile_spec(AgentProfile.PRBENCH).max_context_chars
+        )
+        current_input_capacity = max(1_000, effective_context_chars // 3)
+        if len(prompt) > current_input_capacity:
+            return _policy_failure(root, model_name)
     except Exception:
         return _policy_failure(root, model_name)
 

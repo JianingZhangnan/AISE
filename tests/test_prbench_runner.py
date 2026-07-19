@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -26,10 +27,12 @@ from prbench_test_support import (
 
 class _PromptRecorder:
     def __init__(self) -> None:
+        self.calls = 0
         self.messages = []
 
     def generate(self, messages, tools):
         del tools
+        self.calls += 1
         self.messages.append(messages)
         return ScriptedLLM(
             [[{"type": "assistant_final", "payload": {"text": "done"}}]]
@@ -95,6 +98,24 @@ def test_build_agent_applies_explicit_prbench_context_budget(tmp_path: Path) -> 
     assert loop.context_builder.max_chars == 24_000
 
 
+def test_build_agent_uses_prbench_context_default_when_override_is_none(
+    tmp_path: Path,
+) -> None:
+    from phycode.composition import build_agent, trusted_prbench_runtime_settings
+    from phycode.models import AgentProfile, SessionMode
+
+    trace_dir = tmp_path / ".phycode/prbench/traces"
+    loop = build_agent(
+        SessionMode.NON_INTERACTIVE,
+        llm=ScriptedLLM([]),
+        profile=AgentProfile.PRBENCH,
+        max_context_chars=None,
+        runtime_settings=trusted_prbench_runtime_settings(tmp_path, trace_dir),
+    )
+
+    assert loop.context_builder.max_chars == 12_000
+
+
 @pytest.mark.parametrize("max_context_chars", [999, 64_001])
 def test_runner_rejects_context_budget_outside_public_bounds(
     tmp_path: Path, max_context_chars: int
@@ -112,6 +133,57 @@ def test_runner_rejects_context_budget_outside_public_bounds(
 
     assert result.status == PRBenchRunStatus.POLICY_BLOCKED
     assert llm.calls == 0
+
+
+@pytest.mark.parametrize(
+    "max_context_chars",
+    [
+        pytest.param(True, id="true"),
+        pytest.param(False, id="false"),
+        pytest.param(1_000.5, id="float"),
+        pytest.param("1000", id="string"),
+    ],
+)
+def test_runner_rejects_context_budget_with_invalid_type(
+    tmp_path: Path, max_context_chars: Any
+) -> None:
+    contract, approvals = _write_public_task_files(tmp_path, approvals=False)
+    llm = _RecordingFinalLLM()
+
+    result = run_prbench(
+        tmp_path,
+        contract,
+        approvals,
+        llm=llm,
+        max_context_chars=max_context_chars,
+    )
+
+    assert result.status == PRBenchRunStatus.POLICY_BLOCKED
+    assert llm.calls == 0
+    persisted = json.loads(
+        (tmp_path / ".phycode/prbench/run_result.json").read_text(encoding="utf-8")
+    )
+    assert persisted["status"] == "policy_blocked"
+    assert "api_key" not in json.dumps(persisted).casefold()
+
+
+@pytest.mark.parametrize("max_context_chars", [1_000, 64_000])
+def test_runner_accepts_context_budget_at_public_boundaries(
+    tmp_path: Path, max_context_chars: int
+) -> None:
+    contract, approvals = _write_public_task_files(tmp_path, approvals=False)
+    llm = _RecordingFinalLLM()
+
+    result = run_prbench(
+        tmp_path,
+        contract,
+        approvals,
+        llm=llm,
+        max_context_chars=max_context_chars,
+    )
+
+    assert result.status == PRBenchRunStatus.ARTIFACT_VERIFICATION_FAILED
+    assert llm.calls > 0
 
 
 def test_runner_executes_script_and_writes_sanitized_result(tmp_path: Path) -> None:
@@ -858,6 +930,74 @@ def test_task_brief_lists_contract_without_inlining_public_documents(tmp_path: P
     assert "reproduction/file_11.py" in brief
     assert "file.read" in brief
     assert "search.grep" in brief
+
+
+def test_runner_fails_closed_when_task_brief_exceeds_current_input_slot(
+    tmp_path: Path,
+) -> None:
+    from phycode.prbench_contract import TaskContract
+    from phycode.prbench_eval import build_prbench_task_brief
+
+    contract_path, approvals = _write_public_task_files(tmp_path, approvals=False)
+    expected_files = ("result.csv",) + tuple(
+        f"reproduction/component_{index:02d}_with_descriptive_public_name.py"
+        for index in range(55)
+    )
+    payload = json.loads(contract_path.read_text(encoding="utf-8"))
+    payload["expected_files"] = expected_files
+    payload["execution_entrypoints"] = [expected_files[-1]]
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+    contract = TaskContract.model_validate(payload)
+    prompt = build_prbench_task_brief(contract)
+    llm = _PromptRecorder()
+
+    result = run_prbench(
+        tmp_path,
+        contract_path,
+        approvals,
+        llm=llm,
+        max_context_chars=1_000,
+    )
+
+    assert 1_000 < len(prompt) < 4_000
+    assert result.status == PRBenchRunStatus.POLICY_BLOCKED
+    assert llm.calls == 0
+    persisted = json.loads(
+        (tmp_path / ".phycode/prbench/run_result.json").read_text(encoding="utf-8")
+    )
+    assert persisted["status"] == "policy_blocked"
+
+
+def test_runner_sends_complete_task_brief_when_context_budget_is_sufficient(
+    tmp_path: Path,
+) -> None:
+    contract_path, approvals = _write_public_task_files(tmp_path, approvals=False)
+    expected_files = ("result.csv",) + tuple(
+        f"reproduction/component_{index:02d}_with_descriptive_public_name.py"
+        for index in range(55)
+    )
+    execution_entrypoints = (expected_files[-2], expected_files[-1])
+    payload = json.loads(contract_path.read_text(encoding="utf-8"))
+    payload["expected_files"] = expected_files
+    payload["execution_entrypoints"] = execution_entrypoints
+    contract_path.write_text(json.dumps(payload), encoding="utf-8")
+    llm = _PromptRecorder()
+
+    result = run_prbench(
+        tmp_path,
+        contract_path,
+        approvals,
+        llm=llm,
+        max_context_chars=24_000,
+    )
+
+    assert result.status == PRBenchRunStatus.ARTIFACT_VERIFICATION_FAILED
+    assert llm.calls > 0
+    rendered = json.dumps(llm.messages)
+    for path in (*expected_files, *execution_entrypoints):
+        assert path in rendered
+    assert "file.read" in rendered
+    assert "search.grep" in rendered
 
 
 def test_prompt_references_public_files_without_inlining_contents(tmp_path: Path) -> None:
