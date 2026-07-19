@@ -542,3 +542,22 @@
 - Task 31 文档与真实验收提交为 `bb6efc8`；主 `PLAN.md` 已使用实际 hash 关联
   Task 28–31，未写占位提交。下一步是 whole-branch final review，尚未在本条记录中
   预先声明可合并或可发布。
+- whole-branch final review 首轮给出三个 Important：模型 completer 把八行可见窗口
+  错做成总候选截断；`SessionModelCatalog` 持锁执行网络 loader，导致 refresh 可能阻塞
+  手工 `/model`；`/key` / `/login` 误输尾随值会进入普通内存 history。修复波先分别
+  取得真实键盘第九项缺失、两个 refresh Future timeout、parser/history/CLI `FFF` 的
+  RED，再实现完整候选、generation-aware single-flight、锁外加载、旧代失效、敏感
+  history 过滤与无参命令尾随拒绝。聚焦 54 passed、全量 100% exit 0、Pyright 0/0；
+  commit `35f9c11`。
+- 首次 re-review 进一步确认 `reserve_space_for_menu=8` 只预留布局空间，prompt-toolkit
+  3.0.52 的真实单列 `CompletionsMenuControl` Window 仍为 `max=16`。第二修复波的有效
+  RED 直接读取真实 Session layout，得到 `Dimension(min=1,max=16)`；最小实现只定位
+  唯一单列菜单 Window 并设为 `Dimension(min=1,max=8)`，没有复制私有布局或重新截断
+  候选。GREEN 同时证明 completion state 保留 10 项、九次方向键可接受第九项；commit
+  `b0428c6`。
+- 最终 whole-branch re-review 判定 Critical 0、Important 0、Minor 0，Ready to merge。
+  主 agent 随后再次执行 Windows 与独立 WSL venv 全量 pytest，均达到 100% exit 0；
+  Pyright 为 0 errors / 0 warnings，`uv build` 成功生成 0.1.1 wheel/sdist。真实 PTY 使用
+  22 个供应商模型候选跨过八行窗口后 Esc 保留输入，再用唯一前缀补全并选择
+  `deepseek-v4-pro`，真实响应精确返回 `PHYCODE_FINAL_OK`，`/exit` 正常结束。最终
+  worktree、解包构建物与 Git 历史的真实 URL/key 扫描仍全部为 0，临时配置目录已删除。

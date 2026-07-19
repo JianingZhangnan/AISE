@@ -2528,8 +2528,11 @@ upstream import API 漂移；overlay 不修改上游依赖声明。最终只有 
   真实 LLM 响应、Windows/WSL 全量测试、Pyright、0.1.1 构建与凭据泄漏扫描。
   文档与真实验收 commit：`bb6efc8`。真实验收发现并修复旧 `/models` 供应商异常可能
   暴露凭据片段的问题，安全修复 commit：`14ec52e`；URL/key 在 worktree、解包构建物
-  与全部 Git 历史均为 0 命中。
+  与全部 Git 历史均为 0 命中。whole-branch review 发现的候选滚动、模型加载并发、
+  敏感 history 与真实菜单高度问题分别由 `35f9c11`、`b0428c6` 关闭；最终复审为
+  Critical 0、Important 0、Minor 0，Ready to merge。
 
 本批次不修改 AgentLoop、策略、工具权限、审批语义、trace、凭据存储、版本或 Release
-元数据；默认测试和 CI 保持离线。完成 whole-branch final review 且关闭全部分级问题后，
-再进入分支收尾、合并与发布流程。
+元数据；默认测试和 CI 保持离线。最终主 agent 复验 Windows/WSL 全量测试均达到
+100% exit 0，Pyright 0/0，0.1.1 wheel/sdist 构建成功；含 22 个真实模型候选的 PTY
+滚动、补全和真实 LLM 响应通过，最终 URL/key 泄漏扫描仍为 0。分支已满足收尾门禁。
