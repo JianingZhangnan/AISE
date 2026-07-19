@@ -160,6 +160,54 @@ expected outputs 与 evaluator 报告存在，并扫描 trace、journal、result
 key/URL。该真实 API / Docker 验收不属于默认 `uv run pytest`，也不会在 CI 中自动
 执行。
 
+## PRBench 完整公开任务（正式运行前门禁）
+
+`task_white_1993` 是一个**完整公开任务**，用于验证从公开输入到 20 个声明产物的
+端到端机制；它不是隐藏 holdout，不代表 PRBench 总榜成绩，也不等于本课程最终成绩。
+截至本文档提交，正式真实 API / official evaluator 运行尚未发生；下面只定义可复现
+入口、人工审批和成功判定，不能用确定性 GREEN、adapter apply 或部分评分替代正式结果。
+
+运行源必须是干净 clone，并固定在 evaluator commit
+`3e5bee4545cad2138832f06302e9c98bd81f5216`。先在功能分支
+`codex/prbench-public-test` 构建当前 wheel，再任选本机已安装的 PowerShell 入口执行
+同一个脚本；示例中的 evaluator 与 wheel 路径只使用本机绝对路径：
+
+```powershell
+uv build
+pwsh -NoProfile -File .\integrations\prbench\run_public_full.ps1 `
+  -EvaluatorRoot D:\path\to\PRBench-Eval-Handson `
+  -WheelPath D:\path\to\AISE\dist\phycode-0.1.2-py3-none-any.whl
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  .\integrations\prbench\run_public_full.ps1 `
+  -EvaluatorRoot D:\path\to\PRBench-Eval-Handson `
+  -WheelPath D:\path\to\AISE\dist\phycode-0.1.2-py3-none-any.whl
+```
+
+`run_public_full.ps1` 固定只运行 `task_white_1993`，显式传入最多 `50` 次工具调用、
+`24000` 字（文档记作 24,000）上下文和 `900` 秒审批等待。脚本只创建 reproduction
+文件的精确 write/edit 初始授权，不创建 `process.run`、CSV 或通配授权。
+
+运行期间由**主 agent 人工**轮询最新
+`data/workspaces/task_white_1993_*/.phycode/prbench/approval-request.json`。对每个请求，
+先以 `lstat`/realpath 确认 request、脚本和 manifest 都是当前 active workspace 内的
+非链接普通文件；再核对 absolute executable 属于 adapter allowlist、完整 exact argv、
+exact cwd 均留在该 workspace，逐行阅读脚本并独立复算 SHA-256。只有全部通过时，才用
+临时文件、flush/fsync 与原子替换，把请求对象**原样**追加到 active workspace 的
+`phycode-approvals.json`；不得自动批准、改写请求、生成通配 grant 或批准直接写 CSV。
+
+正式验收最多三次，每次都使用新的 fixed-commit evaluator clone 与 workspace。Docker、
+adapter、依赖或容器若在首次白色模型响应前失败，属于基础设施预响应失败，不计数；
+首次白色模型响应后，本轮审批拒绝、provider/process/artifact/budget/grader 失败都计为
+一次。首次同时取得 runner `completed` 和本轮新生成、可解析且 `grading` 为 object、
+不含 `error` 的有效 grader report 后立即停止；两者缺一都不能宣称成功，三次失败则如实
+结束。
+
+evaluator clone、workspace、trace JSONL、execution journal、run result、grader 报告、
+模型生成脚本/CSV 及本地扫描清单都是本机忽略产物：**评测产物不提交**，也不得执行
+`git add`。代码和文档提交只留在功能分支，未经授权不合并或推送到 `main`；运行前后都
+检查 feature branch 与 `main` 洁净，以**保持主分支干净**。
+
 ## 机制演示（mock LLM，确定性）
 
 ```bash

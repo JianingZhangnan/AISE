@@ -561,3 +561,57 @@
   22 个供应商模型候选跨过八行窗口后 Esc 保留输入，再用唯一前缀补全并选择
   `deepseek-v4-pro`，真实响应精确返回 `PHYCODE_FINAL_OK`，`/exit` 正常结束。最终
   worktree、解包构建物与 Git 历史的真实 URL/key 扫描仍全部为 0，临时配置目录已删除。
+
+## 2026-07-19 Task 32–35：PRBench 完整公开任务正式运行前门禁
+
+- 主 agent 将单个**完整公开任务** `task_white_1993` 拆成 Task 32–35，并把每个实现与
+  review 交给新鲜 subagent；所有默认测试使用 mock/stub 或 fake uv，不调用真实 API、
+  official evaluator 或 Docker，也不读取 metadata、ground truth、reference 或凭据。
+- Task 32 subagent 按 `test-driven-development` 先得到 contract 对
+  `execution_entrypoints` 为 extra field、普通 Python provenance 边界缺失的 RED，再实现
+  显式入口与 CSV 数据行数，聚焦 GREEN 为 5 passed。实现 commit `564659d`。独立审查
+  提出 2 项 Important：普通 expected Python provenance 与 row-count 缺少有判别力的
+  负例；subagent 用受控 mutation 取得 2 failed，再增加三项测试，修复 commit
+  `959eb44`。完整 `bfae0be..959eb44` 复审 clean，0 / 0 / 0。
+- Task 33 subagent 的 RED 证明旧 runner 内联长正文且 `build_agent` / `run_prbench` 不接受
+  显式上下文预算；最小 GREEN 改为 compact public path brief 并贯通预算，commit
+  `69dadc1`。独立审查提出 2 项 Important，要求简报被截断时 fail closed 并增强 CLI /
+  runner 边界判别；修复先取得自然 RED 与四组 mutation RED，再提交 `7fe73aa`。完整
+  `959eb44..7fe73aa` 复审 clean，0 / 0 / 0。
+- Task 34 subagent 分别以 contract、adapter 参数链和 `run_public_full.ps1` 文档/AST/
+  fake-uv 测试取得 RED，再最小实现 20 个 artifact、7 个 entrypoint、50 / 24000 / 900
+  入口，commit `4cde23b`。独立审查提出 2 Important / 2 Minor；修复增加双 PowerShell
+  AST、结构化 exact argv/cwd/env 观察、完整 contract 与默认参数链测试，commit
+  `e51a82c`。完整 `7fe73aa..e51a82c` 复审 clean，0 / 0 / 0。
+- Task 34 全仓门禁暴露一项不属于其范围的旧测试回归：该测试仍要求 Task 33 已删除的
+  runner-side read。新的回归 subagent 先复现自然 RED，再用不读取正文且 provider 前
+  安全验证一次的新合同替换旧假设；commit `0d4582b`。独立审查要求锁定验证时序，受控
+  mutation 把验证移到 provider 后得到预期 RED，修复 commit `7547db2`。最终 692 项
+  exit 0，`e51a82c..7547db2` 复审 clean，0 / 0 / 0。
+- Task 35 新鲜实现 subagent `task35_implementer` 使用 `executing-plans`、
+  `using-git-worktrees`、`test-driven-development` 与 `verification-before-completion`。
+  基线 HEAD 为 `7547db2`，worktree 与索引洁净；基线全仓 692 项中 604 passed、88
+  skipped。先加入简报指定的文档合同，聚焦运行得到 1 failed / 26 deselected：README
+  尚无 `task_white_1993`，证明 RED 来自目标文档缺口。最小中文文档补齐后，同一完整
+  文档文件测试为 27 passed；新增一项合同后全仓收集数从 692 增至 693，最终回归为
+  605 passed、88 个既有 skip，Pyright 为 0 errors / 0 warnings。
+- Task 35 发布门禁使用 `uv build` 生成 0.1.2 wheel/sdist；fresh fixed source 精确位于
+  `3e5bee4545cad2138832f06302e9c98bd81f5216`，adapter probe 为 100 passed / 2 个既有
+  skip。实际 wheel 应用到另一 fresh clone 后，help 暴露审批、工具次数与上下文三个
+  option，patch 后状态精确为六个 adapter 文件与本地 `.phycode-adapter/`；原 source
+  保持洁净。`pwsh` 与 Windows PowerShell AST 均通过，wheel 解包为 41 个文件且 console
+  entry point、凭据文件和运行产物边界通过；`git diff --check`、tracked 凭据文件名、
+  高置信凭据内容与新增 evaluator/runtime artifact 扫描均通过。
+- 两个门禁探针曾因检查器假设得到非产品失败：首次手工 help 检查继承终端样式/宽度，
+  改用测试同款 200 列无色环境后通过；首次 wheel 探针误写 `phycode.cli:main`，对照
+  `pyproject.toml` 与实际 `entry_points.txt` 后按真实 `phycode.cli:app` 重跑通过。过宽
+  artifact 路径扫描还命中 BASE 已有的 tracked `.superpowers/sdd/task-2-report.md`，改为
+  检查 `7547db2` 后新增路径后为 0；没有删除或改写历史文件。
+- 主 checkout 的 tracked `main` 洁净，但有用户/环境提供的未跟踪 `AGENTS.md`；本任务
+  没有修改、暂存或清理它。Task 35 提交信息为
+  `docs(prbench): document full public evaluation gate`，最终 hash 由提交后的本地忽略
+  报告记录；独立 review 尚未发生，因此本日志不预先声称 review clean。
+- 正式运行只属于主 agent：最多三次、首次白色响应前的基础设施失败不计数，每个动态
+  request 必须人工核验 exact argv/cwd/hash 后原样原子批准；只有 runner `completed` 与
+  有效 grader report 同时成立才算成功。所有评测产物不提交，功能分支不经授权不进入
+  `main`，保持主分支干净。

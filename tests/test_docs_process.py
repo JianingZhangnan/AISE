@@ -144,6 +144,29 @@ def test_prbench_process_documents_refactor_and_real_api_acceptance_boundary():
     assert "subagent" in log.lower()
 
 
+def test_docs_define_full_public_task_and_local_artifact_boundary() -> None:
+    readme = _read("README.md")
+    plan = _read("PLAN.md")
+    process = _read("SPEC_PROCESS.md")
+    log = _read("AGENT_LOG.md")
+
+    for document in (readme, plan, process, log):
+        assert "task_white_1993" in document
+        assert "完整公开任务" in document
+    for phrase in (
+        "run_public_full.ps1",
+        "24,000",
+        "50",
+        "最多三次",
+        "评测产物不提交",
+        "保持主分支干净",
+    ):
+        assert phrase in readme
+    assert "codex/prbench-public-test" in plan
+    assert "旧 baseline" in process
+    assert "主 agent" in log
+
+
 def test_public_smoke_script_has_closed_credential_and_approval_contract():
     script = _read("integrations/prbench/run_public_smoke.ps1")
 

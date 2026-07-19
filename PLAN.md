@@ -2536,3 +2536,43 @@ upstream import API 漂移；overlay 不修改上游依赖声明。最终只有 
 元数据；默认测试和 CI 保持离线。最终主 agent 复验 Windows/WSL 全量测试均达到
 100% exit 0，Pyright 0/0，0.1.1 wheel/sdist 构建成功；含 22 个真实模型候选的 PTY
 滚动、补全和真实 LLM 响应通过，最终 URL/key 泄漏扫描仍为 0。分支已满足收尾门禁。
+
+---
+
+## 2026-07-19 PRBench 完整公开任务（Task 32–35）
+
+本批目标是在 `codex/prbench-public-test` 上为单个**完整公开任务**
+`task_white_1993` 建立确定性的 artifact provenance、紧凑上下文、固定 evaluator 入口
+与正式运行前文档门禁；它不代表 holdout 或课程最终成绩。依赖链为
+Task 32 → Task 33 → Task 34 → Task 35，正式真实 API / official evaluator 最多三次
+验收仅在 Task 35 确定性门禁与独立 review 之后由主 agent 执行。
+
+- [x] Task 32：把可执行 Python artifact 与普通 expected Python 分开建模，只允许
+  `execution_entrypoints` 为 CSV 提供成功 execution provenance，并增加 CSV 数据行数
+  约束。实际范围 `bfae0be7eb3d7f9373929ef18a0a236e718be375..959eb44fb5af1cc897f1ec4c274013681f30fdb8`；
+  实现 `564659dd8aa66f2dfed2b5c2833a74db50865758`，审查测试修复
+  `959eb44fb5af1cc897f1ec4c274013681f30fdb8`；最终 review clean，Critical / Important /
+  Minor 为 0 / 0 / 0。
+- [x] Task 33：用仅含公开路径和产物清单的 compact brief 替换长正文 prompt，并贯通
+  `max_context_chars`；上下文不足时在 provider 前 fail closed。实际范围
+  `959eb44fb5af1cc897f1ec4c274013681f30fdb8..7fe73aa7bba48f9def3a97c0b8e8ebcbc5439139`；
+  实现 `69dadc1ef3a8314e4ebed7b88b8668006f2f0d71`，审查修复
+  `7fe73aa7bba48f9def3a97c0b8e8ebcbc5439139`；最终 review clean，0 / 0 / 0。
+- [x] Task 33 分支级回归纠正：删除过期的 runner-side read 测试假设，并锁定公开
+  instruction 的一次安全验证发生在首次 provider 调用前。提交
+  `0d4582b483530653ba1220b1d8e79673f7ca310c` 与
+  `7547db2a9ed8db98cb6b86d6ea95c186e30192d7`；完整 692 项 exit 0，修复后 review
+  clean，0 / 0 / 0。
+- [x] Task 34：增加 `task_white_1993` 完整 contract、固定 adapter 的
+  `max-tool-calls` / `max-context-chars` 参数链和 `run_public_full.ps1`。实际范围
+  `7fe73aa7bba48f9def3a97c0b8e8ebcbc5439139..e51a82ca50ddde519f353bbd4b7962a1d87ca8f7`；
+  实现 `4cde23b4edf95d98cc6ea50e4c66ee2a80fd8d43`，独立审查修复 `e51a82ca50ddde519f353bbd4b7962a1d87ca8f7`；
+  最终 review clean，0 / 0 / 0。
+- [x] Task 35：补齐中文 README、PLAN、SPEC_PROCESS、AGENT_LOG 和文档合同，完成
+  full pytest、Pyright、build、fresh adapter/patch、双 PowerShell AST、凭据与本地产物
+  门禁。实现基线为 `7547db2a9ed8db98cb6b86d6ea95c186e30192d7`；实际提交范围将在
+  本次文档提交完成后以 `7547db2..HEAD` 固定，提交信息为
+  `docs(prbench): document full public evaluation gate`，最终 hash 记录在本地忽略的
+  Task 35 报告中。文档合同 27 passed，最终全仓收集 693 项、Pyright 0 / 0，构建、
+  fresh adapter/patch、双 PowerShell AST、wheel 解包、凭据与新增运行产物扫描均通过；
+  当前独立 review 尚未开始，不预先声明 review clean。
