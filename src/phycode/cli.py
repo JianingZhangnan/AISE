@@ -146,8 +146,12 @@ def _print_models() -> bool:
     """List the provider's available model ids. Returns False if unavailable."""
     try:
         model_ids = _list_model_ids()
-    except Exception as exc:
-        _safe_print(f"[error] {redact_text(str(exc))}", style="red", markup=False)
+    except Exception:
+        _safe_print(
+            "[error] 模型列表暂不可用；请检查供应商配置、凭据和网络",
+            style="red",
+            markup=False,
+        )
         return False
     for model_id in model_ids:
         console.print(model_id, markup=False)
