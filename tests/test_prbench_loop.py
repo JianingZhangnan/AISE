@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from phycode.models import (
     AgentProfile,
     Session,
     SessionMode,
+    ToolCall,
     ToolResult,
     ToolRiskLevel,
     ToolSpec,
@@ -31,6 +33,7 @@ from phycode.prbench_contract import (
 from phycode.profiles import profile_spec
 from phycode.tools.base import ToolRegistry, ToolRuntime
 from phycode.tools.file_tools import register_file_tools
+from phycode.tools.process_tools import register_process_tools
 from phycode.trace import TraceStore
 
 
@@ -1387,62 +1390,128 @@ def test_different_process_success_does_not_clear_original_approval_blocker(
     assert result.terminal_blocker == "approval_required"
 
 
-def test_rewritten_script_does_not_clear_original_approval_blocker(tmp_path: Path) -> None:
+def test_rewritten_script_success_retires_original_approval_blocker(tmp_path: Path) -> None:
     (tmp_path / "reproduction").mkdir()
     script = tmp_path / "reproduction" / "run.py"
     script.write_text("print('old')\n", encoding="utf-8")
+    normalized_calls: list[str] = []
 
     def configure_registry(registry: ToolRegistry) -> None:
-        registry.register(
-            ToolSpec(
-                name="process.run",
-                description="Test process execution",
-                input_schema={"type": "object", "properties": {}},
-                risk_level=ToolRiskLevel.RISKY,
-                mutates_state=True,
-            ),
-            lambda call: ToolResult(tool_call_id=call.id, status="ok", stdout="ran"),
+        register_process_tools(
+            registry,
+            tmp_path,
+            frozenset({Path(sys.executable).resolve()}),
         )
+        spec = registry.spec_for("process.run")
+        executor = registry.executor_for("process.run")
+        normalizer = registry.normalizer_for("process.run")
+        assert spec is not None
+        assert executor is not None
+        assert normalizer is not None
 
-    process = [
-        {
-            "type": "tool_call_requested",
-            "payload": {
-                "tool_name": "process.run",
-                "args": {"argv": ["python", "reproduction/run.py"], "cwd": "."},
-            },
-        }
-    ]
+        def count_normalization(call: ToolCall) -> ToolCall:
+            normalized_calls.append(call.id)
+            return normalizer(call)
+
+        registry.register(spec, executor, normalizer=count_normalization)
+
+    def process(executable: str, script_path: str) -> list[dict[str, object]]:
+        return [
+            {
+                "type": "tool_call_requested",
+                "payload": {
+                    "tool_name": "process.run",
+                    "args": {"argv": [executable, script_path], "cwd": "."},
+                },
+            }
+        ]
+
     approvals = iter((False, True))
     result = _build_loop(
         tmp_path,
         ScriptedLLM(
             [
-                process,
+                process("python", "reproduction/run.py"),
                 [
                     {
                         "type": "tool_call_requested",
                         "payload": {
-                            "tool_name": "file.write",
+                            "tool_name": "file.edit",
                             "args": {
                                 "path": "reproduction/run.py",
-                                "content": "print('new')\n",
+                                "old": "print('old')\n",
+                                "new": "print('new')\n",
                             },
                         },
                     }
                 ],
-                process,
+                process(sys.executable, "./reproduction/run.py"),
             ]
         ),
         expected_files=("data/output.csv",),
         configure_registry=configure_registry,
         approval_handler=lambda call, decision: (
-            True if call.tool_name == "file.write" else next(approvals)
+            True if call.tool_name == "file.edit" else next(approvals)
         ),
         max_tool_calls=3,
     ).run("run the approved script identity")
 
-    assert result.terminal_blocker == "approval_required"
+    assert result.terminal_blocker == "tool_budget_exhausted"
+    assert len(normalized_calls) == 2
+
+
+def test_rewritten_script_success_retires_original_process_failure_blocker(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "reproduction").mkdir()
+    script = tmp_path / "reproduction" / "run.py"
+    script.write_text("raise SystemExit(1)\n", encoding="utf-8")
+
+    def configure_registry(registry: ToolRegistry) -> None:
+        register_process_tools(
+            registry,
+            tmp_path,
+            frozenset({Path(sys.executable).resolve()}),
+        )
+
+    def process() -> list[dict[str, object]]:
+        return [
+            {
+                "type": "tool_call_requested",
+                "payload": {
+                    "tool_name": "process.run",
+                    "args": {"argv": [sys.executable, "reproduction/run.py"], "cwd": "."},
+                },
+            }
+        ]
+
+    result = _build_loop(
+        tmp_path,
+        ScriptedLLM(
+            [
+                process(),
+                [
+                    {
+                        "type": "tool_call_requested",
+                        "payload": {
+                            "tool_name": "file.edit",
+                            "args": {
+                                "path": "reproduction/run.py",
+                                "old": "raise SystemExit(1)\n",
+                                "new": "print('recovered')\n",
+                            },
+                        },
+                    }
+                ],
+                process(),
+            ]
+        ),
+        expected_files=("data/output.csv",),
+        configure_registry=configure_registry,
+        max_tool_calls=3,
+    ).run("repair and rerun the same script target")
+
+    assert result.terminal_blocker == "tool_budget_exhausted"
 
 
 def test_approval_required_survives_read_only_and_unrelated_mutation_success(

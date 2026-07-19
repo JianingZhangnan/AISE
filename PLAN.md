@@ -2456,9 +2456,23 @@ Task 2 完成后，以下任务可在独立 worktree 中并行进行：
     `process.run` 的脚本 SHA-256），与 feedback kind 共同构成 failure streak key。
   - 验证：新恢复用例与既有相同动作重复停机用例同时通过；完整 agent/prbench loop
     回归和 pyright 通过。
+- [x] Task 25：让同一 process target 的新脚本版本成功执行淘汰过期 blocker。commit：
+  本任务提交 `fix(agent): retire superseded process blockers [runtime_task25]`。
+  - 目标：旧脚本的 `approval_required` / `process_failed` 在同一调用目标的新内容版本
+    成功执行后不再污染最终状态；不同 process target 以及 read/write 成功不能清除。
+  - 文件：`src/phycode/agent.py`、`tests/test_prbench_loop.py`、`AGENT_LOG.md`、
+    `PLAN.md`。
+  - TDD RED：旧脚本审批失败或执行失败，随后 `file.edit` 修复并成功重跑同一脚本；
+    旧实现仍分别返回 `approval_required` / `process_failed`。
+  - 实现：完整 action identity 继续服务重复失败；blocker 额外保存由原始参数解析的
+    workspace cwd、脚本规范路径与尾随 argv。executable 和脚本内容 SHA 不属于跨版本
+    target identity，因此裸 `python` 与绝对解释器不会制造假差异；工具 normalizer 仍
+    只在实际 runtime 边界执行一次。
+  - 验证：同 target 的审批/执行失败恢复，以及不同 target、read/write 不清除的反例均
+    固化；完整 agent/prbench loop 回归和 pyright 通过。
 - [x] 官方真实验收：固定 evaluator commit 上 `aaatest_helloworld`、`bbbtest_alphabet` 均由白色 runner `completed`，绿色 grader 均为 1.0；trace/journal/artifact/hash 与凭据泄漏扫描全部通过。
 
-基础依赖关系为 Task 14 → 15 → 16 → 17 → 18 → 19 → 20；真实运行反馈再依次触发原生对话/因果状态、安全 alias、Task 22 与 Task 23，最终 review 触发 Task 24。实现任务由独立 subagent 按 TDD 完成并接受复审；最终由主 agent 在不暴露凭据的前提下使用真实 `deepseek-v4-pro` 和固定官方 evaluator commit 完成双任务验收。
+基础依赖关系为 Task 14 → 15 → 16 → 17 → 18 → 19 → 20；真实运行反馈再依次触发原生对话/因果状态、安全 alias、Task 22 与 Task 23，最终 review 触发 Task 24 → Task 25。实现任务由独立 subagent 按 TDD 完成并接受复审；最终由主 agent 在不暴露凭据的前提下使用真实 `deepseek-v4-pro` 和固定官方 evaluator commit 完成双任务验收。
 
 本批 PRBench 运行时真正重构明确拒绝继续维护旧 parser：字符串级 shell
 lexer/state machine 无法覆盖解释器拼接、变量展开、symlink 和不同 shell 语义，

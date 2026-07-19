@@ -329,3 +329,23 @@
 - GREEN 证据：新增恢复用例与既有重复失败用例为 2 passed；完整
   `tests/test_agent_loop.py tests/test_prbench_loop.py` 为 58 passed；`uvx pyright`
   为 0 errors / 0 warnings。
+
+## 2026-07-18 Task 25：淘汰同一 process target 的过期 blocker
+
+- subagent `runtime_task25` 使用本地 Superpowers `systematic-debugging` 与
+  `test-driven-development`；未读取凭据、未调用真实 API、未接触临时 evaluator。
+- 根因是 `_updated_blocker` 只在成功 action 与旧 blocker 的完整
+  `_ActionIdentity` 相等时清除；该 identity 刻意包含脚本内容 SHA，因此正常的“旧版本
+  审批/执行失败 → `file.edit` 修复 → 新版本成功执行”必然无法相等，过期 blocker 会在
+  artifact 尚未完成而预算耗尽时错误覆盖 `tool_budget_exhausted`。
+- TDD RED 使用真实 Python runtime 固化两条恢复链：裸 `python` 的旧版本审批失败后
+  以绝对解释器重跑新版本成功，以及旧版本真实非零退出后新版本成功；旧实现分别错误
+  保留 `approval_required`、`process_failed`。既有不同脚本 target、read 与无关 write
+  的成功不清除 blocker 用例作为反例保留。
+- 最小 GREEN 为 process action 增加独立 target identity：从原始参数解析并规范化
+  workspace 内 cwd/脚本路径，同时精确保留尾随 argv；executable 与脚本内容 SHA 仍可
+  属于完整 action identity，但不属于跨版本 target identity。这样裸 `python` 与绝对
+  解释器可指向同一目标，且不会在 AgentLoop 重复调用工具 normalizer；计数回归证明每个
+  实际 process 调用只规范化一次。仅成功 process action 的完整 identity 相等，或双方
+  可证明 target identity 相等时，才淘汰旧 `approval_required` / `process_failed`；
+  read/write 与不同 target 均不能清除。

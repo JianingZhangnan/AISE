@@ -52,10 +52,18 @@ class _VerificationOutcome:
 
 
 @dataclass(frozen=True)
+class _ProcessTargetIdentity:
+    cwd: Path
+    script: Path
+    trailing_argv: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class _ActionIdentity:
     tool_name: str
     args_sha256: str
     script_sha256: str | None = None
+    process_target: _ProcessTargetIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -576,7 +584,7 @@ class AgentLoop:
             if (
                 current is not None
                 and current.reason in {"approval_required", "process_failed"}
-                and current.action == action
+                and self._successful_process_supersedes(current.action, action)
             ):
                 return None
         return current
@@ -594,14 +602,37 @@ class AgentLoop:
             tool_name=tool_name,
             args_sha256=hashlib.sha256(encoded).hexdigest(),
             script_sha256=script_sha256,
+            process_target=(
+                self._process_script_target(args) if tool_name == "process.run" else None
+            ),
         )
 
-    def _process_script_sha256(self, args: dict[str, Any]) -> str | None:
+    @staticmethod
+    def _successful_process_supersedes(
+        blocked: _ActionIdentity,
+        successful: _ActionIdentity,
+    ) -> bool:
+        if blocked == successful:
+            return True
+        return (
+            blocked.tool_name == "process.run"
+            and successful.tool_name == "process.run"
+            and blocked.process_target is not None
+            and blocked.process_target == successful.process_target
+        )
+
+    def _process_script_target(
+        self,
+        args: dict[str, Any],
+    ) -> _ProcessTargetIdentity | None:
         argv = args.get("argv")
+        cwd_value = args.get("cwd", ".")
         if not isinstance(argv, list) or len(argv) < 2 or not isinstance(argv[1], str):
             return None
-        cwd_value = args.get("cwd", ".")
         if not isinstance(cwd_value, str):
+            return None
+        trailing_argv = argv[2:]
+        if any(not isinstance(item, str) for item in trailing_argv):
             return None
         workspace = self.policy_context.workspace_root.resolve()
         try:
@@ -615,9 +646,20 @@ class AgentLoop:
                 script = cwd / script
             script = script.resolve(strict=False)
             script.relative_to(workspace)
-            if not script.is_file():
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if script.suffix.casefold() != ".py":
+            return None
+        return _ProcessTargetIdentity(cwd, script, tuple(trailing_argv))
+
+    def _process_script_sha256(self, args: dict[str, Any]) -> str | None:
+        target = self._process_script_target(args)
+        if target is None:
+            return None
+        try:
+            if not target.script.is_file():
                 return None
-            return hashlib.sha256(script.read_bytes()).hexdigest()
+            return hashlib.sha256(target.script.read_bytes()).hexdigest()
         except (OSError, RuntimeError, ValueError):
             return None
 
