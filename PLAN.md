@@ -2488,3 +2488,15 @@ upstream import API 漂移；overlay 不修改上游依赖声明。最终只有 
 才能记录真实验收成功。2026-07-18 最终验收已满足该门禁：两项 runner 均为
 `completed`、两份官方报告均为 1.0，声明/实际 trace 计数一致，journal 与 artifact
 哈希可复算，真实 URL/key 文件扫描和 Git 历史扫描均为 0 命中。
+
+---
+
+## 2026-07-19 交互式审批提示可见性修复（Task 26）
+
+批准设计：`docs/superpowers/specs/2026-07-19-interactive-approval-visibility-design.md`。
+
+逐步实施计划：`docs/superpowers/plans/2026-07-19-interactive-approval-visibility.md`。
+
+- [ ] Task 26：在阻塞式审批前暂停 Rich spinner，审批结束后恢复，并保证原始
+  `approval_handler` 在正常和异常路径都被恢复；用 PTY 根因证据和确定性事件顺序
+  测试固化。修复构建版本为 `0.1.1`，不在本任务内发布 GitHub Release。
