@@ -16,7 +16,12 @@ from phycode.composition import (
 from phycode.config import load_project_config, write_config_value
 from phycode.credentials import CredentialStore
 from phycode.demos import run_feedback_demo, run_guardrail_demo, run_policy_demo
-from phycode.interactive import SlashAction, parse_slash, render_slash_help
+from phycode.interactive import (
+    SlashAction,
+    create_chat_prompt,
+    parse_slash,
+    render_slash_help,
+)
 from phycode.models import (
     AgentEvent,
     AgentEventType,
@@ -126,20 +131,26 @@ def _run_turn(loop: AgentLoop, text: str):
     return loop.run(text)
 
 
-def _print_models() -> bool:
-    """List the provider's available model ids. Returns False if unavailable."""
+def _list_model_ids() -> list[str]:
     llm = _build_llm(load_project_config(Path.cwd()))
     lister = getattr(llm, "list_models", None)
     if lister is None:
-        console.print("No provider key configured. Run 'phycode keys set' (or /key in chat) first.", markup=False)
-        return False
+        raise RuntimeError(
+            "No provider key configured. Run 'phycode keys set' "
+            "(or /key in chat) first."
+        )
+    return [str(model_id) for model_id in lister()]
+
+
+def _print_models() -> bool:
+    """List the provider's available model ids. Returns False if unavailable."""
     try:
-        model_ids = lister()
+        model_ids = _list_model_ids()
     except Exception as exc:
         _safe_print(f"[error] {redact_text(str(exc))}", style="red", markup=False)
         return False
     for model_id in model_ids:
-        console.print(str(model_id), markup=False)
+        console.print(model_id, markup=False)
     return True
 
 
@@ -246,12 +257,21 @@ def chat() -> None:
     """Start an interactive session. Uses the configured provider when a key is stored, else EchoLLM."""
     console.print("PhyCode interactive session. Type /help for commands, /exit to leave.")
     loop = build_agent(SessionMode.INTERACTIVE, approval_handler=_interactive_approver, event_sink=_render_agent_event)
+    prompt = create_chat_prompt(_list_model_ids, lambda: typer.prompt("phycode"))
     while True:
-        user_input = typer.prompt("phycode")
+        try:
+            user_input = prompt.read()
+        except KeyboardInterrupt:
+            _safe_print("^C", style="dim", markup=False)
+            continue
+        except EOFError:
+            return
         if user_input.startswith("/"):
             action = _handle_slash(user_input)
             if action == "exit":
                 return
+            if action in ("reload", "refresh_models"):
+                prompt.refresh_models()
             if action == "reload":
                 loop = build_agent(
                     SessionMode.INTERACTIVE, approval_handler=_interactive_approver, event_sink=_render_agent_event

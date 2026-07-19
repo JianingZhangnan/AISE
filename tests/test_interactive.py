@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+from threading import Thread
+from time import sleep
+
+import pytest
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
+from prompt_toolkit.formatted_text.utils import fragment_list_to_text
+from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.output import DummyOutput
 
 from phycode.interactive import (
+    BasicPrompt,
+    InteractivePrompt,
     SLASH_COMMANDS,
     SessionModelCatalog,
     SlashAction,
     SlashCompleter,
+    create_chat_prompt,
     parse_slash,
     render_slash_help,
     resolve_slash_command,
@@ -127,3 +137,91 @@ def test_model_completion_failure_is_generic_and_manual_values_remain_valid():
     assert parse_slash("/model manually-entered").needs_argument is False
     assert _completions("/url ", completer) == []
     assert _completions("/key ", completer) == []
+
+
+def test_enter_executes_complete_no_argument_command():
+    with create_pipe_input() as pipe:
+        prompt = InteractivePrompt(
+            lambda: ["deepseek-chat"], input=pipe, output=DummyOutput()
+        )
+        pipe.send_text("/he\r")
+        assert prompt.read() == "/help"
+
+
+def test_enter_accepts_required_command_then_waits_for_argument():
+    with create_pipe_input() as pipe:
+        prompt = InteractivePrompt(
+            lambda: ["deepseek-chat"], input=pipe, output=DummyOutput()
+        )
+        pipe.send_text("/mo\rmanually-entered\r")
+        assert prompt.read() == "/model manually-entered"
+
+
+def test_tab_accepts_completion_without_submitting():
+    with create_pipe_input() as pipe:
+        prompt = InteractivePrompt(
+            lambda: ["deepseek-chat"], input=pipe, output=DummyOutput()
+        )
+        pipe.send_text("/mo\tmanual-model\r")
+        assert prompt.read() == "/model manual-model"
+
+
+def test_down_arrow_changes_the_selected_command():
+    with create_pipe_input() as pipe:
+        prompt = InteractivePrompt(lambda: [], input=pipe, output=DummyOutput())
+
+        def send_keys() -> None:
+            pipe.send_text("/")
+            sleep(0.1)
+            pipe.send_bytes(b"\x1b[B\x1b[B")
+            pipe.send_text("\rhttps://example.com/v1\r")
+
+        sender = Thread(target=send_keys)
+        sender.start()
+        assert prompt.read() == "/url https://example.com/v1"
+        sender.join(timeout=1)
+
+
+def test_escape_closes_menu_and_preserves_text():
+    with create_pipe_input() as pipe:
+        prompt = InteractivePrompt(lambda: [], input=pipe, output=DummyOutput())
+
+        def send_keys() -> None:
+            pipe.send_text("/mo")
+            sleep(0.05)
+            pipe.send_bytes(b"\x1b")
+            sleep(0.2)
+            pipe.send_text("x\r")
+
+        sender = Thread(target=send_keys)
+        sender.start()
+        assert prompt.read() == "/mox"
+        sender.join(timeout=1)
+
+
+def test_ctrl_c_cancels_and_ctrl_d_exits_empty_prompt():
+    with create_pipe_input() as pipe:
+        prompt = InteractivePrompt(lambda: [], input=pipe, output=DummyOutput())
+        pipe.send_bytes(b"\x03")
+        with pytest.raises(KeyboardInterrupt):
+            prompt.read()
+        pipe.send_bytes(b"\x04")
+        with pytest.raises(EOFError):
+            prompt.read()
+
+
+def test_non_tty_factory_uses_basic_prompt():
+    prompt = create_chat_prompt(lambda: [], lambda: "/exit", force_interactive=False)
+    assert isinstance(prompt, BasicPrompt)
+    assert prompt.read() == "/exit"
+
+
+def test_bottom_toolbar_tracks_selected_usage_and_parameter_example():
+    with create_pipe_input() as pipe:
+        prompt = InteractivePrompt(lambda: [], input=pipe, output=DummyOutput())
+        prompt._session.default_buffer.text = "/mo"
+        assert "/model <name>" in fragment_list_to_text(prompt._bottom_toolbar())
+        prompt._session.default_buffer.text = "/url "
+        toolbar = fragment_list_to_text(prompt._bottom_toolbar())
+        assert "/url <base_url>" in toolbar
+        assert "https://example.com/v1" in toolbar

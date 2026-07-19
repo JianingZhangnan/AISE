@@ -1,13 +1,25 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
 from threading import Lock
-from typing import Literal
+from typing import Literal, Protocol
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
+from prompt_toolkit.enums import EditingMode
+from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.input import Input
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding.key_processor import KeyPressEvent
+from prompt_toolkit.output import Output
+from prompt_toolkit.shortcuts import CompleteStyle
+from prompt_toolkit.styles import Style
 
 
 class SlashAction(str, Enum):
@@ -227,3 +239,147 @@ class SlashCompleter(Completer):
                 display=model,
                 display_meta="可用模型",
             )
+
+
+class ChatPrompt(Protocol):
+    def read(self) -> str: ...
+
+    def refresh_models(self) -> None: ...
+
+
+class BasicPrompt:
+    def __init__(self, reader: Callable[[], str]) -> None:
+        self._reader = reader
+
+    def read(self) -> str:
+        return self._reader()
+
+    def refresh_models(self) -> None:
+        return None
+
+
+def _selected_or_first(buffer: Buffer) -> Completion | None:
+    state = buffer.complete_state
+    if state is None or not state.completions:
+        return None
+    return state.current_completion or state.completions[0]
+
+
+class InteractivePrompt:
+    def __init__(
+        self,
+        model_loader: Callable[[], list[str]],
+        *,
+        input: Input | None = None,
+        output: Output | None = None,
+    ) -> None:
+        self.catalog = SessionModelCatalog(model_loader)
+        self.completer = SlashCompleter(self.catalog)
+        bindings = KeyBindings()
+
+        @bindings.add("tab")
+        def accept_completion(event: KeyPressEvent) -> None:
+            completion = self._completion_for_buffer(event.current_buffer)
+            if completion is None:
+                event.current_buffer.start_completion(select_first=True)
+                return
+            event.current_buffer.apply_completion(completion)
+
+        @bindings.add("enter")
+        def accept_or_submit(event: KeyPressEvent) -> None:
+            buffer = event.current_buffer
+            completion = self._completion_for_buffer(buffer)
+            if completion is not None:
+                buffer.apply_completion(completion)
+            text = buffer.text
+            if text.startswith("/") and parse_slash(text).needs_argument:
+                buffer.start_completion(select_first=False)
+                return
+            buffer.validate_and_handle()
+
+        @bindings.add("escape")
+        def close_menu(event: KeyPressEvent) -> None:
+            event.current_buffer.cancel_completion()
+
+        self._session: PromptSession[str] = PromptSession(
+            input=input,
+            output=output,
+            completer=self.completer,
+            complete_while_typing=True,
+            complete_in_thread=True,
+            complete_style=CompleteStyle.COLUMN,
+            reserve_space_for_menu=8,
+            key_bindings=bindings,
+            history=InMemoryHistory(),
+            validate_while_typing=False,
+            editing_mode=EditingMode.EMACS,
+            style=Style.from_dict(
+                {
+                    "prompt": "ansigreen bold",
+                    "completion-menu.completion.current": "bg:#1f6feb #ffffff",
+                    "completion-menu.meta.completion.current": "bg:#1f6feb #dbeafe",
+                    "bottom-toolbar": "bg:#161b22 #a0a0a0",
+                }
+            ),
+            bottom_toolbar=self._bottom_toolbar,
+        )
+
+    def _completion_for_buffer(self, buffer: Buffer) -> Completion | None:
+        completion = _selected_or_first(buffer)
+        if completion is not None:
+            return completion
+        text = buffer.text
+        if not text.startswith("/") or " " in text[1:]:
+            return None
+        return next(
+            self.completer.get_completions(
+                Document(text=text, cursor_position=len(text)),
+                CompleteEvent(completion_requested=True),
+            ),
+            None,
+        )
+
+    def _bottom_toolbar(self) -> FormattedText:
+        buffer = self._session.default_buffer
+        text = buffer.text
+        if not text.startswith("/"):
+            return FormattedText([])
+        body = text[1:].split(maxsplit=1)
+        completion = self._completion_for_buffer(buffer)
+        if completion is not None and completion.text.startswith("/"):
+            selected_name = completion.text[1:].strip().split(maxsplit=1)[0]
+            spec = resolve_slash_command(selected_name)
+        else:
+            spec = resolve_slash_command(body[0]) if body else None
+        if spec is None:
+            return FormattedText(
+                [("class:bottom-toolbar", "↑↓ 选择 · Tab 补全 · Enter 执行 · Esc 关闭")]
+            )
+        detail = f"用法：{spec.usage} · {spec.description}"
+        if spec.action is SlashAction.URL and spec.argument:
+            detail += f" · 示例：{spec.argument.example}"
+        if spec.action is SlashAction.MODEL and self.catalog.status:
+            detail += f" · {self.catalog.status}"
+        return FormattedText([("class:bottom-toolbar", detail)])
+
+    def read(self) -> str:
+        return self._session.prompt([("class:prompt", "phycode › ")])
+
+    def refresh_models(self) -> None:
+        self.catalog.refresh()
+
+
+def create_chat_prompt(
+    model_loader: Callable[[], list[str]],
+    fallback_reader: Callable[[], str],
+    *,
+    force_interactive: bool | None = None,
+) -> ChatPrompt:
+    interactive = (
+        sys.stdin.isatty() and sys.stdout.isatty()
+        if force_interactive is None
+        else force_interactive
+    )
+    if interactive:
+        return InteractivePrompt(model_loader)
+    return BasicPrompt(fallback_reader)

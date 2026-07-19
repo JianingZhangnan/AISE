@@ -161,6 +161,38 @@ def test_chat_slash_unknown_is_reported_and_not_sent_to_agent(tmp_path, monkeypa
     assert "Echo:" not in result.stdout  # a slash line is never forwarded to the agent
 
 
+def test_chat_prompt_ctrl_c_recovers_and_reload_refreshes_models(tmp_path, monkeypatch):
+    import phycode.cli as cli
+
+    monkeypatch.chdir(tmp_path)
+    _force_no_credentials(monkeypatch)
+
+    class FakePrompt:
+        def __init__(self) -> None:
+            self.inputs = iter(
+                [KeyboardInterrupt(), "/model manual-model", "/exit"]
+            )
+            self.refresh_count = 0
+
+        def read(self) -> str:
+            value = next(self.inputs)
+            if isinstance(value, BaseException):
+                raise value
+            return value
+
+        def refresh_models(self) -> None:
+            self.refresh_count += 1
+
+    prompt = FakePrompt()
+    monkeypatch.setattr(cli, "create_chat_prompt", lambda *a, **k: prompt)
+
+    result = runner.invoke(app, ["chat"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "llm.model = manual-model" in result.stdout
+    assert prompt.refresh_count == 1
+
+
 def test_interactive_approver_uses_confirm(monkeypatch):
     import phycode.cli as cli
     from phycode.models import PolicyAction, PolicyDecision, ToolCall
