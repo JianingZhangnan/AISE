@@ -430,3 +430,7 @@
   `uv run pytest tests/test_docs_process.py tests/test_prbench_adapter.py tests/test_cli_smoke.py -q`
   达到 100%、exit 0；`uvx pyright` 为 0 errors / 0 warnings。按修复合同未重跑全量测试，
   由主 agent 执行最终全量门禁。
+- Task re-review 对 `7b22800` / `8484cdc` 给出 Spec Compliance Approved、Code
+  Quality Approved、Task quality Approved；Critical 0、Important 0、Minor 0。版本契约
+  测试直接从项目元数据推导 wheel 文件名，后续版本升级遗漏任一 PRBench 消费端都会
+  失败，不再依赖手工复制版本常量。
