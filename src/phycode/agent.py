@@ -104,6 +104,7 @@ class AgentLoop:
         last_action_result_key: str | None = None
         consecutive_repeat_count = 0
         last_progress_fingerprint: str | None = None
+        progress_epoch_signatures: list[str] = []
         tool_call_count = 0
         current_blocker: str | None = None
         tool_budget_warning_at = max(1, self.max_tool_calls - 2)
@@ -149,9 +150,9 @@ class AgentLoop:
                             "artifact_verification_failed",
                             "artifact_verification_failed",
                         )
-                    last_action_result_key = None
-                    consecutive_repeat_count = 0
-                    last_progress_fingerprint = None
+                    if self.progress_fingerprint is None:
+                        last_action_result_key = None
+                        consecutive_repeat_count = 0
                     break
 
                 if normalized.type in _TERMINAL_EVENT_REASONS:
@@ -229,8 +230,6 @@ class AgentLoop:
                         )
                         self._record(budget_event)
                         all_events.append(budget_event)
-                    if tool_call_count >= self.max_tool_calls:
-                        return self._finish_tool_budget(user_input, all_events, current_blocker)
                     if action_result_key is not None:
                         try:
                             progress_fingerprint = (
@@ -244,16 +243,25 @@ class AgentLoop:
                             self._record(error_event)
                             all_events.append(error_event)
                             return AgentRunResult(None, all_events, "error", "provider_error")
-                        if (
-                            action_result_key == last_action_result_key
-                            and progress_fingerprint == last_progress_fingerprint
-                        ):
-                            consecutive_repeat_count += 1
+                        if self.progress_fingerprint is not None:
+                            if progress_fingerprint != last_progress_fingerprint:
+                                progress_epoch_signatures = [action_result_key]
+                            else:
+                                progress_epoch_signatures.append(action_result_key)
+                            repeated_without_progress = self._progress_epoch_repeats(
+                                progress_epoch_signatures
+                            )
                         else:
-                            consecutive_repeat_count = 1
+                            if action_result_key == last_action_result_key:
+                                consecutive_repeat_count += 1
+                            else:
+                                consecutive_repeat_count = 1
+                            repeated_without_progress = (
+                                consecutive_repeat_count >= self.max_repeated_actions
+                            )
                         last_action_result_key = action_result_key
                         last_progress_fingerprint = progress_fingerprint
-                        if consecutive_repeat_count >= self.max_repeated_actions:
+                        if repeated_without_progress:
                             if (
                                 self.completion_verifier is None
                                 and self.progress_fingerprint is None
@@ -266,9 +274,11 @@ class AgentLoop:
                                 "repeated_no_progress",
                             )
                     else:
-                        last_action_result_key = None
-                        consecutive_repeat_count = 0
-                        last_progress_fingerprint = None
+                        if self.progress_fingerprint is None:
+                            last_action_result_key = None
+                            consecutive_repeat_count = 0
+                    if tool_call_count >= self.max_tool_calls:
+                        return self._finish_tool_budget(user_input, all_events, current_blocker)
                     failure_key = self._failure_key(normalized, tool_events)
                     if failure_key is None:
                         failure_streak = 0
@@ -390,6 +400,19 @@ class AgentLoop:
         encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
+    def _progress_epoch_repeats(self, signatures: list[str]) -> bool:
+        if not signatures:
+            return False
+        if signatures.count(signatures[-1]) >= self.max_repeated_actions:
+            return True
+        for cycle_length in range(2, len(signatures) // 2 + 1):
+            if (
+                signatures[-2 * cycle_length : -cycle_length]
+                == signatures[-cycle_length:]
+            ):
+                return True
+        return False
+
     def _handle_tool_event(self, event: AgentEvent) -> list[AgentEvent]:
         call = ToolCall(
             tool_name=str(event.payload["tool_name"]),
@@ -481,6 +504,8 @@ class AgentLoop:
             return current
         status = str(output.payload.get("status", ""))
         tool_name = str(request.payload.get("tool_name", ""))
+        spec = self.tool_runtime.registry.spec_for(tool_name)
+        mutates_state = bool(spec is not None and spec.mutates_state)
         if status == "policy_blocked":
             return "policy_blocked"
         if status == "policy_requires_approval":
@@ -493,7 +518,9 @@ class AgentLoop:
         }:
             return "process_failed"
         if status == "ok":
-            if current in {"policy_blocked", "approval_required"}:
+            if current == "policy_blocked" and mutates_state:
+                return None
+            if current == "approval_required" and tool_name == "process.run":
                 return None
             if current == "process_failed" and tool_name == "process.run":
                 return None

@@ -61,8 +61,10 @@ def _build_loop(
     configure_registry: Callable[[ToolRegistry], None] | None = None,
     max_steps: int = 12,
     max_tool_calls: int = 10,
+    max_repeated_actions: int = 3,
     use_completion_verifier: bool = True,
     verify_after_successful_tool: bool = False,
+    approval_handler: Callable[..., bool] | None = AUTO_APPROVE,
 ) -> AgentLoop:
     session = Session(workspace_root=str(tmp_path), mode=SessionMode.NON_INTERACTIVE)
     session_store = SessionStore(session)
@@ -93,9 +95,10 @@ def _build_loop(
         ),
         trace_store=TraceStore(tmp_path / ".phycode" / "traces"),
         session_store=session_store,
-        approval_handler=AUTO_APPROVE,
+        approval_handler=approval_handler,
         max_steps=max_steps,
         max_tool_calls=max_tool_calls,
+        max_repeated_actions=max_repeated_actions,
         completion_verifier=completion_verifier,
         progress_fingerprint=progress_fingerprint,
         verify_after_successful_tool=verify_after_successful_tool,
@@ -548,6 +551,48 @@ def test_three_consecutive_identical_no_progress_actions_stop_as_failure(tmp_pat
     ) == 3
 
 
+def test_interleaved_success_cycle_stops_within_unchanged_progress_epoch(
+    tmp_path: Path,
+) -> None:
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (tmp_path / name).write_text(name, encoding="utf-8")
+
+    def read(name: str) -> list[dict[str, object]]:
+        return [
+            {
+                "type": "tool_call_requested",
+                "payload": {"tool_name": "file.read", "args": {"path": name}},
+            }
+        ]
+
+    llm = ScriptedLLM(
+        [
+            read("a.txt"),
+            read("b.txt"),
+            read("c.txt"),
+            read("a.txt"),
+            read("b.txt"),
+            read("c.txt"),
+            [{"type": "assistant_final", "payload": {"text": "must not run"}}],
+        ]
+    )
+    tracked = ("result.txt",)
+
+    result = _build_loop(
+        tmp_path,
+        llm,
+        expected_files=tracked,
+        progress_fingerprint=lambda: _artifact_fingerprint(tmp_path, tracked),
+        max_tool_calls=6,
+    ).run("inspect without looping")
+
+    assert result.stopped_reason == "repeated_no_progress"
+    assert result.terminal_blocker == "repeated_no_progress"
+    assert len(
+        [event for event in result.events if event.type == AgentEventType.TOOL_CALL_REQUESTED]
+    ) == 6
+
+
 def test_repeated_success_with_verifier_does_not_use_unverified_legacy_final(
     tmp_path: Path,
 ) -> None:
@@ -604,7 +649,7 @@ def test_failed_final_skips_remaining_events_in_the_same_provider_batch(tmp_path
     assert not (tmp_path / "ignored.txt").exists()
 
 
-def test_non_successful_action_breaks_consecutive_successful_action_sequence(tmp_path: Path) -> None:
+def test_non_successful_action_does_not_reset_unchanged_progress_epoch(tmp_path: Path) -> None:
     (tmp_path / "status.txt").write_text("stable", encoding="utf-8")
     (tmp_path / "result.txt").write_text("already complete", encoding="utf-8")
     status = [
@@ -640,7 +685,8 @@ def test_non_successful_action_breaks_consecutive_successful_action_sequence(tmp
         progress_fingerprint=lambda: _artifact_fingerprint(tmp_path, tracked),
     ).run("inspect safely")
 
-    assert result.stopped_reason == "completed"
+    assert result.stopped_reason == "repeated_no_progress"
+    assert result.final_text is None
     assert not (tmp_path.parent / "outside.txt").exists()
 
 
@@ -988,6 +1034,169 @@ def test_repeated_policy_block_returns_structured_terminal_blocker(tmp_path: Pat
 
     assert result.stopped_reason == "repeated_failure"
     assert result.terminal_blocker == "policy_blocked"
+
+
+def test_read_only_success_does_not_clear_direct_csv_policy_blocker(tmp_path: Path) -> None:
+    llm = ScriptedLLM(
+        [
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.write",
+                        "args": {"path": "data/output.csv", "content": "value\n1\n"},
+                    },
+                }
+            ],
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {"tool_name": "file.list", "args": {"path": "."}},
+                }
+            ],
+        ]
+    )
+
+    result = _build_loop(
+        tmp_path,
+        llm,
+        expected_files=("data/output.csv",),
+        max_tool_calls=2,
+    ).run("generate the CSV through a script")
+
+    assert result.stopped_reason == "artifact_verification_failed"
+    assert result.terminal_blocker == "policy_blocked"
+    assert not (tmp_path / "data" / "output.csv").exists()
+
+
+def test_successful_script_mutation_advances_past_direct_csv_policy_blocker(
+    tmp_path: Path,
+) -> None:
+    llm = ScriptedLLM(
+        [
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.write",
+                        "args": {"path": "data/output.csv", "content": "value\n1\n"},
+                    },
+                }
+            ],
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.write",
+                        "args": {
+                            "path": "reproduction/run.py",
+                            "content": "print('generate data')\n",
+                        },
+                    },
+                }
+            ],
+        ]
+    )
+
+    result = _build_loop(
+        tmp_path,
+        llm,
+        expected_files=("data/output.csv",),
+        max_tool_calls=2,
+    ).run("generate the CSV through a script")
+
+    assert result.stopped_reason == "artifact_verification_failed"
+    assert result.terminal_blocker == "tool_budget_exhausted"
+    assert (tmp_path / "reproduction" / "run.py").is_file()
+
+
+def test_approval_required_survives_read_only_and_unrelated_mutation_success(
+    tmp_path: Path,
+) -> None:
+    def configure_registry(registry: ToolRegistry) -> None:
+        registry.register(
+            ToolSpec(
+                name="process.run",
+                description="Test process execution",
+                input_schema={"type": "object", "properties": {}},
+                risk_level=ToolRiskLevel.RISKY,
+                mutates_state=True,
+            ),
+            lambda call: ToolResult(tool_call_id=call.id, status="ok", stdout="ran"),
+        )
+
+    process = [
+        {
+            "type": "tool_call_requested",
+            "payload": {"tool_name": "process.run", "args": {}},
+        }
+    ]
+    llm = ScriptedLLM(
+        [
+            process,
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {"tool_name": "file.list", "args": {"path": "."}},
+                }
+            ],
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.write",
+                        "args": {"path": "reproduction/run.py", "content": "print('ready')\n"},
+                    },
+                }
+            ],
+        ]
+    )
+
+    result = _build_loop(
+        tmp_path,
+        llm,
+        expected_files=("data/output.csv",),
+        configure_registry=configure_registry,
+        approval_handler=lambda call, decision: call.tool_name == "file.write",
+        max_tool_calls=3,
+    ).run("request the approved process")
+
+    assert result.stopped_reason == "artifact_verification_failed"
+    assert result.terminal_blocker == "approval_required"
+    assert (tmp_path / "reproduction" / "run.py").is_file()
+
+
+def test_only_successful_process_run_clears_approval_required(tmp_path: Path) -> None:
+    def configure_registry(registry: ToolRegistry) -> None:
+        registry.register(
+            ToolSpec(
+                name="process.run",
+                description="Test process execution",
+                input_schema={"type": "object", "properties": {}},
+                risk_level=ToolRiskLevel.RISKY,
+                mutates_state=True,
+            ),
+            lambda call: ToolResult(tool_call_id=call.id, status="ok", stdout="ran"),
+        )
+
+    approvals = iter((False, True))
+    process = [
+        {
+            "type": "tool_call_requested",
+            "payload": {"tool_name": "process.run", "args": {}},
+        }
+    ]
+    result = _build_loop(
+        tmp_path,
+        ScriptedLLM([process, process]),
+        expected_files=("data/output.csv",),
+        configure_registry=configure_registry,
+        approval_handler=lambda call, decision: next(approvals),
+        max_tool_calls=2,
+    ).run("run after approval")
+
+    assert result.stopped_reason == "artifact_verification_failed"
+    assert result.terminal_blocker == "tool_budget_exhausted"
 
 
 def test_fatal_verifier_overrides_tool_budget_blocker(tmp_path: Path) -> None:
