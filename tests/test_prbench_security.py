@@ -831,15 +831,29 @@ def test_public_instruction_is_validated_without_runner_side_read(
             raise RuntimeError(secret)
         return original_read_text(path, *args, **kwargs)
 
+    class ValidationOrderRecorder:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.validation_counts_at_calls: list[int] = []
+
+        def generate(self, messages, tools):
+            del messages, tools
+            self.calls += 1
+            self.validation_counts_at_calls.append(instruction_validations)
+            return ScriptedLLM(
+                [[{"type": "assistant_final", "payload": {"text": "done"}}]]
+            ).generate([], [])
+
     monkeypatch.setattr(prbench_eval, "_resolve_workspace_path", record_resolve)
     monkeypatch.setattr(Path, "read_text", reject_instruction_read)
-    llm = RecordingFinalLLM()
+    llm = ValidationOrderRecorder()
 
     result = run_prbench(tmp_path, contract, approvals, llm=llm)
 
     assert instruction_validations == 1
     assert instruction_reads == 0
     assert llm.calls > 0
+    assert llm.validation_counts_at_calls[0] == 1
     assert result.status == PRBenchRunStatus.ARTIFACT_VERIFICATION_FAILED
     persisted = (tmp_path / ".phycode/prbench/run_result.json").read_text(encoding="utf-8")
     assert secret not in persisted
