@@ -106,9 +106,16 @@ def _run_turn(loop: AgentLoop, text: str):
                 def approval_with_visible_prompt(call: ToolCall, decision: PolicyDecision) -> bool:
                     status.stop()
                     try:
-                        return original_approval_handler(call, decision)
-                    finally:
+                        approved = original_approval_handler(call, decision)
+                    except BaseException as approval_error:
+                        try:
+                            status.start()
+                        except BaseException:
+                            approval_error.add_note("The activity status could not be restarted.")
+                        raise
+                    else:
                         status.start()
+                        return approved
 
                 loop.approval_handler = approval_with_visible_prompt
             try:

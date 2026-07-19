@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from collections.abc import Callable
 from typing import cast
 
 from typer.testing import CliRunner
@@ -172,58 +173,115 @@ def test_interactive_approver_uses_confirm(monkeypatch):
     assert approved is True
 
 
+class _RecordingStatus:
+    def __init__(self, events: list[str], restart_error: str | None) -> None:
+        self._events = events
+        self._restart_error = restart_error
+
+    def __enter__(self):
+        self._events.append("status-enter")
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._events.append("status-exit")
+
+    def stop(self) -> None:
+        self._events.append("status-stop")
+
+    def start(self) -> None:
+        self._events.append("status-start")
+        if self._restart_error is not None:
+            raise RuntimeError(self._restart_error)
+
+
+class _RecordingConsole:
+    is_terminal = True
+
+    def __init__(self, events: list[str], restart_error: str | None) -> None:
+        self._events = events
+        self._restart_error = restart_error
+
+    def status(self, *args: object, **kwargs: object) -> _RecordingStatus:
+        return _RecordingStatus(self._events, self._restart_error)
+
+
+class _ApprovalLoop:
+    def __init__(
+        self,
+        events: list[str],
+        approval_handler: Callable[[object, object], bool],
+        approvals_per_turn: int,
+    ) -> None:
+        self._events = events
+        self.approval_handler = approval_handler
+        self._approvals_per_turn = approvals_per_turn
+
+    def run(self, text: str) -> None:
+        self._events.append("run")
+        for _ in range(self._approvals_per_turn):
+            self.approval_handler(None, None)
+        self._events.append("run-after-approval")
+
+
+def _approval_turn_fixture(
+    *,
+    approvals_per_turn: int = 1,
+    approval_error: str | None = None,
+    restart_error: str | None = None,
+) -> tuple[
+    list[str],
+    _ApprovalLoop,
+    Callable[[object, object], bool],
+    _RecordingConsole,
+]:
+    events: list[str] = []
+
+    def approve(call: object, decision: object) -> bool:
+        events.append("approval")
+        if approval_error is not None:
+            raise RuntimeError(approval_error)
+        return True
+
+    return (
+        events,
+        _ApprovalLoop(events, approve, approvals_per_turn),
+        approve,
+        _RecordingConsole(events, restart_error),
+    )
+
+
+def _turn_events(approval_count: int, *, completed: bool) -> list[str]:
+    events = ["status-enter", "run"]
+    events.extend(["status-stop", "approval", "status-start"] * approval_count)
+    if completed:
+        events.append("run-after-approval")
+    events.append("status-exit")
+    return events
+
+
 def test_run_turn_stops_status_during_approval(monkeypatch):
     import phycode.cli as cli
 
-    events = []
-
-    class Status:
-        def __enter__(self):
-            events.append("status-enter")
-            return self
-
-        def __exit__(self, *args):
-            events.append("status-exit")
-
-        def stop(self):
-            events.append("status-stop")
-
-        def start(self):
-            events.append("status-start")
-
-    class FakeConsole:
-        is_terminal = True
-
-        def status(self, *args, **kwargs):
-            return Status()
-
-    def approve(call, decision):
-        events.append("approval")
-        return True
-
-    class Loop:
-        def __init__(self):
-            self.approval_handler = approve
-
-        def run(self, text):
-            events.append("run")
-            self.approval_handler(None, None)
-            events.append("run-after-approval")
-
-    loop = Loop()
-    monkeypatch.setattr(cli, "console", FakeConsole())
+    events, loop, approve, fake_console = _approval_turn_fixture()
+    monkeypatch.setattr(cli, "console", fake_console)
 
     cli._run_turn(cast(AgentLoop, loop), "test")
 
-    assert events == [
-        "status-enter",
-        "run",
-        "status-stop",
-        "approval",
-        "status-start",
-        "run-after-approval",
-        "status-exit",
-    ]
+    assert events == _turn_events(1, completed=True)
+    assert loop.approval_handler is approve
+
+
+def test_run_turn_keeps_approval_lifecycle_independent_across_calls(monkeypatch):
+    import phycode.cli as cli
+
+    events, loop, approve, fake_console = _approval_turn_fixture(approvals_per_turn=2)
+    monkeypatch.setattr(cli, "console", fake_console)
+
+    cli._run_turn(cast(AgentLoop, loop), "first")
+    assert loop.approval_handler is approve
+    cli._run_turn(cast(AgentLoop, loop), "second")
+
+    assert events == _turn_events(2, completed=True) * 2
     assert loop.approval_handler is approve
 
 
@@ -232,54 +290,45 @@ def test_run_turn_restarts_status_and_restores_approval_handler_after_error(monk
 
     import phycode.cli as cli
 
-    events = []
-
-    class Status:
-        def __enter__(self):
-            events.append("status-enter")
-            return self
-
-        def __exit__(self, *args):
-            events.append("status-exit")
-
-        def stop(self):
-            events.append("status-stop")
-
-        def start(self):
-            events.append("status-start")
-
-    class FakeConsole:
-        is_terminal = True
-
-        def status(self, *args, **kwargs):
-            return Status()
-
-    def approve(call, decision):
-        events.append("approval")
-        raise RuntimeError("approval failed")
-
-    class Loop:
-        def __init__(self):
-            self.approval_handler = approve
-
-        def run(self, text):
-            events.append("run")
-            self.approval_handler(None, None)
-
-    loop = Loop()
-    monkeypatch.setattr(cli, "console", FakeConsole())
+    events, loop, approve, fake_console = _approval_turn_fixture(approval_error="approval failed")
+    monkeypatch.setattr(cli, "console", fake_console)
 
     with pytest.raises(RuntimeError, match="approval failed"):
         cli._run_turn(cast(AgentLoop, loop), "test")
 
-    assert events == [
-        "status-enter",
-        "run",
-        "status-stop",
-        "approval",
-        "status-start",
-        "status-exit",
-    ]
+    assert events == _turn_events(1, completed=False)
+    assert loop.approval_handler is approve
+
+
+def test_run_turn_preserves_approval_error_when_status_restart_also_fails(monkeypatch):
+    import pytest
+
+    import phycode.cli as cli
+
+    events, loop, approve, fake_console = _approval_turn_fixture(
+        approval_error="approval failed", restart_error="status restart failed"
+    )
+    monkeypatch.setattr(cli, "console", fake_console)
+
+    with pytest.raises(RuntimeError, match="approval failed"):
+        cli._run_turn(cast(AgentLoop, loop), "test")
+
+    assert events == _turn_events(1, completed=False)
+    assert loop.approval_handler is approve
+
+
+def test_run_turn_propagates_status_restart_error_after_successful_approval(monkeypatch):
+    import pytest
+
+    import phycode.cli as cli
+
+    events, loop, approve, fake_console = _approval_turn_fixture(restart_error="status restart failed")
+    monkeypatch.setattr(cli, "console", fake_console)
+
+    with pytest.raises(RuntimeError, match="status restart failed"):
+        cli._run_turn(cast(AgentLoop, loop), "test")
+
+    assert events == _turn_events(1, completed=False)
     assert loop.approval_handler is approve
 
 

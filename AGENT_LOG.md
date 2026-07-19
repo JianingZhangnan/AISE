@@ -434,3 +434,16 @@
   Quality Approved、Task quality Approved；Critical 0、Important 0、Minor 0。版本契约
   测试直接从项目元数据推导 wheel 文件名，后续版本升级遗漏任一 PRBench 消费端都会
   失败，不再依赖手工复制版本常量。
+- whole-branch final review 判定 Ready to merge，同时给出两个 Minor 生命周期加固项。
+  Finding 1 增加同一 turn 两次审批、同一 loop 连续两 turn 的事件序列与原 handler
+  身份断言；首跑聚焦集合为 3 passed，证明现实现已满足，这是覆盖增强而非有效 RED，
+  未为制造失败扭曲断言。
+- Finding 2 的有效 RED 在原审批抛出 `approval failed` 且 `status.start()` 再抛
+  `status restart failed` 时，pytest 显示实际传播后者，确认 `finally` 覆盖原异常。
+  最小 GREEN 将审批异常与成功路径分开：异常路径仍尝试 restart；若 restart 也失败，
+  只给原异常附加不含底层内容的固定 note 并重新抛出原异常。审批成功后的 restart
+  失败继续自然传播，未吞掉一般 UI 异常；turn 外层 handler 恢复保持不变。
+- 为避免测试膨胀，GREEN 后把五组重复假 Status/Console/Loop 收敛为共享记录型 helper
+  与事件序列构造器。最终
+  `uv run pytest tests/test_cli_commands.py -k "run_turn and approval" -q` 为 5 passed，
+  `uvx pyright` 为 0 errors / 0 warnings；未重跑全量测试，留给主 agent 最终门禁。
