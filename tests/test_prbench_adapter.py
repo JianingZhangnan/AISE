@@ -2647,6 +2647,104 @@ def test_official_deferred_codex_removes_raw_file_when_atomic_publish_fails(
     assert all(provider == {} and process == {} for provider, process in transient_mappings)
 
 
+def test_official_deferred_codex_removes_raw_file_when_child_times_out(
+    patched_official_evaluator: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    provider_values = {"OPENAI_API_KEY": "synthetic-timeout-file-key"}
+    transient_mappings = _install_synthetic_green_agent_env(
+        monkeypatch, provider_values
+    )
+    raw_output = json.dumps(
+        {"overall_score": 0.0, "echo": provider_values["OPENAI_API_KEY"]}
+    )
+    output_path = tmp_path / "_grading_output.txt"
+
+    def timeout_after_write(
+        cmd: list[str], **kwargs: object
+    ) -> types.SimpleNamespace:
+        output_path.write_text(raw_output, encoding="utf-8")
+        raise subprocess.TimeoutExpired(cmd, 600)
+
+    monkeypatch.setattr(subprocess, "run", timeout_after_write)
+    run_grading = _load_function(
+        patched_official_evaluator / "src/green_agent/agent.py",
+        "_run_grading",
+        {
+            "logger": types.SimpleNamespace(
+                info=lambda *_: None,
+                warning=lambda *_: None,
+                error=lambda *_: None,
+            ),
+            "os": os,
+            "_parse_grading_json": json.loads,
+        },
+    )
+    method = types.MethodType(run_grading, object())
+
+    grading = method("grade this", "container-id", str(tmp_path), "codex", True)
+
+    assert grading["error"] == "timeout"
+    assert not output_path.exists()
+    assert not tuple(tmp_path.glob("._grading_output.*.tmp"))
+    assert transient_mappings
+    assert all(provider == {} and process == {} for provider, process in transient_mappings)
+
+
+def test_official_deferred_codex_sanitizes_file_before_trace_write_failure(
+    patched_official_evaluator: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    provider_values = {"OPENAI_API_KEY": "synthetic-trace-file-key"}
+    transient_mappings = _install_synthetic_green_agent_env(
+        monkeypatch, provider_values
+    )
+    raw_output = json.dumps(
+        {"overall_score": 1.0, "echo": provider_values["OPENAI_API_KEY"]}
+    )
+    output_path = tmp_path / "_grading_output.txt"
+    real_open = open
+
+    def fail_trace_open(path: str, *args: object, **kwargs: object) -> object:
+        if Path(path).name == "grading_trace.log":
+            raise OSError("synthetic trace write failure")
+        return real_open(path, *args, **kwargs)  # type: ignore[call-overload]
+
+    def fake_run(cmd: list[str], **kwargs: object) -> types.SimpleNamespace:
+        output_path.write_text(raw_output, encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout=raw_output, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    run_grading = _load_function(
+        patched_official_evaluator / "src/green_agent/agent.py",
+        "_run_grading",
+        {
+            "logger": types.SimpleNamespace(
+                info=lambda *_: None,
+                warning=lambda *_: None,
+                error=lambda *_: None,
+            ),
+            "open": fail_trace_open,
+            "os": os,
+            "_parse_grading_json": json.loads,
+        },
+    )
+    method = types.MethodType(run_grading, object())
+
+    with pytest.raises(RuntimeError, match="failed to write grading trace"):
+        method("grade this", "container-id", str(tmp_path), "codex", True)
+
+    assert output_path.exists()
+    persisted = output_path.read_text(encoding="utf-8")
+    assert provider_values["OPENAI_API_KEY"] not in persisted
+    assert "[REDACTED_PROVIDER_VALUE]" in persisted
+    assert not tuple(tmp_path.glob("._grading_output.*.tmp"))
+    assert transient_mappings
+    assert all(provider == {} and process == {} for provider, process in transient_mappings)
+
+
 @pytest.mark.parametrize("unsafe_path", ["symlink", "escape"])
 def test_official_deferred_codex_rejects_unsafe_last_message_before_spawn(
     patched_official_evaluator: Path,

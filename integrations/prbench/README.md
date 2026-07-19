@@ -113,10 +113,13 @@ string 递归执行同一组精确替换，数字、布尔值、`None` 与容器
 `log_dir/_grading_output.txt` 这个 exact path，拒绝 symlink、非普通文件和 realpath
 逃逸，并清除旧普通文件；spawn 后再次用 `lstat` 与 realpath 验证本轮新文件。原始
 UTF-8 文本只读入内存，使用同一个 provider text redactor 得到脱敏副本，再在同目录
-写临时文件、flush/fsync，并用 `os.replace` 原子发布，之后才把内存中的原文交给官方
-parser。临时写入或原子发布失败时会 best-effort 删除临时文件与 exact 原始文件，抛出
-固定错误并由既有 `finally` 清空 provider mapping；因此失败路径不会正常返回带原文的
-报告。非延迟 Codex 仍保留上游 last-message 文件内容。
+写临时文件、flush/fsync，并用 `os.replace` 原子发布；该步骤紧跟 child 正常返回，
+早于 trace 写入和官方 parser。运行期显式记录“已 spawn / 已脱敏”状态：child 写文件
+后超时、trace 写入失败，或任何尚未完成安全发布的退出路径，都会在 `finally` 中以
+`lstat` 检查并 best-effort 删除 exact 原始文件、最终 symlink 与精确命名的临时文件，
+不跟随链接，也不记录异常文本。临时写入、原子发布或 trace 写入错误均固定化，随后由
+既有 `finally` 清空 provider mapping；因此失败路径不会正常返回带原文的报告。非延迟
+Codex 仍保留上游 last-message 文件内容。
 
 `setup_docker_environment()` 从容器 `start()` 到全部 CLI 安装完成使用同一个资源
 事务边界。health check、PhyCode/OpenCode 安装或其他 setup 步骤一旦失败，只对本次
