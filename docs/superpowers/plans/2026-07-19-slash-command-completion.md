@@ -617,11 +617,14 @@ git commit -m "feat(cli): add slash completion engine [slash_completion_impl]"
 向 `tests/test_interactive.py` 增加：
 
 ```python
+from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
-from time import sleep
+from time import monotonic, sleep
 
 import pytest
 from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.layout.dimension import Dimension
+from prompt_toolkit.layout.menus import CompletionsMenuControl
 from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.formatted_text.utils import fragment_list_to_text
 
@@ -669,17 +672,35 @@ def test_ninth_model_completion_can_be_selected_through_scroll_window():
     models = [f"model-{index:02d}" for index in range(10)]
     with create_pipe_input() as pipe:
         prompt = InteractivePrompt(lambda: models, input=pipe, output=DummyOutput())
+        menu_windows = {
+            id(window): window
+            for window in prompt._session.app.layout.find_all_windows()
+            if type(window.content) is CompletionsMenuControl
+        }
+        assert len(menu_windows) == 1
+        menu_height = next(iter(menu_windows.values())).height
+        assert isinstance(menu_height, Dimension)
+        assert menu_height.max == 8
 
-        def send_keys() -> None:
-            pipe.send_text("/model ")
-            sleep(0.1)
-            pipe.send_bytes(b"\x1b[B" * 9)
-            pipe.send_text("\r")
-
-        sender = Thread(target=send_keys)
-        sender.start()
-        assert prompt.read() == "/model model-08"
-        sender.join(timeout=1)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            read_future = executor.submit(prompt.read)
+            try:
+                pipe.send_text("/model ")
+                deadline = monotonic() + 1
+                while True:
+                    state = prompt._session.default_buffer.complete_state
+                    if state is not None and len(state.completions) > 8:
+                        break
+                    if monotonic() >= deadline:
+                        pytest.fail("completion state did not retain more than eight models")
+                    sleep(0.01)
+                assert len(state.completions) == len(models)
+                pipe.send_bytes(b"\x1b[B" * 9)
+                pipe.send_text("\r")
+                assert read_future.result(timeout=1) == "/model model-08"
+            finally:
+                if not read_future.done():
+                    pipe.send_bytes(b"\x03")
 
 
 def test_escape_closes_menu_and_preserves_text():
@@ -757,6 +778,8 @@ from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input import Input
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
+from prompt_toolkit.layout.dimension import Dimension
+from prompt_toolkit.layout.menus import CompletionsMenuControl
 from prompt_toolkit.output import Output
 from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.styles import Style
@@ -783,6 +806,16 @@ def _selected_or_first(buffer: Buffer) -> Completion | None:
     if state is None or not state.completions:
         return None
     return state.current_completion or state.completions[0]
+
+
+def _cap_completion_menu_height(session: PromptSession[str]) -> None:
+    menu_windows = {
+        id(window): window
+        for window in session.app.layout.find_all_windows()
+        if type(window.content) is CompletionsMenuControl
+    }
+    for window in menu_windows.values():
+        window.height = Dimension(min=1, max=8)
 
 
 class InteractivePrompt:
@@ -828,7 +861,7 @@ class InteractivePrompt:
             complete_while_typing=True,
             complete_in_thread=True,
             complete_style=CompleteStyle.COLUMN,
-            # 八行仅是可见窗口；完整候选集保留在 completion state 中供方向键滚动。
+            # 这里只预留最小空间，不会限制 CompletionsMenu 的最大高度。
             reserve_space_for_menu=8,
             key_bindings=bindings,
             history=InMemoryHistory(),
@@ -843,6 +876,7 @@ class InteractivePrompt:
             ),
             bottom_toolbar=self._bottom_toolbar,
         )
+        _cap_completion_menu_height(self._session)
 
     def _completion_for_buffer(self, buffer: Buffer) -> Completion | None:
         completion = _selected_or_first(buffer)
@@ -902,6 +936,8 @@ def create_chat_prompt(
         return InteractivePrompt(model_loader)
     return BasicPrompt(fallback_reader)
 ```
+
+prompt-toolkit 3.0.52 的 `reserve_space_for_menu=8` 只预留菜单所需的最小空间，内建单列 `CompletionsMenu` 仍使用 `max_height=16`。因此必须在 `PromptSession` 创建后精确定位真实 `CompletionsMenuControl` Window，并把其公开 `height` 设为 `Dimension(min=1, max=8)`；不得以截断 completer 数据代替，也不得复制 prompt-toolkit 的整份 `_create_layout()`。
 
 - [ ] **Step 4: 运行按键测试，确认 GREEN**
 

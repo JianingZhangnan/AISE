@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event, Lock, Thread
-from time import sleep
+from time import monotonic, sleep
 
 import pytest
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text.utils import fragment_list_to_text
 from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.layout.dimension import Dimension
+from prompt_toolkit.layout.menus import CompletionsMenuControl
 from prompt_toolkit.output import DummyOutput
 
 from phycode.interactive import (
@@ -230,18 +232,42 @@ def test_model_completion_keeps_all_candidates_and_ninth_can_be_accepted():
 
     with create_pipe_input() as pipe:
         prompt = InteractivePrompt(lambda: models, input=pipe, output=DummyOutput())
+        menu_windows = {
+            id(window): window
+            for window in prompt._session.app.layout.find_all_windows()
+            if type(window.content) is CompletionsMenuControl
+        }
+        assert len(menu_windows) == 1
+        menu_window = next(iter(menu_windows.values()))
+        menu_height = menu_window.height
+        assert isinstance(menu_height, Dimension)
+        assert menu_height.min == 1
+        assert menu_height.max == 8
 
-        def send_keys() -> None:
-            pipe.send_text("/model ")
-            sleep(0.1)
-            pipe.send_bytes(b"\x1b[B" * 9)
-            pipe.send_text("\r")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            read_future = executor.submit(prompt.read)
+            try:
+                pipe.send_text("/model ")
+                deadline = monotonic() + 1
+                while True:
+                    state = prompt._session.default_buffer.complete_state
+                    if state is not None and len(state.completions) > 8:
+                        break
+                    if monotonic() >= deadline:
+                        pytest.fail("completion state did not retain more than eight models")
+                    sleep(0.01)
 
-        sender = Thread(target=send_keys)
-        sender.start()
-        assert prompt.read() == "/model model-08"
-        sender.join(timeout=1)
-        assert not sender.is_alive()
+                assert len(state.completions) == len(models)
+                pipe.send_bytes(b"\x1b[B" * 9)
+                pipe.send_text("\r")
+                assert read_future.result(timeout=1) == "/model model-08"
+            finally:
+                if not read_future.done():
+                    pipe.send_bytes(b"\x03")
+                    try:
+                        read_future.result(timeout=1)
+                    except BaseException:
+                        pass
 
 
 def test_model_completion_failure_is_generic_and_manual_values_remain_valid():

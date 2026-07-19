@@ -17,6 +17,8 @@ from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input import Input
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
+from prompt_toolkit.layout.dimension import Dimension
+from prompt_toolkit.layout.menus import CompletionsMenuControl
 from prompt_toolkit.output import Output
 from prompt_toolkit.shortcuts import CompleteStyle
 from prompt_toolkit.styles import Style
@@ -314,6 +316,16 @@ def _selected_or_first(buffer: Buffer) -> Completion | None:
     return state.current_completion or state.completions[0]
 
 
+def _cap_completion_menu_height(session: PromptSession[str]) -> None:
+    menu_windows = {
+        id(window): window
+        for window in session.app.layout.find_all_windows()
+        if type(window.content) is CompletionsMenuControl
+    }
+    for window in menu_windows.values():
+        window.height = Dimension(min=1, max=8)
+
+
 class InteractivePrompt:
     def __init__(
         self,
@@ -372,6 +384,7 @@ class InteractivePrompt:
             ),
             bottom_toolbar=self._bottom_toolbar,
         )
+        _cap_completion_menu_height(self._session)
 
     def _completion_for_buffer(self, buffer: Buffer) -> Completion | None:
         completion = _selected_or_first(buffer)
