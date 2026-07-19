@@ -2489,6 +2489,20 @@ def _install_synthetic_green_agent_env(
     return transient_mappings
 
 
+def _create_unrelated_grading_temp_sentinel(tmp_path: Path) -> tuple[Path, str, int]:
+    sentinel = tmp_path / "._grading_output.unrelated.tmp"
+    content = "unrelated grading temp sentinel"
+    sentinel.write_text(content, encoding="utf-8")
+    return sentinel, content, sentinel.stat().st_ino
+
+
+def _assert_unrelated_grading_temp_sentinel(
+    sentinel: Path, content: str, inode: int
+) -> None:
+    assert sentinel.read_text(encoding="utf-8") == content
+    assert sentinel.stat().st_ino == inode
+
+
 @pytest.mark.parametrize("parse_mode", ["valid_json", "parse_failure"])
 def test_official_deferred_codex_sanitizes_last_message_file(
     patched_official_evaluator: Path,
@@ -2660,6 +2674,9 @@ def test_official_deferred_codex_removes_raw_file_when_child_times_out(
         {"overall_score": 0.0, "echo": provider_values["OPENAI_API_KEY"]}
     )
     output_path = tmp_path / "_grading_output.txt"
+    sentinel, sentinel_content, sentinel_inode = (
+        _create_unrelated_grading_temp_sentinel(tmp_path)
+    )
 
     def timeout_after_write(
         cmd: list[str], **kwargs: object
@@ -2687,7 +2704,57 @@ def test_official_deferred_codex_removes_raw_file_when_child_times_out(
 
     assert grading["error"] == "timeout"
     assert not output_path.exists()
-    assert not tuple(tmp_path.glob("._grading_output.*.tmp"))
+    _assert_unrelated_grading_temp_sentinel(
+        sentinel, sentinel_content, sentinel_inode
+    )
+    assert transient_mappings
+    assert all(provider == {} and process == {} for provider, process in transient_mappings)
+
+
+def test_official_deferred_codex_removes_exact_raw_file_when_spawn_raises_oserror(
+    patched_official_evaluator: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    provider_values = {"OPENAI_API_KEY": "synthetic-spawn-oserror-key"}
+    transient_mappings = _install_synthetic_green_agent_env(
+        monkeypatch, provider_values
+    )
+    raw_output = json.dumps(
+        {"overall_score": 0.0, "echo": provider_values["OPENAI_API_KEY"]}
+    )
+    output_path = tmp_path / "_grading_output.txt"
+    sentinel, sentinel_content, sentinel_inode = (
+        _create_unrelated_grading_temp_sentinel(tmp_path)
+    )
+
+    def fail_spawn_after_write(cmd: list[str], **kwargs: object) -> object:
+        output_path.write_text(raw_output, encoding="utf-8")
+        raise OSError("synthetic spawn failure")
+
+    monkeypatch.setattr(subprocess, "run", fail_spawn_after_write)
+    run_grading = _load_function(
+        patched_official_evaluator / "src/green_agent/agent.py",
+        "_run_grading",
+        {
+            "logger": types.SimpleNamespace(
+                info=lambda *_: None,
+                warning=lambda *_: None,
+                error=lambda *_: None,
+            ),
+            "os": os,
+            "_parse_grading_json": json.loads,
+        },
+    )
+    method = types.MethodType(run_grading, object())
+
+    with pytest.raises(OSError, match="synthetic spawn failure"):
+        method("grade this", "container-id", str(tmp_path), "codex", True)
+
+    assert not output_path.exists()
+    _assert_unrelated_grading_temp_sentinel(
+        sentinel, sentinel_content, sentinel_inode
+    )
     assert transient_mappings
     assert all(provider == {} and process == {} for provider, process in transient_mappings)
 
@@ -2705,6 +2772,9 @@ def test_official_deferred_codex_sanitizes_file_before_trace_write_failure(
         {"overall_score": 1.0, "echo": provider_values["OPENAI_API_KEY"]}
     )
     output_path = tmp_path / "_grading_output.txt"
+    sentinel, sentinel_content, sentinel_inode = (
+        _create_unrelated_grading_temp_sentinel(tmp_path)
+    )
     real_open = open
 
     def fail_trace_open(path: str, *args: object, **kwargs: object) -> object:
@@ -2740,7 +2810,9 @@ def test_official_deferred_codex_sanitizes_file_before_trace_write_failure(
     persisted = output_path.read_text(encoding="utf-8")
     assert provider_values["OPENAI_API_KEY"] not in persisted
     assert "[REDACTED_PROVIDER_VALUE]" in persisted
-    assert not tuple(tmp_path.glob("._grading_output.*.tmp"))
+    _assert_unrelated_grading_temp_sentinel(
+        sentinel, sentinel_content, sentinel_inode
+    )
     assert transient_mappings
     assert all(provider == {} and process == {} for provider, process in transient_mappings)
 
