@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 from typer.testing import CliRunner
 
+from phycode.agent import AgentLoop
 from phycode.cli import app
 from phycode.credentials import CredentialStore, InMemoryCredentialBackend
 
@@ -168,6 +170,117 @@ def test_interactive_approver_uses_confirm(monkeypatch):
         PolicyDecision(tool_call_id="1", decision=PolicyAction.ASK, rule_id="r", reason="why"),
     )
     assert approved is True
+
+
+def test_run_turn_stops_status_during_approval(monkeypatch):
+    import phycode.cli as cli
+
+    events = []
+
+    class Status:
+        def __enter__(self):
+            events.append("status-enter")
+            return self
+
+        def __exit__(self, *args):
+            events.append("status-exit")
+
+        def stop(self):
+            events.append("status-stop")
+
+        def start(self):
+            events.append("status-start")
+
+    class FakeConsole:
+        is_terminal = True
+
+        def status(self, *args, **kwargs):
+            return Status()
+
+    def approve(call, decision):
+        events.append("approval")
+        return True
+
+    class Loop:
+        def __init__(self):
+            self.approval_handler = approve
+
+        def run(self, text):
+            events.append("run")
+            self.approval_handler(None, None)
+            events.append("run-after-approval")
+
+    loop = Loop()
+    monkeypatch.setattr(cli, "console", FakeConsole())
+
+    cli._run_turn(cast(AgentLoop, loop), "test")
+
+    assert events == [
+        "status-enter",
+        "run",
+        "status-stop",
+        "approval",
+        "status-start",
+        "run-after-approval",
+        "status-exit",
+    ]
+    assert loop.approval_handler is approve
+
+
+def test_run_turn_restarts_status_and_restores_approval_handler_after_error(monkeypatch):
+    import pytest
+
+    import phycode.cli as cli
+
+    events = []
+
+    class Status:
+        def __enter__(self):
+            events.append("status-enter")
+            return self
+
+        def __exit__(self, *args):
+            events.append("status-exit")
+
+        def stop(self):
+            events.append("status-stop")
+
+        def start(self):
+            events.append("status-start")
+
+    class FakeConsole:
+        is_terminal = True
+
+        def status(self, *args, **kwargs):
+            return Status()
+
+    def approve(call, decision):
+        events.append("approval")
+        raise RuntimeError("approval failed")
+
+    class Loop:
+        def __init__(self):
+            self.approval_handler = approve
+
+        def run(self, text):
+            events.append("run")
+            self.approval_handler(None, None)
+
+    loop = Loop()
+    monkeypatch.setattr(cli, "console", FakeConsole())
+
+    with pytest.raises(RuntimeError, match="approval failed"):
+        cli._run_turn(cast(AgentLoop, loop), "test")
+
+    assert events == [
+        "status-enter",
+        "run",
+        "status-stop",
+        "approval",
+        "status-start",
+        "status-exit",
+    ]
+    assert loop.approval_handler is approve
 
 
 def test_run_command_uses_echo_agent_and_writes_redacted_trace(tmp_path, monkeypatch):

@@ -99,8 +99,22 @@ def _render_agent_event(event: AgentEvent) -> None:
 def _run_turn(loop: AgentLoop, text: str):
     """Run one turn, showing an ASCII spinner while the model works (only on a real terminal)."""
     if console.is_terminal:
-        with console.status("thinking...", spinner="line"):
-            return loop.run(text)
+        with console.status("thinking...", spinner="line") as status:
+            original_approval_handler = loop.approval_handler
+            if original_approval_handler is not None:
+
+                def approval_with_visible_prompt(call: ToolCall, decision: PolicyDecision) -> bool:
+                    status.stop()
+                    try:
+                        return original_approval_handler(call, decision)
+                    finally:
+                        status.start()
+
+                loop.approval_handler = approval_with_visible_prompt
+            try:
+                return loop.run(text)
+            finally:
+                loop.approval_handler = original_approval_handler
     return loop.run(text)
 
 

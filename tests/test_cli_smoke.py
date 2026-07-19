@@ -16,6 +16,7 @@ def test_version_command_prints_version():
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert "phycode" in result.stdout.lower()
+    assert "phycode 0.1.1" in result.stdout.lower()
 
 
 def test_tools_list_command_exists():

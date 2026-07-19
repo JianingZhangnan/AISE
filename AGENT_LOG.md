@@ -392,3 +392,27 @@
 - 固定 clean evaluator source 的合并后全量门禁为 **603 passed / 14 skipped**；
   `uvx pyright` 为 0 errors / 0 warnings；`uv build` 成功生成 v0.1.0 sdist/wheel；
   `git diff --cached --check` 通过，evaluator source 仍为 clean。
+
+## 2026-07-18 Task 26：交互式审批提示可见性与 0.1.1 构建
+
+- v0.1.0 发布后，用户截图与真实 Windows PTY 稳定复现：Rich `Status` 活动期间，
+  Typer `confirm` 与 Rich `Prompt` 的阻塞确认提示都会被 live render 覆盖。调用链核对
+  证明 `_run_turn()` 在 `console.status(...)` 内同步进入 `loop.run()`，后者调用审批
+  handler 时没有停止 spinner；缺陷位于 CLI 展示生命周期，不在策略判断或工具权限。
+- subagent `approval_prompt_impl` 使用本地 Superpowers `systematic-debugging`、
+  `test-driven-development` 与 `verification-before-completion`。spinner 生命周期 RED
+  命令为 `uv run pytest tests/test_cli_commands.py -k "run_turn and approval" -q`：修正
+  一次测试夹具绑定错误后，两例均因缺少 `status-stop` / `status-start` 而失败。最小
+  GREEN 在审批前停止 Status，并在审批返回或抛错时以 `finally` 重启；turn 的外层
+  `finally` 恢复原 `approval_handler`。同一聚焦命令随后为 2 passed。
+- 版本 RED 命令为
+  `uv run pytest tests/test_cli_smoke.py::test_version_command_prints_version -q`，实际输出
+  `phycode 0.1.0`，不满足 `phycode 0.1.1`；同步项目元数据、包内版本并执行 `uv lock`
+  后，同一测试 GREEN。`0.1.1` 当前仅为待发布构建，本任务不创建或发布 Release。
+- 本任务未读取凭据、未调用真实模型 API、未修改审批策略、工具权限或 PRBench
+  evaluator。
+- 提交前门禁：`uv run pytest -q` 完整进度达到 100%、exit 0；Pyright 首次指出两个
+  测试替身与 `AgentLoop` 的名义类型错误，在测试调用边界显式 cast 后，spinner 聚焦
+  测试仍为 2 passed，`uvx pyright` 为 0 errors / 0 warnings；`uv build` 成功生成
+  `phycode-0.1.1.tar.gz` 与 `phycode-0.1.1-py3-none-any.whl`；
+  `git diff --check` exit 0，仅报告 Windows 工作树 LF/CRLF 转换提示。
