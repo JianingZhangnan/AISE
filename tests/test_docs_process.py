@@ -202,6 +202,292 @@ def test_public_smoke_script_has_closed_credential_and_approval_contract():
         assert runtime_approval_term in readme
 
 
+def test_public_full_script_has_exact_local_only_contract() -> None:
+    script = _read("integrations/prbench/run_public_full.ps1")
+    normalized = script.replace("\r\n", "\n")
+    assert normalized.startswith(
+        "param(\n"
+        "    [Parameter(Mandatory=$true)][string]$EvaluatorRoot,\n"
+        "    [Parameter(Mandatory=$true)][string]$WheelPath\n"
+        ")\n"
+    )
+    assert "task_white_1993" in script
+    assert "--phycode-max-tool-calls" in script
+    assert "50" in script
+    assert "--phycode-max-context-chars" in script
+    assert "24000" in script
+    assert "task_white_1993.json" in script
+    assert "data/fig" not in script
+    assert "process.run" not in script
+    assert "script_sha256" not in script
+    assert "Get-FileHash" not in script
+    assert "NewTextDocument" not in script
+    assert ".env" not in script
+
+    expected_paths = (
+        "reproduction/ANALYSIS.md",
+        "reproduction/operators.py",
+        "reproduction/block.py",
+        "reproduction/superblock.py",
+        "reproduction/dmrg_infinite.py",
+        "reproduction/dmrg_finite.py",
+        "reproduction/fig2_compute.py",
+        "reproduction/fig3_compute.py",
+        "reproduction/fig4_compute.py",
+        "reproduction/fig5_compute.py",
+        "reproduction/fig6_compute.py",
+        "reproduction/fig7_compute.py",
+        "reproduction/fig8_compute.py",
+    )
+    write_paths = tuple(
+        re.findall(
+            r"@\{\s*tool_name = 'file\.write'; path = '([^']+)'\s*\}",
+            script,
+        )
+    )
+    edit_paths = tuple(
+        re.findall(
+            r"@\{\s*tool_name = 'file\.edit'; path = '([^']+)'\s*\}",
+            script,
+        )
+    )
+    assert write_paths == expected_paths
+    assert edit_paths == tuple(path for path in expected_paths for _ in range(2))
+    assert "$TaskIds" not in script
+
+
+def test_public_full_script_parses_with_powershell_ast() -> None:
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell is unavailable")
+
+    script_path = ROOT / "integrations/prbench/run_public_full.ps1"
+    parse_result = subprocess.run(
+        [
+            pwsh,
+            "-NoProfile",
+            "-Command",
+            "$tokens=$null; $errors=$null; "
+            "[void][System.Management.Automation.Language.Parser]::ParseFile("
+            "$env:PHYCODE_POWERSHELL_AST_TARGET, [ref]$tokens, [ref]$errors); "
+            "if ($errors.Count -ne 0) { exit 1 }",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PHYCODE_POWERSHELL_AST_TARGET": str(script_path)},
+    )
+    assert parse_result.returncode == 0, (parse_result.stdout, parse_result.stderr)
+
+
+@pytest.mark.parametrize("fake_uv_failure", [False, True])
+@pytest.mark.parametrize("preexisting_opencode", [False, True])
+def test_public_full_restores_environment_and_passes_exact_fake_uv_arguments(
+    tmp_path: Path,
+    fake_uv_failure: bool,
+    preexisting_opencode: bool,
+) -> None:
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell is unavailable")
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    observation = tmp_path / "uv-observation.txt"
+    if os.name == "nt":
+        (fake_bin / "uv.cmd").write_text(
+            "@echo off\r\n"
+            "echo %* | findstr /C:\"apply_adapter.py\" >nul\r\n"
+            "if errorlevel 1 goto evaluator\r\n"
+            "if \"%EXPECTED_ORIGINAL%\"==\"1\" (\r\n"
+            "  if not \"%OPENCODE_API_KEY%\"==\"original-key\" exit /b 61\r\n"
+            "  if not \"%OPENCODE_BASE_URL%\"==\"https://original.invalid\" exit /b 62\r\n"
+            "  if not \"%OPENCODE_MODEL%\"==\"openai/original-model\" exit /b 63\r\n"
+            ") else (\r\n"
+            "  if defined OPENCODE_API_KEY exit /b 64\r\n"
+            "  if defined OPENCODE_BASE_URL exit /b 65\r\n"
+            "  if defined OPENCODE_MODEL exit /b 66\r\n"
+            ")\r\n"
+            "exit /b 0\r\n"
+            ":evaluator\r\n"
+            "> \"%FAKE_UV_OBSERVATION%\" echo %*\r\n"
+            "if not \"%OPENCODE_API_KEY%\"==\"fake-phycode-key\" exit /b 71\r\n"
+            "if not \"%OPENCODE_BASE_URL%\"==\"https://fake.invalid/v1\" exit /b 72\r\n"
+            "if not \"%OPENCODE_MODEL%\"==\"openai/fake-model\" exit /b 73\r\n"
+            "echo %* | findstr /C:\"--task-id task_white_1993\" >nul || exit /b 74\r\n"
+            "echo %* | findstr /C:\"--phycode-max-tool-calls 50\" >nul || exit /b 75\r\n"
+            "echo %* | findstr /C:\"--phycode-max-context-chars 24000\" >nul || exit /b 76\r\n"
+            "echo %* | findstr /C:\"--approval-wait-seconds 900\" >nul || exit /b 77\r\n"
+            "echo %* | findstr /C:\"task_white_1993.json\" >nul || exit /b 78\r\n"
+            "if \"%FAKE_UV_FAIL%\"==\"1\" exit /b 23\r\n"
+            "exit /b 0\r\n",
+            encoding="utf-8",
+        )
+    else:
+        fake_uv = fake_bin / "uv"
+        fake_uv.write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  *apply_adapter.py*)\n"
+            "    if [ \"$EXPECTED_ORIGINAL\" = \"1\" ]; then\n"
+            "      [ \"$OPENCODE_API_KEY\" = \"original-key\" ] || exit 61\n"
+            "      [ \"$OPENCODE_BASE_URL\" = \"https://original.invalid\" ] || exit 62\n"
+            "      [ \"$OPENCODE_MODEL\" = \"openai/original-model\" ] || exit 63\n"
+            "    else\n"
+            "      [ -z \"${OPENCODE_API_KEY+x}\" ] || exit 64\n"
+            "      [ -z \"${OPENCODE_BASE_URL+x}\" ] || exit 65\n"
+            "      [ -z \"${OPENCODE_MODEL+x}\" ] || exit 66\n"
+            "    fi\n"
+            "    exit 0 ;;\n"
+            "esac\n"
+            "printf '%s\\n' \"$*\" > \"$FAKE_UV_OBSERVATION\"\n"
+            "[ \"$OPENCODE_API_KEY\" = \"fake-phycode-key\" ] || exit 71\n"
+            "[ \"$OPENCODE_BASE_URL\" = \"https://fake.invalid/v1\" ] || exit 72\n"
+            "[ \"$OPENCODE_MODEL\" = \"openai/fake-model\" ] || exit 73\n"
+            "case \"$*\" in *'--task-id task_white_1993'*) ;; *) exit 74 ;; esac\n"
+            "case \"$*\" in *'--phycode-max-tool-calls 50'*) ;; *) exit 75 ;; esac\n"
+            "case \"$*\" in *'--phycode-max-context-chars 24000'*) ;; *) exit 76 ;; esac\n"
+            "case \"$*\" in *'--approval-wait-seconds 900'*) ;; *) exit 77 ;; esac\n"
+            "case \"$*\" in *task_white_1993.json*) ;; *) exit 78 ;; esac\n"
+            "[ \"$FAKE_UV_FAIL\" = \"1\" ] && exit 23\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
+
+    evaluator = tmp_path / "evaluator"
+    evaluator.mkdir()
+    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel.write_bytes(b"fake wheel")
+    wrapper = tmp_path / "invoke-full.ps1"
+    wrapper.write_text(
+        "param(\n"
+        "  [string]$FullScript, [string]$EvaluatorRoot, [string]$WheelPath,\n"
+        "  [string]$ExpectFailure, [string]$HadOriginal\n"
+        ")\n"
+        "$failed = $false\n"
+        "try {\n"
+        "  & $FullScript -EvaluatorRoot $EvaluatorRoot -WheelPath $WheelPath\n"
+        "}\n"
+        "catch { $failed = $true }\n"
+        "if ($failed -ne ($ExpectFailure -eq '1')) { exit 81 }\n"
+        "$names = @('OPENCODE_API_KEY','OPENCODE_BASE_URL','OPENCODE_MODEL')\n"
+        "if ($HadOriginal -eq '1') {\n"
+        "  if ($env:OPENCODE_API_KEY -ne 'original-key') { exit 82 }\n"
+        "  if ($env:OPENCODE_BASE_URL -ne 'https://original.invalid') { exit 83 }\n"
+        "  if ($env:OPENCODE_MODEL -ne 'openai/original-model') { exit 84 }\n"
+        "}\n"
+        "else {\n"
+        "  foreach ($name in $names) {\n"
+        "    if (Test-Path -LiteralPath ('Env:' + $name)) { exit 85 }\n"
+        "  }\n"
+        "}\n"
+        "Write-Output 'environment-restored'\n",
+        encoding="utf-8",
+    )
+
+    environment = os.environ.copy()
+    environment["PATH"] = str(fake_bin) + os.pathsep + environment["PATH"]
+    environment.update(
+        {
+            "PHYCODE_API_KEY": "fake-phycode-key",
+            "PHYCODE_BASE_URL": "https://fake.invalid/v1",
+            "PHYCODE_MODEL": "fake-model",
+            "FAKE_UV_FAIL": "1" if fake_uv_failure else "0",
+            "FAKE_UV_OBSERVATION": str(observation),
+            "EXPECTED_ORIGINAL": "1" if preexisting_opencode else "0",
+        }
+    )
+    originals = {
+        "OPENCODE_API_KEY": "original-key",
+        "OPENCODE_BASE_URL": "https://original.invalid",
+        "OPENCODE_MODEL": "openai/original-model",
+    }
+    for name, value in originals.items():
+        if preexisting_opencode:
+            environment[name] = value
+        else:
+            environment.pop(name, None)
+
+    completed = subprocess.run(
+        [
+            pwsh,
+            "-NoProfile",
+            "-File",
+            str(wrapper),
+            "-FullScript",
+            str(ROOT / "integrations/prbench/run_public_full.ps1"),
+            "-EvaluatorRoot",
+            str(evaluator),
+            "-WheelPath",
+            str(wheel),
+            "-ExpectFailure",
+            "1" if fake_uv_failure else "0",
+            "-HadOriginal",
+            "1" if preexisting_opencode else "0",
+        ],
+        check=False,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        env=environment,
+    )
+    assert completed.returncode == 0, (completed.stdout, completed.stderr)
+    assert "environment-restored" in completed.stdout
+    invocation = observation.read_text(encoding="utf-8")
+    assert "--task-id task_white_1993" in invocation
+    assert "task_white_1993.json" in invocation
+    assert "--phycode-max-tool-calls 50" in invocation
+    assert "--phycode-max-context-chars 24000" in invocation
+    assert "--approval-wait-seconds 900" in invocation
+    for secret in (
+        "fake-phycode-key",
+        "https://fake.invalid/v1",
+        "original-key",
+        "https://original.invalid",
+    ):
+        assert secret not in completed.stdout
+        assert secret not in completed.stderr
+
+
+def test_public_full_rejects_missing_provider_before_uv(tmp_path: Path) -> None:
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell is unavailable")
+
+    evaluator = tmp_path / "evaluator"
+    evaluator.mkdir()
+    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel.write_bytes(b"fake wheel")
+    environment = os.environ.copy()
+    for name in ("PHYCODE_API_KEY", "PHYCODE_BASE_URL", "PHYCODE_MODEL"):
+        environment.pop(name, None)
+
+    completed = subprocess.run(
+        [
+            pwsh,
+            "-NoProfile",
+            "-File",
+            str(ROOT / "integrations/prbench/run_public_full.ps1"),
+            "-EvaluatorRoot",
+            str(evaluator),
+            "-WheelPath",
+            str(wheel),
+        ],
+        check=False,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        env=environment,
+    )
+    assert completed.returncode != 0
+    assert "must be configured in the current process" in (
+        completed.stdout + completed.stderr
+    )
+
+
 @pytest.mark.parametrize("fake_uv_failure", [False, True])
 @pytest.mark.parametrize("preexisting_opencode", [False, True])
 def test_public_smoke_restores_or_removes_opencode_environment_with_fake_uv(

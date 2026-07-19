@@ -1199,6 +1199,8 @@ def test_official_launch_cli_exposes_and_bounds_approval_wait(
 
     assert help_result.returncode == 0
     assert "--approval-wait-seconds" in help_result.stdout
+    assert "--phycode-max-tool-calls" in help_result.stdout
+    assert "--phycode-max-context-chars" in help_result.stdout
 
     invalid_result = subprocess.run(
         [sys.executable, str(main), "launch", "--approval-wait-seconds", "901"],
@@ -1211,6 +1213,24 @@ def test_official_launch_cli_exposes_and_bounds_approval_wait(
 
     assert invalid_result.returncode != 0
     assert "900" in invalid_result.stderr
+
+    for option, value, boundary in (
+        ("--phycode-max-tool-calls", "0", "1"),
+        ("--phycode-max-tool-calls", "101", "100"),
+        ("--phycode-max-context-chars", "999", "1000"),
+        ("--phycode-max-context-chars", "64001", "64000"),
+    ):
+        invalid_result = subprocess.run(
+            [sys.executable, str(main), "launch", option, value],
+            cwd=patched_official_evaluator,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=cli_env,
+        )
+
+        assert invalid_result.returncode != 0
+        assert boundary in invalid_result.stderr
 
 
 @pytest.mark.parametrize("approval_wait_seconds", [-1, 901])
@@ -1228,6 +1248,30 @@ def test_official_launcher_rejects_invalid_approval_wait_before_container_setup(
         asyncio.run(
             launch_evaluation(approval_wait_seconds=approval_wait_seconds)  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.parametrize(
+    ("limits", "message"),
+    [
+        ({"phycode_max_tool_calls": 0}, "tool calls"),
+        ({"phycode_max_tool_calls": 101}, "tool calls"),
+        ({"phycode_max_context_chars": 999}, "context chars"),
+        ({"phycode_max_context_chars": 64_001}, "context chars"),
+    ],
+)
+def test_official_launcher_rejects_invalid_phycode_limits_before_container_setup(
+    patched_official_evaluator: Path,
+    limits: dict[str, int],
+    message: str,
+) -> None:
+    launch_evaluation = _load_function(
+        patched_official_evaluator / "src/launcher.py",
+        "launch_evaluation",
+        {},
+    )
+
+    with pytest.raises(ValueError, match=message):
+        asyncio.run(launch_evaluation(**limits))  # type: ignore[arg-type]
 
 
 def test_official_main_and_white_runner_pass_approval_wait_only_to_phycode(
@@ -1264,11 +1308,15 @@ def test_official_main_and_white_runner_pass_approval_wait_only_to_phycode(
         phycode_contract="contract.json",
         phycode_approvals="approvals.json",
         approval_wait_seconds=900,
+        phycode_max_tool_calls=50,
+        phycode_max_context_chars=24_000,
         no_archive=True,
         results_subdir=None,
     )
 
     assert launch_calls[0]["approval_wait_seconds"] == 900
+    assert launch_calls[0]["phycode_max_tool_calls"] == 50
+    assert launch_calls[0]["phycode_max_context_chars"] == 24_000
 
     agent_env_module = types.ModuleType("src.my_util.agent_env")
     agent_env_module.build_docker_exec_env_flags = (  # type: ignore[attr-defined]
@@ -1337,6 +1385,8 @@ def test_official_main_and_white_runner_pass_approval_wait_only_to_phycode(
             docker_container_id="container-id",
             agent_type=agent_type,
             approval_wait_seconds=900,
+            max_tool_calls=50,
+            max_context_chars=24_000,
             _provider_env={"PHYCODE_API_KEY": "synthetic-value"},
             _tasks={},
         )
@@ -1345,8 +1395,12 @@ def test_official_main_and_white_runner_pass_approval_wait_only_to_phycode(
         )
 
     assert "--approval-wait-seconds 900" in commands[0][-1]
+    assert "--max-tool-calls 50" in commands[0][-1]
+    assert "--max-context-chars 24000" in commands[0][-1]
     assert "synthetic-value" not in str(commands[0])
     assert "--approval-wait-seconds" not in str(commands[1])
+    assert "--max-tool-calls" not in str(commands[1])
+    assert "--max-context-chars" not in str(commands[1])
 
 
 @pytest.mark.parametrize(
@@ -1626,6 +1680,7 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
         run_result_path.parent.mkdir(parents=True)
         run_result_path.write_text('{"status": "completed"}', encoding="utf-8")
     cleanup_events: list[str] = []
+    process_calls: list[dict[str, object]] = []
     ready_values = {
         "green_not_ready": [False],
         "white_not_ready": [True, False],
@@ -1633,6 +1688,10 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
 
     class FakeProcess:
         pid = 4321
+
+    def fake_process(**kwargs: object) -> FakeProcess:
+        process_calls.append(kwargs)
+        return FakeProcess()
 
     class FakeDockerEnvironment:
         container_id = "container-id"
@@ -1761,9 +1820,7 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
                 FileHandler=lambda *_args: object(),
                 StreamHandler=lambda *_args: object(),
             ),
-            "multiprocessing": types.SimpleNamespace(
-                Process=lambda **_kwargs: FakeProcess()
-            ),
+            "multiprocessing": types.SimpleNamespace(Process=fake_process),
             "my_a2a": FakeA2A(),
             "open": guarded_open,
             "os": report_os,
@@ -1795,6 +1852,8 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
                 white_port=9002,
                 white_agent_type="phycode",
                 green_agent_type="opencode",
+                phycode_max_tool_calls=50,
+                phycode_max_context_chars=24_000,
             ),
         )
     )
@@ -1803,6 +1862,8 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
     assert "remove" in cleanup_events
     assert "archive" in cleanup_events
     assert cleanup_events.count("kill") == 2
+    if outcome != "green_not_ready":
+        assert process_calls[1]["args"][-2:] == (50, 24_000)  # type: ignore[index]
 
 
 @pytest.mark.parametrize(
@@ -3158,3 +3219,27 @@ def test_public_contracts_contain_only_instruction_declared_constraints(
     assert contract.constraints[0].csv_rows == rows
     assert "metadata" not in raw.casefold()
     assert "ground_truth" not in raw.casefold()
+
+
+def test_full_public_contract_uses_only_instruction_declared_artifacts() -> None:
+    path = Path("integrations/prbench/public_contracts/task_white_1993.json")
+    raw = path.read_text(encoding="utf-8")
+    contract = TaskContract.model_validate_json(raw)
+
+    assert contract.instruction_file == "instruction.md"
+    assert contract.paper_file == "white1993.md"
+    assert "reproduction/ANALYSIS.md" in contract.expected_files
+    assert len(contract.expected_files) == 20
+    assert contract.execution_entrypoints == tuple(
+        f"reproduction/fig{figure}_compute.py" for figure in range(2, 9)
+    )
+    assert len(contract.constraints) == 7
+    assert {item.csv_data_row_count for item in contract.constraints} == {
+        15,
+        24,
+        50,
+        60,
+    }
+    assert "metadata" not in raw.casefold()
+    assert "ground_truth" not in raw.casefold()
+    assert "reference" not in raw.casefold()

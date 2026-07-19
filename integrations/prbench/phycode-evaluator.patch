@@ -1,5 +1,5 @@
 diff --git a/main.py b/main.py
-index 922d52e..df2504d 100644
+index 922d52e..e51247e 100644
 --- a/main.py
 +++ b/main.py
 @@ -30 +30 @@ def white(
@@ -8,7 +8,7 @@ index 922d52e..df2504d 100644
 @@ -45 +45 @@ def launch(
 -    white_agent_type: str = typer.Option(None, "--white-agent-type", help="Override agent CLI for white agent (task solving)"),
 +    white_agent_type: str = typer.Option(None, "--white-agent-type", help="Override white agent: 'claude', 'codex', 'opencode', or 'phycode'"),
-@@ -46,0 +47,9 @@ def launch(
+@@ -46,0 +47,23 @@ def launch(
 +    phycode_contract: str = typer.Option(None, "--phycode-contract", help="Public task contract JSON for a PhyCode white run"),
 +    phycode_approvals: str = typer.Option(None, "--phycode-approvals", help="Exact run-level approval manifest for a PhyCode white run"),
 +    approval_wait_seconds: int = typer.Option(
@@ -18,14 +18,30 @@ index 922d52e..df2504d 100644
 +        max=900,
 +        help="Seconds PhyCode may wait for a runtime approval (0-900)",
 +    ),
-@@ -58 +67 @@ def launch(
++    phycode_max_tool_calls: int = typer.Option(
++        40,
++        "--phycode-max-tool-calls",
++        min=1,
++        max=100,
++        help="Maximum PhyCode tool calls (1-100)",
++    ),
++    phycode_max_context_chars: int = typer.Option(
++        12_000,
++        "--phycode-max-context-chars",
++        min=1_000,
++        max=64_000,
++        help="Maximum PhyCode context characters (1000-64000)",
++    ),
+@@ -58 +81 @@ def launch(
 -    asyncio.run(launch_evaluation(
 +    succeeded = asyncio.run(launch_evaluation(
-@@ -65,0 +75,3 @@ def launch(
+@@ -65,0 +89,5 @@ def launch(
 +        phycode_contract=phycode_contract,
 +        phycode_approvals=phycode_approvals,
 +        approval_wait_seconds=approval_wait_seconds,
-@@ -68,0 +81,2 @@ def launch(
++        phycode_max_tool_calls=phycode_max_tool_calls,
++        phycode_max_context_chars=phycode_max_context_chars,
+@@ -68,0 +97,2 @@ def launch(
 +    if not succeeded:
 +        raise typer.Exit(1)
 diff --git a/src/green_agent/agent.py b/src/green_agent/agent.py
@@ -259,7 +275,7 @@ index 3874429..1ead1da 100644
 @@ -820,0 +999 @@ def start_green_agent(
 +            defer_provider_env=defer_provider_env,
 diff --git a/src/launcher.py b/src/launcher.py
-index c705de8..49a4cb5 100644
+index c705de8..62b1e15 100644
 --- a/src/launcher.py
 +++ b/src/launcher.py
 @@ -23,0 +24 @@ import signal
@@ -510,16 +526,22 @@ index c705de8..49a4cb5 100644
 +        except BaseException:
 +            logger.warning("Docker cleanup failed after setup error")
 +        raise
-@@ -322,0 +486,3 @@ async def launch_evaluation(
+@@ -322,0 +486,5 @@ async def launch_evaluation(
 +    phycode_contract: str | None = None,
 +    phycode_approvals: str | None = None,
 +    approval_wait_seconds: int = 0,
-@@ -325 +491 @@ async def launch_evaluation(
++    phycode_max_tool_calls: int = 40,
++    phycode_max_context_chars: int = 12_000,
+@@ -325 +493 @@ async def launch_evaluation(
 -):
 +) -> bool:
-@@ -337,0 +504,9 @@ async def launch_evaluation(
+@@ -337,0 +506,13 @@ async def launch_evaluation(
 +    if not 0 <= approval_wait_seconds <= 900:
 +        raise ValueError("approval wait seconds must be between 0 and 900")
++    if not 1 <= phycode_max_tool_calls <= 100:
++        raise ValueError("PhyCode max tool calls must be between 1 and 100")
++    if not 1_000 <= phycode_max_context_chars <= 64_000:
++        raise ValueError("PhyCode max context chars must be between 1000 and 64000")
 +    if effective_green_type == "phycode":
 +        raise ValueError("PhyCode is supported only as the white task-solving agent")
 +    if effective_white_type == "phycode" and code_only:
@@ -527,13 +549,13 @@ index c705de8..49a4cb5 100644
 +    phycode_provider_env = (
 +        resolve_env("phycode") if effective_white_type == "phycode" else {}
 +    )
-@@ -357 +532 @@ async def launch_evaluation(
+@@ -357 +538 @@ async def launch_evaluation(
 -        return
 +        return False
-@@ -362 +537 @@ async def launch_evaluation(
+@@ -362 +543 @@ async def launch_evaluation(
 -        return
 +        return False
-@@ -374,0 +550,10 @@ async def launch_evaluation(
+@@ -374,0 +556,10 @@ async def launch_evaluation(
 +    report_path = os.path.join(workspace_dir, "eval_logs", "eval_report.json")
 +    run_result_path = os.path.join(
 +        workspace_dir, ".phycode", "prbench", "run_result.json"
@@ -544,7 +566,7 @@ index c705de8..49a4cb5 100644
 +    if effective_white_type == "phycode":
 +        _remove_stale_output(workspace_dir, run_result_path)
 +
-@@ -393,0 +579,10 @@ async def launch_evaluation(
+@@ -393,0 +585,10 @@ async def launch_evaluation(
 +    if effective_white_type == "phycode":
 +        _copy_phycode_controls(
 +            task_config,
@@ -555,23 +577,24 @@ index c705de8..49a4cb5 100644
 +            code_only,
 +        )
 +
-@@ -397,0 +593 @@ async def launch_evaluation(
+@@ -397,0 +599 @@ async def launch_evaluation(
 +    evaluation_succeeded = False
-@@ -420 +616,2 @@ async def launch_evaluation(
+@@ -420 +622,2 @@ async def launch_evaluation(
 -            args=("prbench_green_agent", green_host, green_port, container_id, effective_green_type),
 +            args=("prbench_green_agent", green_host, green_port, container_id,
 +                  effective_green_type, effective_white_type == "phycode"),
-@@ -423 +620 @@ async def launch_evaluation(
+@@ -423 +626 @@ async def launch_evaluation(
 -        p_green.start()
 +        _start_without_phycode_environment(p_green)
-@@ -427 +624 @@ async def launch_evaluation(
+@@ -427 +630 @@ async def launch_evaluation(
 -            return
 +            return False
-@@ -436 +633,2 @@ async def launch_evaluation(
+@@ -436 +639,3 @@ async def launch_evaluation(
 -                  workspace_dir, container_id, effective_white_type),
 +                  workspace_dir, container_id, effective_white_type,
-+                  phycode_provider_env, approval_wait_seconds),
-@@ -439 +637,7 @@ async def launch_evaluation(
++                  phycode_provider_env, approval_wait_seconds,
++                  phycode_max_tool_calls, phycode_max_context_chars),
+@@ -439 +644,7 @@ async def launch_evaluation(
 -        p_white.start()
 +        if effective_white_type == "phycode":
 +            run_with_phycode_cleanup(
@@ -580,21 +603,21 @@ index c705de8..49a4cb5 100644
 +            )
 +        else:
 +            _start_without_phycode_environment(p_white)
-@@ -443 +647 @@ async def launch_evaluation(
+@@ -443 +654 @@ async def launch_evaluation(
 -            return
 +            return False
-@@ -466,0 +671 @@ async def launch_evaluation(
+@@ -466,0 +678 @@ async def launch_evaluation(
 +        send_succeeded = False
-@@ -469,0 +675 @@ async def launch_evaluation(
+@@ -469,0 +682 @@ async def launch_evaluation(
 +            send_succeeded = True
-@@ -478,4 +684,2 @@ async def launch_evaluation(
+@@ -478,4 +691,2 @@ async def launch_evaluation(
 -        report_path = os.path.join(workspace_dir, "eval_logs", "eval_report.json")
 -        if os.path.exists(report_path):
 -            with open(report_path, "r") as f:
 -                report = json.load(f)
 +        report_valid, report = _load_verified_json(workspace_dir, report_path)
 +        if report_valid:
-@@ -488,0 +693,17 @@ async def launch_evaluation(
+@@ -488,0 +700,17 @@ async def launch_evaluation(
 +        phycode_succeeded = True
 +        if effective_white_type == "phycode":
 +            run_result_valid, run_result = _load_verified_json(
@@ -612,19 +635,19 @@ index c705de8..49a4cb5 100644
 +            send_succeeded and report_valid and phycode_succeeded
 +        )
 +
-@@ -534,0 +756 @@ async def launch_evaluation(
+@@ -534,0 +763 @@ async def launch_evaluation(
 +    return evaluation_succeeded
-@@ -558 +780 @@ async def batch_evaluate(
+@@ -558 +787 @@ async def batch_evaluate(
 -                await launch_evaluation(
 +                succeeded = await launch_evaluation(
-@@ -569 +791,4 @@ async def batch_evaluate(
+@@ -569 +798,4 @@ async def batch_evaluate(
 -                print(f"[BATCH] Completed: {task_id}", flush=True)
 +                if succeeded:
 +                    print(f"[BATCH] Completed: {task_id}", flush=True)
 +                else:
 +                    print(f"[BATCH] Failed: {task_id}: evaluation did not produce a report", flush=True)
 diff --git a/src/my_util/agent_env.py b/src/my_util/agent_env.py
-index d0ae5f5..df5064b 100644
+index d0ae5f5..bdc1bb8 100644
 --- a/src/my_util/agent_env.py
 +++ b/src/my_util/agent_env.py
 @@ -14,0 +15,8 @@ import os
@@ -718,19 +741,19 @@ index d0ae5f5..df5064b 100644
 +    process_env.clear()
 +
 +
-@@ -139,0 +228,2 @@ def resolve_env(agent_type: str) -> dict[str, str]:
+@@ -138,0 +228,2 @@ def resolve_env(agent_type: str) -> dict[str, str]:
 +    if agent_type == "phycode":
 +        return resolve_phycode_env()
-@@ -149,0 +240,7 @@ def build_docker_exec_env_flags(agent_type: str) -> list[str]:
-+    flags = ["-e", "HOME=/home/agent"]
+@@ -149,0 +241,7 @@ def build_docker_exec_env_flags(agent_type: str) -> list[str]:
 +    if agent_type == "phycode":
 +        # Values are supplied only in the docker CLI child environment. They
 +        # never enter the host subprocess argv or the persistent container env.
 +        for key in PHYCODE_PROVIDER_NAMES:
 +            flags.extend(["-e", key])
 +        return flags
++    flags = ["-e", "HOME=/home/agent"]
 diff --git a/src/my_util/docker_manager.py b/src/my_util/docker_manager.py
-index 9c1f2b4..3a0112a 100644
+index 9c1f2b4..30cb126 100644
 --- a/src/my_util/docker_manager.py
 +++ b/src/my_util/docker_manager.py
 @@ -16,0 +17,14 @@ logger = logging.getLogger(__name__)
@@ -766,7 +789,7 @@ index 9c1f2b4..3a0112a 100644
 +                f"Container started: {self.container.short_id} "
 +                f"(id={self.container_id[:12]})"
 +            )
-@@ -88,26 +112,67 @@ class DockerEnvironment:
+@@ -88,14 +112,9 @@ class DockerEnvironment:
 -        # Create a non-root user matching the host user's UID/GID
 -        # This ensures files created inside the container are owned by the host user
 -        host_uid = os.getuid()
@@ -781,18 +804,6 @@ index 9c1f2b4..3a0112a 100644
 -            f"id agent"
 -        )
 -        logger.info(f"Container user 'agent': {create_user_result['stdout'].strip()}")
--
--        # Install Python dependencies
--        if self.pip_packages:
--            pkgs = " ".join(self.pip_packages)
--            logger.info(f"Installing Python packages: {pkgs}")
--            self.exec_command(f"pip install --quiet {pkgs}", timeout=300)
--
--        # Create directory structure in workspace with wide permissions
--        # (Docker userns remapping may cause UID mismatches between container and host)
--        self.exec_command(
--            "mkdir -p /workspace/reproduction /workspace/data /workspace/eval_logs && "
--            "chmod -R 777 /workspace"
 +            # Create a non-root user matching the selected host UID/GID.
 +            create_user_result = self.exec_command(
 +                f"groupadd -o -g {host_gid} agent 2>/dev/null || true; "
@@ -802,12 +813,22 @@ index 9c1f2b4..3a0112a 100644
 +                f"id agent"
 +            )
 +            logger.info(f"Container user 'agent': {create_user_result['stdout'].strip()}")
-+
+@@ -103,5 +122,4 @@ class DockerEnvironment:
+-        # Install Python dependencies
+-        if self.pip_packages:
+-            pkgs = " ".join(self.pip_packages)
+-            logger.info(f"Installing Python packages: {pkgs}")
+-            self.exec_command(f"pip install --quiet {pkgs}", timeout=300)
 +            if self.pip_packages:
 +                pkgs = " ".join(self.pip_packages)
 +                logger.info(f"Installing Python packages: {pkgs}")
 +                self.exec_command(f"pip install --quiet {pkgs}", timeout=300)
-+
+@@ -109,5 +127,52 @@ class DockerEnvironment:
+-        # Create directory structure in workspace with wide permissions
+-        # (Docker userns remapping may cause UID mismatches between container and host)
+-        self.exec_command(
+-            "mkdir -p /workspace/reproduction /workspace/data /workspace/eval_logs && "
+-            "chmod -R 777 /workspace"
 +            self.exec_command(
 +                "mkdir -p /workspace/reproduction /workspace/data /workspace/eval_logs && "
 +                "chmod -R 777 /workspace"
@@ -869,42 +890,35 @@ index 9c1f2b4..3a0112a 100644
 +            return False
 +        return self.exec_command("phycode prbench run --help")["exit_code"] == 0
 +
-@@ -243 +317 @@ class DockerEnvironment:
+@@ -244 +317 @@ EOFSET'''
 -    def install_opencode(self) -> bool:
 +    def install_opencode(self, install_openai_compatible: bool = False) -> bool:
-@@ -333,8 +407,12 @@ class DockerEnvironment:
+@@ -333,2 +406,3 @@ EOFCFG'''
 -        # Pre-install @ai-sdk/openai-compatible if a custom provider is registered
 -        if "openai_compat" in providers:
 +        # A deferred green provider has no credentials/config during setup, but
 +        # its runtime-only OPENCODE_CONFIG_CONTENT still needs this adapter.
 +        if install_openai_compatible or "openai_compat" in providers:
-             logger.info("  Installing @ai-sdk/openai-compatible...")
+@@ -336 +410 @@ EOFCFG'''
 -            self.exec_command(
 +            adapter_install = self.exec_command(
-                 "cd /home/agent/.config/opencode && "
-                 "npm init -y > /dev/null 2>&1 && "
-                 "npm install @ai-sdk/openai-compatible > /dev/null 2>&1"
-             )
+@@ -340,0 +415,3 @@ EOFCFG'''
 +            if install_openai_compatible and adapter_install["exit_code"] != 0:
 +                logger.error("  Failed to install OpenCode compatible provider adapter")
 +                return False
-@@ -593,21 +670,24 @@ class DockerEnvironment:
-     def stop(self) -> None:
-         """Stop and remove the container. Fix workspace permissions first."""
+@@ -595,2 +672,4 @@ EOFCFG'''
 -        if self.container:
 -            # Make workspace world-writable so host user can clean up
 +        container = self.container
 +        try:
 +            if container is None:
 +                return
-             if self.workspace_dir:
-                 try:
-                     self.exec_command("chmod -R 777 /workspace")
+@@ -600,2 +679,2 @@ EOFCFG'''
 -                except Exception:
 -                    pass
 +                except BaseException:
 +                    logger.warning("Workspace permission cleanup failed")
-             try:
+@@ -603,4 +682,4 @@ EOFCFG'''
 -                self.container.stop(timeout=10)
 -                logger.info(f"Container {self.container.short_id} stopped.")
 -            except Exception as e:
@@ -913,7 +927,7 @@ index 9c1f2b4..3a0112a 100644
 +                logger.info(f"Container {container.short_id} stopped.")
 +            except BaseException:
 +                logger.warning("Container stop failed during cleanup")
-             try:
+@@ -608,4 +687,5 @@ EOFCFG'''
 -                self.container.remove(force=True)
 -                logger.info(f"Container {self.container.short_id} removed.")
 -            except Exception as e:
@@ -923,10 +937,8 @@ index 9c1f2b4..3a0112a 100644
 +            except BaseException:
 +                logger.warning("Container force-remove failed during cleanup")
 +        finally:
-             self.container = None
-             self.container_id = None
 diff --git a/src/white_agent/agent.py b/src/white_agent/agent.py
-index a1b41ff..db7a67e 100644
+index a1b41ff..8b4ca52 100644
 --- a/src/white_agent/agent.py
 +++ b/src/white_agent/agent.py
 @@ -38,0 +39,5 @@ def _export_traces(container_id: str, dest_dir: str, agent_type: str = "claude")
@@ -935,22 +947,26 @@ index a1b41ff..db7a67e 100644
 +        # under the bind-mounted /workspace/.phycode/prbench directory.
 +        logger.info(f"PhyCode traces already available in {dest_dir}")
 +        return
-@@ -222 +227,3 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
+@@ -222 +227,5 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
 -                 agent_type: str = "claude"):
 +                 agent_type: str = "claude",
 +                 provider_env: dict[str, str] | None = None,
-+                 approval_wait_seconds: int = 0):
-@@ -225,0 +233,2 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
++                 approval_wait_seconds: int = 0,
++                 max_tool_calls: int = 40,
++                 max_context_chars: int = 12_000):
+@@ -225,0 +235,4 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
 +        self._provider_env = dict(provider_env or {})
 +        self.approval_wait_seconds = approval_wait_seconds
-@@ -297 +306,5 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
++        self.max_tool_calls = int(max_tool_calls)
++        self.max_context_chars = int(max_context_chars)
+@@ -297 +310,5 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
 -        from src.my_util.agent_env import build_docker_exec_env_flags, resolve_env
 +        from src.my_util.agent_env import (
 +            build_docker_exec_env_flags,
 +            resolve_env,
 +            run_with_phycode_cleanup,
 +        )
-@@ -301 +314,21 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
+@@ -301 +318,23 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
 -        if self.agent_type == "codex":
 +        if self.agent_type == "phycode":
 +            command = (
@@ -961,7 +977,9 @@ index a1b41ff..db7a67e 100644
 +                'phycode prbench run --workspace /workspace '
 +                '--contract /workspace/task_contract.json '
 +                '--approvals /workspace/phycode-approvals.json '
-+                f'--approval-wait-seconds {self.approval_wait_seconds}'
++                f'--approval-wait-seconds {self.approval_wait_seconds} '
++                f'--max-tool-calls {self.max_tool_calls} '
++                f'--max-context-chars {self.max_context_chars}'
 +            )
 +            cmd = [
 +                "docker", "exec",
@@ -973,7 +991,7 @@ index a1b41ff..db7a67e 100644
 +            ]
 +            logger.info(f"White agent [{session_id}]: docker exec {self.docker_container_id[:12]} phycode prbench run ...")
 +        elif self.agent_type == "codex":
-@@ -346,8 +379,15 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
+@@ -346,8 +385,15 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
 -        process = subprocess.Popen(
 -            cmd,
 -            stdin=subprocess.DEVNULL,   # codex exec requires stdin=/dev/null in headless mode
@@ -997,7 +1015,7 @@ index a1b41ff..db7a67e 100644
 +                bufsize=1,
 +                env=process_env,
 +            )
-@@ -355 +395,9 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
+@@ -355 +401,9 @@ class ClaudeCodeWhiteAgentExecutor(AgentExecutor):
 -        _agent_labels = {"codex": "OpenAI Codex", "opencode": "OpenCode", "claude": "Claude Code"}
 +        if self.agent_type == "phycode":
 +            assert process_env is not None
@@ -1008,13 +1026,15 @@ index a1b41ff..db7a67e 100644
 +            process = _launch_process()
 +
 +        _agent_labels = {"phycode": "PhyCode", "codex": "OpenAI Codex", "opencode": "OpenCode", "claude": "Claude Code"}
-@@ -396,0 +445,2 @@ def start_white_agent(
+@@ -396,0 +451,4 @@ def start_white_agent(
 +    provider_env: dict[str, str] | None = None,
 +    approval_wait_seconds: int = 0,
-@@ -400 +450 @@ def start_white_agent(
++    max_tool_calls: int = 40,
++    max_context_chars: int = 12_000,
+@@ -400 +458 @@ def start_white_agent(
 -    agent_type: "claude" (default) uses Claude Code CLI; "codex" uses OpenAI Codex CLI.
 +    agent_type: "claude" (default), "codex", "opencode", or "phycode".
-@@ -401,0 +452,8 @@ def start_white_agent(
+@@ -401,0 +460,8 @@ def start_white_agent(
 +    if agent_type == "phycode":
 +        from src.my_util.agent_env import PHYCODE_PROVIDER_NAMES, resolve_env
 +
@@ -1023,18 +1043,20 @@ index a1b41ff..db7a67e 100644
 +        for name in PHYCODE_PROVIDER_NAMES:
 +            os.environ.pop(name, None)
 +
-@@ -410 +468 @@ def start_white_agent(
+@@ -410 +476 @@ def start_white_agent(
 -    _agent_labels = {"codex": "OpenAI Codex", "opencode": "OpenCode", "claude": "Claude Code"}
 +    _agent_labels = {"phycode": "PhyCode", "codex": "OpenAI Codex", "opencode": "OpenCode", "claude": "Claude Code"}
-@@ -419,2 +477,2 @@ def start_white_agent(
+@@ -419,2 +485,2 @@ def start_white_agent(
 -    request_handler = DefaultRequestHandler(
 -        agent_executor=ClaudeCodeWhiteAgentExecutor(
 +    try:
 +        agent_executor = ClaudeCodeWhiteAgentExecutor(
-@@ -424 +482,10 @@ def start_white_agent(
+@@ -424 +490,12 @@ def start_white_agent(
 -        ),
 +            provider_env=provider_env,
 +            approval_wait_seconds=approval_wait_seconds,
++            max_tool_calls=max_tool_calls,
++            max_context_chars=max_context_chars,
 +        )
 +    finally:
 +        if agent_type == "phycode":
