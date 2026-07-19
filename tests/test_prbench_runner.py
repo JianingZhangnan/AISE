@@ -234,14 +234,7 @@ def test_runner_recovers_from_denied_direct_csv_via_script_and_runtime_approval(
     def approve_reviewed_script(seconds: float) -> None:
         observed_request.update(json.loads(request_path.read_text(encoding="utf-8")))
         current = json.loads(approvals.read_text(encoding="utf-8"))
-        current["grants"].append(
-            {
-                "tool_name": "process.run",
-                "argv": observed_request["argv"],
-                "cwd": observed_request["cwd"],
-                "script_sha256": observed_request["script_sha256"],
-            }
-        )
+        current["grants"].append(dict(observed_request))
         approvals.write_text(json.dumps(current), encoding="utf-8")
         clock.advance(seconds)
 
@@ -401,14 +394,7 @@ def test_runner_canonicalizes_python_alias_before_dynamic_process_approval(
         def sleep(self, seconds: float) -> None:
             observed_request.update(json.loads(request_path.read_text(encoding="utf-8")))
             manifest = json.loads(approvals.read_text(encoding="utf-8"))
-            manifest["grants"].append(
-                {
-                    "tool_name": "process.run",
-                    "argv": observed_request["argv"],
-                    "cwd": observed_request["cwd"],
-                    "script_sha256": observed_request["script_sha256"],
-                }
-            )
+            manifest["grants"].append(dict(observed_request))
             approvals.write_text(json.dumps(manifest), encoding="utf-8")
             self.value += seconds
 

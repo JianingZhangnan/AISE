@@ -123,11 +123,12 @@ workspace 内的 `.phycode/prbench/approval-request.json` 并暂停等待。
 此时主 agent 必须人工完成以下门禁：
 
 1. 读取待执行 reproduction 脚本，确认它只实现公开任务且没有越界行为。
-2. 读取 `approval-request.json`，逐项核对规范化 `argv`、`cwd`、脚本路径和
-   `script_sha256`；独立计算脚本 SHA-256 并确认与请求一致。
-3. 把完全相同的 `argv`、`cwd` 和 `script_sha256` 作为一次性 `process.run` grant
-   写入该 active workspace 的 `phycode-approvals.json`。不得批准不同参数，不得
-   使用通配符，也不得让外部脚本替 agent 运行 reproduction。
+2. 读取 `approval-request.json`，逐项核对规范化 `argv`、`cwd` 和
+   `script_sha256`；`argv[1]` 就是相对 `cwd` 的脚本路径，独立计算脚本 SHA-256
+   并确认与请求一致。
+3. 请求对象与一次性 `process.run` grant 使用同一 schema；审核通过后可将该对象
+   **原样**追加到 active workspace 的 `phycode-approvals.json` 的 `grants` 数组。
+   不得批准不同参数，不得使用通配符，也不得让外部脚本替 agent 运行 reproduction。
 
 清单刷新后 runner 会再次校验脚本内容；等待期间脚本变化、hash 不匹配、畸形
 清单、重复消费或 900 秒超时都会 fail closed。CSV 只能由已审核脚本执行生成，

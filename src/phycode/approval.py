@@ -355,7 +355,6 @@ class ApprovalManifest:
             "tool_name": tool_name,
             "argv": public_argv,
             "cwd": relative_cwd or ".",
-            "script_path": script_path,
             "script_sha256": script_sha256,
         }
 

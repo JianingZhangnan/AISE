@@ -263,3 +263,17 @@
 - GREEN 证据：新增单测通过；审批刷新/损坏/超时聚焦集合为 8 passed、1 skipped；
   完整 `tests/test_process_approval.py` 通过（3 个平台相关用例 skipped）；
   `uvx pyright` 为 0 errors / 0 warnings。
+
+## 2026-07-18 Task 23：统一动态审批请求与 grant 契约
+
+- subagent `runtime_task23` 使用本地 Superpowers `systematic-debugging` 与
+  `test-driven-development`；未读取凭据、未调用真实 API、未接触临时 evaluator。
+- 根因是动态 `process.run` 请求额外输出 `script_path`，但
+  `ApprovalGrant(extra="forbid")` 不接受该字段；人工把审核后的请求对象原样追加到
+  `grants` 后，清单刷新会持续校验失败。该字段又是冗余信息：规范化 `argv[1]` 已是
+  相对 `cwd` 的脚本路径。
+- TDD RED 将实际 `approval-request.json` 对象原样作为唯一 grant 写回，旧实现稳定
+  返回拒绝。最小 GREEN 仅从请求中删除冗余 `script_path`，不放宽
+  `ApprovalGrant` 的 `extra="forbid"`，也不改变 absolute executable、cwd、argv 与
+  `script_sha256` 的精确绑定。现在审核通过的请求对象可原样追加到 manifest 的
+  `grants` 数组，并由 `ApprovalDocument` 解析、`ApprovalManifest` 匹配和一次性消费。

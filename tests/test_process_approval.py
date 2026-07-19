@@ -534,7 +534,7 @@ def test_exact_approval_is_consumed_once(tmp_path: Path) -> None:
     assert not manifest(call, decision)
 
 
-def test_dynamic_process_approval_writes_hash_bound_request_and_refreshes(
+def test_dynamic_process_approval_request_is_a_directly_usable_hash_bound_grant(
     tmp_path: Path,
 ) -> None:
     reproduction = tmp_path / "reproduction"
@@ -552,18 +552,7 @@ def test_dynamic_process_approval_writes_hash_bound_request_and_refreshes(
         nonlocal observed_request
         observed_request = json.loads(request_path.read_text(encoding="utf-8"))
         approvals.write_text(
-            json.dumps(
-                {
-                    "grants": [
-                        {
-                            "tool_name": "process.run",
-                            "argv": observed_request["argv"],
-                            "cwd": observed_request["cwd"],
-                            "script_sha256": observed_request["script_sha256"],
-                        }
-                    ]
-                }
-            ),
+            json.dumps({"grants": [observed_request]}),
             encoding="utf-8",
         )
         clock.advance(seconds)
@@ -587,7 +576,6 @@ def test_dynamic_process_approval_writes_hash_bound_request_and_refreshes(
         "tool_name": "process.run",
         "argv": [os.path.normcase(str(Path(sys.executable).resolve())), "reproduction/a.py"],
         "cwd": ".",
-        "script_path": "reproduction/a.py",
         "script_sha256": expected_hash,
     }
     assert str(tmp_path) not in json.dumps(observed_request)
@@ -610,18 +598,7 @@ def test_dynamic_request_argv_round_trips_when_process_cwd_is_not_workspace_root
         request = json.loads(request_path.read_text(encoding="utf-8"))
         observed_argv.extend(request["argv"])
         approvals.write_text(
-            json.dumps(
-                {
-                    "grants": [
-                        {
-                            "tool_name": "process.run",
-                            "argv": request["argv"],
-                            "cwd": request["cwd"],
-                            "script_sha256": request["script_sha256"],
-                        }
-                    ]
-                }
-            ),
+            json.dumps({"grants": [request]}),
             encoding="utf-8",
         )
         clock.advance(seconds)
@@ -912,18 +889,7 @@ def test_hash_bound_process_grant_rejects_script_changed_while_waiting(tmp_path:
             request = json.loads(request_path.read_text(encoding="utf-8"))
             script.write_text("print('after')\n", encoding="utf-8")
             approvals.write_text(
-                json.dumps(
-                    {
-                        "grants": [
-                            {
-                                "tool_name": "process.run",
-                                "argv": request["argv"],
-                                "cwd": request["cwd"],
-                                "script_sha256": request["script_sha256"],
-                            }
-                        ]
-                    }
-                ),
+                json.dumps({"grants": [request]}),
                 encoding="utf-8",
             )
             wrote_grant = True
