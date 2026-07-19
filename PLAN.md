@@ -2559,7 +2559,8 @@ Task 32 → Task 33 → Task 34 → Task 35，正式真实 API / official evalua
   实现 `69dadc1ef3a8314e4ebed7b88b8668006f2f0d71`，审查修复
   `7fe73aa7bba48f9def3a97c0b8e8ebcbc5439139`；最终 review clean，0 / 0 / 0。
 - [x] Task 33 分支级回归纠正：删除过期的 runner-side read 测试假设，并锁定公开
-  instruction 的一次安全验证发生在首次 provider 调用前。提交
+  instruction 的一次安全验证发生在首次 provider 调用前。实际范围
+  `e51a82ca50ddde519f353bbd4b7962a1d87ca8f7..7547db2a9ed8db98cb6b86d6ea95c186e30192d7`；提交
   `0d4582b483530653ba1220b1d8e79673f7ca310c` 与
   `7547db2a9ed8db98cb6b86d6ea95c186e30192d7`；完整 692 项 exit 0，修复后 review
   clean，0 / 0 / 0。
@@ -2570,9 +2571,17 @@ Task 32 → Task 33 → Task 34 → Task 35，正式真实 API / official evalua
   最终 review clean，0 / 0 / 0。
 - [x] Task 35：补齐中文 README、PLAN、SPEC_PROCESS、AGENT_LOG 和文档合同，完成
   full pytest、Pyright、build、fresh adapter/patch、双 PowerShell AST、凭据与本地产物
-  门禁。实现基线为 `7547db2a9ed8db98cb6b86d6ea95c186e30192d7`；实际提交范围将在
-  本次文档提交完成后以 `7547db2..HEAD` 固定，提交信息为
-  `docs(prbench): document full public evaluation gate`，最终 hash 记录在本地忽略的
-  Task 35 报告中。文档合同 27 passed，最终全仓收集 693 项、Pyright 0 / 0，构建、
+  门禁。主实现实际范围为
+  `7547db2a9ed8db98cb6b86d6ea95c186e30192d7..71656cf630ee1f7e87b1805b53e502596818b707`，
+  提交信息为
+  `docs(prbench): document full public evaluation gate`，主实现 commit 为
+  `71656cf630ee1f7e87b1805b53e502596818b707`。文档合同 27 passed，最终全仓收集 693
+  项、Pyright 0 / 0，构建、
   fresh adapter/patch、双 PowerShell AST、wheel 解包、凭据与新增运行产物扫描均通过；
-  当前独立 review 尚未开始，不预先声明 review clean。
+  随后的独立 review 为 **Changes requested**，0 Critical / 3 Important / 0 Minor：正式
+  运行手册的 active workspace 错误、审批判别条件缺失、文档合同跨全文偶然命中。当前
+  review 修复以 section-scoped 合同得到自然 RED，再以旧 workspace 文本 mutation 得到
+  判别性 RED；恢复后聚焦测试 1 passed、完整文档 27 passed，全仓 693 项达到 100%
+  exit 0，Pyright 0 / 0，diff、凭据与新增运行产物扫描通过。修复提交信息为
+  `docs(prbench): harden full-run approval guide`，最终 hash 由提交后的本地忽略报告记录；
+  修复后独立复审尚未发生，不预先声明 review clean。

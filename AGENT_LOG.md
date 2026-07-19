@@ -607,10 +607,29 @@
   `pyproject.toml` 与实际 `entry_points.txt` 后按真实 `phycode.cli:app` 重跑通过。过宽
   artifact 路径扫描还命中 BASE 已有的 tracked `.superpowers/sdd/task-2-report.md`，改为
   检查 `7547db2` 后新增路径后为 0；没有删除或改写历史文件。
-- 主 checkout 的 tracked `main` 洁净，但有用户/环境提供的未跟踪 `AGENTS.md`；本任务
+- 主 checkout 的 tracked worktree 与 index clean，但有用户/环境提供的未跟踪
+  `AGENTS.md`；本任务
   没有修改、暂存或清理它。Task 35 提交信息为
   `docs(prbench): document full public evaluation gate`，最终 hash 由提交后的本地忽略
-  报告记录；独立 review 尚未发生，因此本日志不预先声称 review clean。
+  报告记录为 `71656cf630ee1f7e87b1805b53e502596818b707`。
+- Task 35 独立 review 对主实现给出 **Changes requested**，0 Critical / 3 Important /
+  0 Minor：README 使用了固定 evaluator 不存在的 `data/workspaces` 请求路径，动态审批
+  缺少 expected Python、精确 cwd、尾随 argv 与完整拒绝项，新增测试又因跨全文查找而
+  无法发现。修复 subagent 先只增强测试，把断言限制到完整公开任务 H2 section；自然
+  RED 为 1 failed / 26 deselected，同一 failure 同时列出正确
+  `<EvaluatorRoot>\data\tasks\task_white_1993\workspace` 路径和 27 项审批条件缺失，并把
+  旧 `data/workspaces/task_white_1993_*` 列为 forbidden 命中。随后最小修正文档为 launcher
+  日志确认的 active workspace 与严格八步人工门禁；聚焦测试初步为 1 passed。
+- 受控文本 mutation 随后只把正确 workspace 句临时改回旧
+  `data/workspaces/task_white_1993_*`，不修改测试；聚焦运行得到 1 failed / 26
+  deselected，failure 为 `missing=[]` 且 forbidden 精确包含旧路径。立即用反向补丁恢复
+  README 后，聚焦测试重新为 1 passed / 26 deselected。完整文档为 27 passed；全仓
+  `uv run pytest -q` 达到 100% exit 0，收集数保持 693；Pyright 为 0 errors / 0
+  warnings。`git diff --check`、tracked 凭据文件名/高置信凭据模式、新增
+  evaluator/runtime artifact 扫描均通过；feature worktree 只有五个预期文件，主
+  checkout 仍是 tracked worktree 与 index clean、未跟踪 `AGENTS.md`。修复提交信息为
+  `docs(prbench): harden full-run approval guide`，最终 hash 将在提交后写入 ignored
+  Task 35 报告；修复后复审尚未发生，不预先声称 review clean。
 - 正式运行只属于主 agent：最多三次、首次白色响应前的基础设施失败不计数，每个动态
   request 必须人工核验 exact argv/cwd/hash 后原样原子批准；只有 runner `completed` 与
   有效 grader report 同时成立才算成功。所有评测产物不提交，功能分支不经授权不进入

@@ -21,6 +21,16 @@ def _read(name: str) -> str:
     return (ROOT / name).read_text(encoding="utf-8")
 
 
+def _read_h2_section(document: str, heading: str) -> str:
+    marker = f"## {heading}\n"
+    start = document.index(marker)
+    remaining = document[start + len(marker) :]
+    next_heading = re.search(r"^## ", remaining, flags=re.MULTILINE)
+    if next_heading is None:
+        return document[start:]
+    return document[start : start + len(marker) + next_heading.start()]
+
+
 def test_prbench_wheel_contract_matches_project_version():
     project_version = tomllib.loads(_read("pyproject.toml"))["project"]["version"]
     wheel_filename = f"phycode-{project_version}-py3-none-any.whl"
@@ -150,21 +160,109 @@ def test_docs_define_full_public_task_and_local_artifact_boundary() -> None:
     process = _read("SPEC_PROCESS.md")
     log = _read("AGENT_LOG.md")
 
-    for document in (readme, plan, process, log):
-        assert "task_white_1993" in document
-        assert "完整公开任务" in document
-    for phrase in (
+    full_task_section = _read_h2_section(
+        readme, "PRBench 完整公开任务（正式运行前门禁）"
+    )
+    normalized_section = re.sub(r"\s+", " ", full_task_section)
+    required_section_phrases = (
+        "task_white_1993",
+        "完整公开任务",
+        "不是隐藏 holdout",
+        "3e5bee4545cad2138832f06302e9c98bd81f5216",
+        "phycode-0.1.2-py3-none-any.whl",
+        "pwsh -NoProfile -File",
+        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File",
         "run_public_full.ps1",
-        "24,000",
-        "50",
+        "`50` 次工具调用",
+        "`24000` 字（文档记作 24,000）上下文",
+        "`900` 秒审批等待",
+        r"<EvaluatorRoot>\data\tasks\task_white_1993\workspace",
+        r"<EvaluatorRoot>\data\tasks\task_white_1993\workspace\.phycode\prbench\approval-request.json",
+        r"<EvaluatorRoot>\data\tasks\task_white_1993\workspace\phycode-approvals.json",
+        "1. **路径与文件类型**",
+        "2. **解释器**",
+        "3. **脚本入口**",
+        "4. **工作目录**",
+        "5. **尾随参数**",
+        "6. **脚本内容**",
+        "7. **内容哈希**",
+        "8. **原子批准**",
+        "`argv[0]`",
+        "adapter allowlist 中本轮预期的 absolute Python",
+        "`argv[1]`",
+        "contract `expected_files` 中预期的 `.py`",
+        "`cwd` 必须精确等于 active workspace",
+        "每个尾随 argv 中的路径参数",
+        "ground truth",
+        "凭据读取或外泄",
+        "网络外泄",
+        "禁用库",
+        "workspace 外访问",
+        "独立复算 SHA-256",
+        "临时文件、flush、fsync 与 `os.replace`",
+        "把 request 对象原样追加",
+        "不得自动批准",
+        "不得生成通配 grant",
+        "不得批准直接写 CSV",
+        "不得静态预授权 `process.run`",
         "最多三次",
+        "首次白色模型响应前失败",
+        "基础设施预响应失败，不计数",
+        "runner `completed`",
+        "有效 grader report",
         "评测产物不提交",
         "保持主分支干净",
-    ):
-        assert phrase in readme
+    )
+    missing = [
+        phrase for phrase in required_section_phrases if phrase not in normalized_section
+    ]
+    forbidden = [
+        phrase
+        for phrase in ("data/workspaces/task_white_1993_*",)
+        if phrase in full_task_section
+    ]
+    assert not missing and not forbidden, (
+        f"missing full-task contract phrases: {missing}; "
+        f"forbidden full-task contract phrases: {forbidden}"
+    )
+
+    numbered_steps = [
+        full_task_section.index(f"{number}. **{label}**")
+        for number, label in enumerate(
+            (
+                "路径与文件类型",
+                "解释器",
+                "脚本入口",
+                "工作目录",
+                "尾随参数",
+                "脚本内容",
+                "内容哈希",
+                "原子批准",
+            ),
+            start=1,
+        )
+    ]
+    assert numbered_steps == sorted(numbered_steps)
+
     assert "codex/prbench-public-test" in plan
+    for commit_range in (
+        "bfae0be7eb3d7f9373929ef18a0a236e718be375..959eb44fb5af1cc897f1ec4c274013681f30fdb8",
+        "959eb44fb5af1cc897f1ec4c274013681f30fdb8..7fe73aa7bba48f9def3a97c0b8e8ebcbc5439139",
+        "7fe73aa7bba48f9def3a97c0b8e8ebcbc5439139..e51a82ca50ddde519f353bbd4b7962a1d87ca8f7",
+        "e51a82ca50ddde519f353bbd4b7962a1d87ca8f7..7547db2a9ed8db98cb6b86d6ea95c186e30192d7",
+    ):
+        assert commit_range in plan
+    for document in (plan, process, log):
+        normalized_document = re.sub(r"\s+", " ", document)
+        assert "71656cf630ee1f7e87b1805b53e502596818b707" in normalized_document
+        assert "Changes requested" in normalized_document
+        assert "0 Critical / 3 Important / 0 Minor" in normalized_document
     assert "旧 baseline" in process
     assert "主 agent" in log
+    normalized_log = re.sub(r"\s+", " ", log)
+    assert "tracked worktree 与 index clean" in normalized_log
+    assert "未跟踪 `AGENTS.md`" in normalized_log
+    assert "严格 `git status --porcelain` 为空" not in normalized_log
 
 
 def test_public_smoke_script_has_closed_credential_and_approval_contract():

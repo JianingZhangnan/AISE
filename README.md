@@ -188,13 +188,34 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
 `24000` 字（文档记作 24,000）上下文和 `900` 秒审批等待。脚本只创建 reproduction
 文件的精确 write/edit 初始授权，不创建 `process.run`、CSV 或通配授权。
 
-运行期间由**主 agent 人工**轮询最新
-`data/workspaces/task_white_1993_*/.phycode/prbench/approval-request.json`。对每个请求，
-先以 `lstat`/realpath 确认 request、脚本和 manifest 都是当前 active workspace 内的
-非链接普通文件；再核对 absolute executable 属于 adapter allowlist、完整 exact argv、
-exact cwd 均留在该 workspace，逐行阅读脚本并独立复算 SHA-256。只有全部通过时，才用
-临时文件、flush/fsync 与原子替换，把请求对象**原样**追加到 active workspace 的
-`phycode-approvals.json`；不得自动批准、改写请求、生成通配 grant 或批准直接写 CSV。
+运行期间由**主 agent 人工**从本轮 launcher 日志确认 active workspace。固定 evaluator
+内部路径明确为
+`<EvaluatorRoot>\data\tasks\task_white_1993\workspace`，动态 request 位于
+`<EvaluatorRoot>\data\tasks\task_white_1993\workspace\.phycode\prbench\approval-request.json`，
+active manifest 位于
+`<EvaluatorRoot>\data\tasks\task_white_1993\workspace\phycode-approvals.json`。仓库外的
+attempt/clone 目录只用于命名每轮新的 `EvaluatorRoot`，不是 evaluator 内部的
+`data/workspaces/*` 布局。对每个 request 必须按顺序完成以下门禁：
+
+1. **路径与文件类型**：分别对 request、script 和 manifest 执行 `lstat` 与 realpath，
+   证明三者都在 active workspace 内，且都是非链接普通文件。
+2. **解释器**：确认 `argv[0]` 是 adapter allowlist 中本轮预期的 absolute Python，不能
+   用其他解释器、相对 executable 或 PATH 搜索替代。
+3. **脚本入口**：把 `argv[1]` 相对 `cwd` 解析后，确认它是 contract `expected_files` 中预期的
+   `.py`，不能执行普通清单外脚本。
+4. **工作目录**：确认 `cwd` 必须精确等于 active workspace，不能使用其子目录、父目录
+   或其他 clone/workspace。
+5. **尾随参数**：逐个检查每个尾随 argv 中的路径参数，解析后都必须在 active workspace
+   内；任何 workspace 外路径都拒绝。
+6. **脚本内容**：完整阅读当前脚本，明确拒绝 ground truth、凭据读取或外泄、网络外泄、
+   禁用库、workspace 外访问以及其他超出公开任务的行为。
+7. **内容哈希**：独立复算 SHA-256，并与 request 的 `script_sha256` 精确比较；内容变化
+   后必须重新审核，旧批准不得复用。
+8. **原子批准**：只有前七步全部通过后，才把 request 对象原样追加到 active manifest；
+   使用临时文件、flush、fsync 与 `os.replace` 原子更新，不能手工重建或放宽对象。
+
+不得自动批准，不得改写 request，不得生成通配 grant，不得批准直接写 CSV，也不得静态预授权
+`process.run`；外部脚本不能替 agent 执行 reproduction。
 
 正式验收最多三次，每次都使用新的 fixed-commit evaluator clone 与 workspace。Docker、
 adapter、依赖或容器若在首次白色模型响应前失败，属于基础设施预响应失败，不计数；
