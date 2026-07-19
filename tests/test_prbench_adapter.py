@@ -2452,6 +2452,270 @@ def test_official_deferred_green_grading_redacts_recursive_parser_result(
         )
 
 
+def _install_synthetic_green_agent_env(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_values: dict[str, str],
+) -> list[tuple[dict[str, str], dict[str, str]]]:
+    agent_env = types.ModuleType("src.my_util.agent_env")
+    transient_mappings: list[tuple[dict[str, str], dict[str, str]]] = []
+
+    def build_green_child_environment(
+        agent_type: str,
+    ) -> tuple[list[str], dict[str, str], dict[str, str]]:
+        assert agent_type == "codex"
+        provider_env = dict(provider_values)
+        process_env = {"SAFE": "kept", **provider_env}
+        transient_mappings.append((provider_env, process_env))
+        flags = [item for name in provider_env for item in ("-e", name)]
+        return flags, provider_env, process_env
+
+    def clear_green_child_environment(
+        provider_env: dict[str, str], process_env: dict[str, str]
+    ) -> None:
+        provider_env.clear()
+        process_env.clear()
+
+    setattr(agent_env, "build_green_child_environment", build_green_child_environment)
+    setattr(agent_env, "clear_green_child_environment", clear_green_child_environment)
+    setattr(agent_env, "build_docker_exec_env_flags", lambda _agent_type: [])
+    setattr(agent_env, "resolve_env", lambda _agent_type: {})
+    src_module = types.ModuleType("src")
+    src_module.__path__ = []  # type: ignore[attr-defined]
+    util_module = types.ModuleType("src.my_util")
+    util_module.__path__ = []  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "src", src_module)
+    monkeypatch.setitem(sys.modules, "src.my_util", util_module)
+    monkeypatch.setitem(sys.modules, "src.my_util.agent_env", agent_env)
+    return transient_mappings
+
+
+@pytest.mark.parametrize("parse_mode", ["valid_json", "parse_failure"])
+def test_official_deferred_codex_sanitizes_last_message_file(
+    patched_official_evaluator: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    parse_mode: str,
+) -> None:
+    provider_values = {
+        "OPENAI_API_KEY": "synthetic-codex-file-key",
+        "OPENAI_BASE_URL": "https://synthetic-codex-file.invalid/v1",
+        "OPENAI_MODEL": "synthetic-codex-file-model",
+        "CODEX_INLINE_CONFIG": '{"baseURL":"https://synthetic-codex-file.invalid/v1"}',
+    }
+    transient_mappings = _install_synthetic_green_agent_env(
+        monkeypatch, provider_values
+    )
+    if parse_mode == "valid_json":
+        raw_output = json.dumps(
+            {
+                "overall_score": 1.0,
+                "provider": list(provider_values.values()),
+            }
+        )
+    else:
+        raw_output = "unparseable: " + " | ".join(provider_values.values())
+    output_path = tmp_path / "_grading_output.txt"
+
+    def fake_run(cmd: list[str], **kwargs: object) -> types.SimpleNamespace:
+        assert not output_path.exists()
+        output_path.write_text(raw_output, encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout=raw_output, stderr=raw_output)
+
+    parser_inputs: list[str] = []
+
+    def parse_grading(text: str) -> dict[str, object]:
+        parser_inputs.append(text)
+        if parse_mode == "parse_failure":
+            return {
+                "error": "parse_failure",
+                "overall_score": 0.0,
+                "scores": {},
+                "summary": text[:500],
+            }
+        return cast(dict[str, object], json.loads(text))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    run_grading = _load_function(
+        patched_official_evaluator / "src/green_agent/agent.py",
+        "_run_grading",
+        {
+            "logger": types.SimpleNamespace(
+                info=lambda *_: None,
+                warning=lambda *_: None,
+                error=lambda *_: None,
+            ),
+            "os": os,
+            "_parse_grading_json": parse_grading,
+        },
+    )
+    method = types.MethodType(run_grading, object())
+
+    grading = method("grade this", "container-id", str(tmp_path), "codex", True)
+
+    assert parser_inputs == [raw_output]
+    persisted = output_path.read_text(encoding="utf-8")
+    trace = (tmp_path / "grading_trace.log").read_text(encoding="utf-8")
+    serialized_result = json.dumps(grading, default=list)
+    for provider_value in provider_values.values():
+        assert provider_value not in persisted
+        assert provider_value not in trace
+        assert provider_value not in serialized_result
+    assert "[REDACTED_PROVIDER_VALUE]" in persisted
+    assert transient_mappings
+    assert all(provider == {} and process == {} for provider, process in transient_mappings)
+
+
+def test_official_non_deferred_codex_preserves_last_message_file(
+    patched_official_evaluator: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    raw_output = '{"overall_score": 1.0, "echo": "ordinary-codex-value"}'
+    output_path = tmp_path / "_grading_output.txt"
+
+    def fake_run(cmd: list[str], **kwargs: object) -> types.SimpleNamespace:
+        output_path.write_text(raw_output, encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    _install_synthetic_green_agent_env(monkeypatch, {})
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    run_grading = _load_function(
+        patched_official_evaluator / "src/green_agent/agent.py",
+        "_run_grading",
+        {
+            "logger": types.SimpleNamespace(
+                info=lambda *_: None,
+                warning=lambda *_: None,
+                error=lambda *_: None,
+            ),
+            "os": os,
+            "_parse_grading_json": json.loads,
+        },
+    )
+    method = types.MethodType(run_grading, object())
+
+    grading = method("grade this", "container-id", str(tmp_path), "codex", False)
+
+    assert grading["echo"] == "ordinary-codex-value"
+    assert output_path.read_text(encoding="utf-8") == raw_output
+
+
+def test_official_deferred_codex_removes_raw_file_when_atomic_publish_fails(
+    patched_official_evaluator: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    provider_values = {"OPENAI_API_KEY": "synthetic-atomic-failure-key"}
+    transient_mappings = _install_synthetic_green_agent_env(
+        monkeypatch, provider_values
+    )
+    raw_output = json.dumps(
+        {"overall_score": 1.0, "echo": provider_values["OPENAI_API_KEY"]}
+    )
+    output_path = tmp_path / "_grading_output.txt"
+
+    def fake_run(cmd: list[str], **kwargs: object) -> types.SimpleNamespace:
+        output_path.write_text(raw_output, encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout=raw_output, stderr="")
+
+    def fail_replace(source: object, destination: object) -> None:
+        raise OSError("synthetic replace failure")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(os, "replace", fail_replace)
+    run_grading = _load_function(
+        patched_official_evaluator / "src/green_agent/agent.py",
+        "_run_grading",
+        {
+            "logger": types.SimpleNamespace(
+                info=lambda *_: None,
+                warning=lambda *_: None,
+                error=lambda *_: None,
+            ),
+            "os": os,
+            "_parse_grading_json": json.loads,
+        },
+    )
+    method = types.MethodType(run_grading, object())
+
+    with pytest.raises(RuntimeError, match="failed to sanitize grading output"):
+        method("grade this", "container-id", str(tmp_path), "codex", True)
+
+    assert not output_path.exists()
+    assert not tuple(tmp_path.glob("._grading_output.*.tmp"))
+    assert transient_mappings
+    assert all(provider == {} and process == {} for provider, process in transient_mappings)
+
+
+@pytest.mark.parametrize("unsafe_path", ["symlink", "escape"])
+def test_official_deferred_codex_rejects_unsafe_last_message_before_spawn(
+    patched_official_evaluator: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    unsafe_path: str,
+) -> None:
+    provider_values = {"OPENAI_API_KEY": "synthetic-symlink-key"}
+    transient_mappings = _install_synthetic_green_agent_env(
+        monkeypatch, provider_values
+    )
+    target = tmp_path / f"codex-target-{tmp_path.name}.txt"
+    raw_output = json.dumps(
+        {"overall_score": 1.0, "echo": provider_values["OPENAI_API_KEY"]}
+    )
+    target.write_text(raw_output, encoding="utf-8")
+    output_path = tmp_path / "_grading_output.txt"
+    output_path.write_text(raw_output, encoding="utf-8")
+    if unsafe_path == "symlink":
+        original_lstat = os.lstat
+
+        def synthetic_lstat(path: str) -> object:
+            if os.path.normcase(path) == os.path.normcase(str(output_path)):
+                return types.SimpleNamespace(st_mode=stat.S_IFLNK)
+            return original_lstat(path)
+
+        monkeypatch.setattr(os, "lstat", synthetic_lstat)
+    else:
+        original_realpath = os.path.realpath
+        outside_path = tmp_path.parent / "escaped-grading-output.txt"
+
+        def synthetic_realpath(path: str) -> str:
+            if os.path.normcase(path) == os.path.normcase(str(output_path)):
+                return str(outside_path)
+            return original_realpath(path)
+
+        monkeypatch.setattr(os.path, "realpath", synthetic_realpath)
+    spawned = False
+
+    def fake_run(cmd: list[str], **kwargs: object) -> types.SimpleNamespace:
+        nonlocal spawned
+        spawned = True
+        return types.SimpleNamespace(returncode=0, stdout=raw_output, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    run_grading = _load_function(
+        patched_official_evaluator / "src/green_agent/agent.py",
+        "_run_grading",
+        {
+            "logger": types.SimpleNamespace(
+                info=lambda *_: None,
+                warning=lambda *_: None,
+                error=lambda *_: None,
+            ),
+            "os": os,
+            "_parse_grading_json": json.loads,
+        },
+    )
+    method = types.MethodType(run_grading, object())
+
+    with pytest.raises(RuntimeError, match="unsafe grading output path"):
+        method("grade this", "container-id", str(tmp_path), "codex", True)
+
+    assert not spawned
+    assert target.read_text(encoding="utf-8") == raw_output
+    assert transient_mappings
+    assert all(provider == {} and process == {} for provider, process in transient_mappings)
+
+
 def test_official_non_phycode_green_grading_retains_upstream_transport(
     patched_official_evaluator: Path,
     monkeypatch: pytest.MonkeyPatch,

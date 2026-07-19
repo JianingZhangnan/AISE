@@ -109,6 +109,15 @@ string 递归执行同一组精确替换，数字、布尔值、`None` 与容器
 非延迟的上游组合不执行这项 provider 脱敏，原有 transport、解析和日志内容语义保持
 不变。
 
+延迟凭据与 Codex grader 组合还会治理其 last-message 文件：spawn 前只接受
+`log_dir/_grading_output.txt` 这个 exact path，拒绝 symlink、非普通文件和 realpath
+逃逸，并清除旧普通文件；spawn 后再次用 `lstat` 与 realpath 验证本轮新文件。原始
+UTF-8 文本只读入内存，使用同一个 provider text redactor 得到脱敏副本，再在同目录
+写临时文件、flush/fsync，并用 `os.replace` 原子发布，之后才把内存中的原文交给官方
+parser。临时写入或原子发布失败时会 best-effort 删除临时文件与 exact 原始文件，抛出
+固定错误并由既有 `finally` 清空 provider mapping；因此失败路径不会正常返回带原文的
+报告。非延迟 Codex 仍保留上游 last-message 文件内容。
+
 `setup_docker_environment()` 从容器 `start()` 到全部 CLI 安装完成使用同一个资源
 事务边界。health check、PhyCode/OpenCode 安装或其他 setup 步骤一旦失败，只对本次
 刚构造的 `DockerEnvironment` 调用一次 `stop()`，由它按精确 container 对象执行

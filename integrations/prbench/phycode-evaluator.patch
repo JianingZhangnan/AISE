@@ -46,7 +46,77 @@ index 3874429..1bfd98b 100644
 -                     log_dir: str, agent_type: str = "claude") -> dict:
 +                     log_dir: str, agent_type: str = "claude",
 +                     defer_provider_env: bool = False) -> dict:
-@@ -655,0 +660,8 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+@@ -643,0 +648 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
++        import stat
+@@ -644,0 +650,67 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
++        import tempfile
++
++        def _grading_output_is_within_log_dir(output_path: str) -> bool:
++            root = os.path.realpath(log_dir)
++            candidate = os.path.realpath(output_path)
++            try:
++                common = os.path.commonpath((root, candidate))
++            except ValueError:
++                return False
++            return os.path.normcase(common) == os.path.normcase(root)
++
++        def _prepare_deferred_codex_output() -> str:
++            output_path = os.path.join(log_dir, "_grading_output.txt")
++            if not _grading_output_is_within_log_dir(output_path):
++                raise RuntimeError("unsafe grading output path")
++            if os.path.lexists(output_path):
++                try:
++                    mode = os.lstat(output_path).st_mode
++                    if not stat.S_ISREG(mode):
++                        raise RuntimeError("unsafe grading output path")
++                    os.unlink(output_path)
++                except RuntimeError:
++                    raise
++                except OSError:
++                    raise RuntimeError("unsafe grading output path") from None
++            return output_path
++
++        def _read_deferred_codex_output(output_path: str) -> str:
++            try:
++                if not _grading_output_is_within_log_dir(output_path):
++                    raise RuntimeError("unsafe grading output path")
++                mode = os.lstat(output_path).st_mode
++                if not stat.S_ISREG(mode):
++                    raise RuntimeError("unsafe grading output path")
++                with open(output_path, encoding="utf-8", errors="replace") as f:
++                    return f.read()
++            except RuntimeError:
++                raise
++            except OSError:
++                raise RuntimeError("unsafe grading output path") from None
++
++        def _publish_deferred_codex_output(output_path: str, text: str) -> None:
++            temporary_path: str | None = None
++            try:
++                with tempfile.NamedTemporaryFile(
++                    mode="w",
++                    encoding="utf-8",
++                    dir=log_dir,
++                    prefix="._grading_output.",
++                    suffix=".tmp",
++                    delete=False,
++                ) as temporary:
++                    temporary_path = temporary.name
++                    temporary.write(text)
++                    temporary.flush()
++                    os.fsync(temporary.fileno())
++                os.replace(temporary_path, output_path)
++            except OSError:
++                for candidate in (temporary_path, output_path):
++                    if candidate is None:
++                        continue
++                    try:
++                        if os.path.lexists(candidate):
++                            os.unlink(candidate)
++                    except OSError:
++                        pass
++                raise RuntimeError("failed to sanitize grading output") from None
+@@ -655,0 +728,8 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 +        green_provider_env: dict[str, str] = {}
 +        green_process_env: dict[str, str] = {}
 +        if defer_provider_env:
@@ -55,20 +125,20 @@ index 3874429..1bfd98b 100644
 +                build_green_child_environment(agent_type)
 +            )
 +
-@@ -657,2 +669,3 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+@@ -657,2 +737,3 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 -            from src.my_util.agent_env import build_docker_exec_env_flags, resolve_env
 -            env_flags = build_docker_exec_env_flags(agent_type)
 +            if not defer_provider_env:
 +                from src.my_util.agent_env import build_docker_exec_env_flags
 +                env_flags = build_docker_exec_env_flags(agent_type)
-@@ -680 +693,5 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+@@ -680 +761,5 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 -                model = resolve_env("opencode").get("OPENCODE_MODEL", "")
 +                if defer_provider_env:
 +                    model = green_provider_env.get("OPENCODE_MODEL", "")
 +                else:
 +                    from src.my_util.agent_env import resolve_env
 +                    model = resolve_env("opencode").get("OPENCODE_MODEL", "")
-@@ -723,2 +740,5 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+@@ -723,2 +808,5 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 -                from src.my_util.agent_env import resolve_env as _resolve
 -                model = _resolve("opencode").get("OPENCODE_MODEL", "")
 +                if defer_provider_env:
@@ -76,14 +146,20 @@ index 3874429..1bfd98b 100644
 +                else:
 +                    from src.my_util.agent_env import resolve_env as _resolve
 +                    model = _resolve("opencode").get("OPENCODE_MODEL", "")
-@@ -742,0 +763 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+@@ -741,0 +830 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
++        deferred_codex_output: str | None = None
+@@ -742,0 +832,3 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
++            if defer_provider_env and agent_type == "codex":
++                deferred_codex_output = _prepare_deferred_codex_output()
 +            run_env = {"env": green_process_env} if defer_provider_env else {}
-@@ -747,0 +769,2 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+@@ -747,0 +840,2 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 +                encoding="utf-8",
 +                errors="replace",
-@@ -748,0 +772 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+@@ -748,0 +843 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 +                **run_env,
-@@ -750,0 +775,15 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+@@ -751,2 +846,36 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+-            with open(os.path.join(log_dir, "grading_trace.log"), "w") as f:
+-                f.write(f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n")
 +            trace_stdout = result.stdout
 +            trace_stderr = result.stderr
 +            if defer_provider_env:
@@ -99,14 +175,10 @@ index 3874429..1bfd98b 100644
 +                    trace_stderr = trace_stderr.replace(
 +                        provider_value, "[REDACTED_PROVIDER_VALUE]"
 +                    )
-@@ -751,2 +790,4 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
--            with open(os.path.join(log_dir, "grading_trace.log"), "w") as f:
--                f.write(f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n")
 +            with open(
 +                os.path.join(log_dir, "grading_trace.log"), "w", encoding="utf-8"
 +            ) as f:
 +                f.write(f"STDOUT:\n{trace_stdout}\n\nSTDERR:\n{trace_stderr}\n")
-@@ -752,0 +794,17 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 +            def redact_grading_result(value):
 +                if isinstance(value, str):
 +                    for provider_value in provider_values:
@@ -124,24 +196,44 @@ index 3874429..1bfd98b 100644
 +                if isinstance(value, tuple):
 +                    return tuple(redact_grading_result(item) for item in value)
 +                return value
-@@ -767 +826,3 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+@@ -759,4 +888,15 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+-                out_host = os.path.join(log_dir, "_grading_output.txt")
+-                if os.path.exists(out_host):
+-                    with open(out_host) as f:
+-                        grading_text = f.read()
++                out_host = deferred_codex_output or os.path.join(
++                    log_dir, "_grading_output.txt"
++                )
++                output_exists = (
++                    os.path.lexists(out_host)
++                    if defer_provider_env else os.path.exists(out_host)
++                )
++                if output_exists:
++                    if defer_provider_env:
++                        grading_text = _read_deferred_codex_output(out_host)
++                        sanitized_text = redact_grading_result(grading_text)
++                        _publish_deferred_codex_output(out_host, sanitized_text)
++                    else:
++                        with open(out_host) as f:
++                            grading_text = f.read()
+@@ -767 +907,3 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 -                return _parse_grading_json(grading_text)
 +                grading_result = _parse_grading_json(grading_text)
 +                return (redact_grading_result(grading_result)
 +                        if defer_provider_env else grading_result)
-@@ -769 +830,3 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+@@ -769 +911,3 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 -                return _parse_grading_json(result.stdout)
 +                grading_result = _parse_grading_json(result.stdout)
 +                return (redact_grading_result(grading_result)
 +                        if defer_provider_env else grading_result)
-@@ -776,0 +839,4 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
+@@ -776,0 +921,4 @@ class PRBenchGreenAgentExecutor(AgentExecutor):
 +        finally:
 +            if defer_provider_env:
 +                from src.my_util.agent_env import clear_green_child_environment
 +                clear_green_child_environment(green_provider_env, green_process_env)
-@@ -797,0 +864 @@ def start_green_agent(
+@@ -797,0 +946 @@ def start_green_agent(
 +    defer_provider_env: bool = False,
-@@ -820,0 +888 @@ def start_green_agent(
+@@ -820,0 +970 @@ def start_green_agent(
 +            defer_provider_env=defer_provider_env,
 diff --git a/src/launcher.py b/src/launcher.py
 index c705de8..49a4cb5 100644
