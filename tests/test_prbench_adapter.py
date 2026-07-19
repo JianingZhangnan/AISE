@@ -233,6 +233,47 @@ def _load_class(
     return loaded
 
 
+def _parameter_default(
+    source: Path,
+    function_name: str,
+    parameter_name: str,
+    *,
+    class_name: str | None = None,
+) -> ast.expr:
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    scope: list[ast.stmt] = tree.body
+    if class_name is not None:
+        class_node = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == class_name
+        )
+        scope = class_node.body
+    function = next(
+        node
+        for node in scope
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == function_name
+    )
+    positional = [*function.args.posonlyargs, *function.args.args]
+    first_default = len(positional) - len(function.args.defaults)
+    positional_defaults = {
+        argument.arg: default
+        for argument, default in zip(
+            positional[first_default:], function.args.defaults, strict=True
+        )
+    }
+    keyword_defaults = {
+        argument.arg: default
+        for argument, default in zip(
+            function.args.kwonlyargs, function.args.kw_defaults, strict=True
+        )
+        if default is not None
+    }
+    default = {**positional_defaults, **keyword_defaults}[parameter_name]
+    return default
+
+
 def test_adapter_rejects_wrong_evaluator_commit(tmp_path: Path) -> None:
     _commit_file(tmp_path, "README.md", "wrong")
 
@@ -1231,6 +1272,149 @@ def test_official_launch_cli_exposes_and_bounds_approval_wait(
 
         assert invalid_result.returncode != 0
         assert boundary in invalid_result.stderr
+
+
+def test_official_phycode_defaults_stay_consistent_and_reach_command(
+    patched_official_evaluator: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    main_path = patched_official_evaluator / "main.py"
+    launcher_path = patched_official_evaluator / "src/launcher.py"
+    white_path = patched_official_evaluator / "src/white_agent/agent.py"
+    expected_defaults = {
+        "max_tool_calls": 40,
+        "max_context_chars": 12_000,
+    }
+
+    for parameter_name, expected in (
+        ("phycode_max_tool_calls", expected_defaults["max_tool_calls"]),
+        ("phycode_max_context_chars", expected_defaults["max_context_chars"]),
+    ):
+        option = _parameter_default(main_path, "launch", parameter_name)
+        assert isinstance(option, ast.Call)
+        assert isinstance(option.func, ast.Attribute)
+        assert isinstance(option.func.value, ast.Name)
+        assert (option.func.value.id, option.func.attr) == ("typer", "Option")
+        assert ast.literal_eval(option.args[0]) == expected
+        assert ast.literal_eval(
+            _parameter_default(
+                launcher_path,
+                "launch_evaluation",
+                parameter_name,
+            )
+        ) == expected
+
+    assert ast.literal_eval(
+        _parameter_default(white_path, "start_white_agent", "max_tool_calls")
+    ) == expected_defaults["max_tool_calls"]
+    assert ast.literal_eval(
+        _parameter_default(white_path, "start_white_agent", "max_context_chars")
+    ) == expected_defaults["max_context_chars"]
+
+    assert ast.literal_eval(
+        _parameter_default(
+            white_path,
+            "__init__",
+            "max_tool_calls",
+            class_name="ClaudeCodeWhiteAgentExecutor",
+        )
+    ) == expected_defaults["max_tool_calls"]
+    assert ast.literal_eval(
+        _parameter_default(
+            white_path,
+            "__init__",
+            "max_context_chars",
+            class_name="ClaudeCodeWhiteAgentExecutor",
+        )
+    ) == expected_defaults["max_context_chars"]
+
+    agent_env_module = types.ModuleType("src.my_util.agent_env")
+    agent_env_module.build_docker_exec_env_flags = (  # type: ignore[attr-defined]
+        lambda _agent_type: ["-e", "HOME=/home/agent"]
+    )
+    agent_env_module.resolve_env = lambda _agent_type: {}  # type: ignore[attr-defined]
+
+    def run_with_cleanup(
+        action: Callable[[], object],
+        provider_env: dict[str, str],
+        process_env: dict[str, str],
+    ) -> object:
+        try:
+            return action()
+        finally:
+            provider_env.clear()
+            process_env.clear()
+
+    agent_env_module.run_with_phycode_cleanup = run_with_cleanup  # type: ignore[attr-defined]
+    src_module = types.ModuleType("src")
+    src_module.__path__ = []  # type: ignore[attr-defined]
+    util_module = types.ModuleType("src.my_util")
+    util_module.__path__ = []  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "src", src_module)
+    monkeypatch.setitem(sys.modules, "src.my_util", util_module)
+    monkeypatch.setitem(sys.modules, "src.my_util.agent_env", agent_env_module)
+
+    commands: list[list[str]] = []
+
+    def fake_popen(command: list[str], **_kwargs: object) -> types.SimpleNamespace:
+        commands.append(command)
+        return types.SimpleNamespace(pid=1234)
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    class FakeRunningTask:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+    class FakeContext:
+        context_id = None
+
+        def get_user_input(self) -> str:
+            return "perform the public task"
+
+    class FakeEventQueue:
+        async def enqueue_event(self, _event: object) -> None:
+            pass
+
+    executor_class = _load_class(
+        white_path,
+        "ClaudeCodeWhiteAgentExecutor",
+        {
+            "AgentExecutor": object,
+            "RunningTask": FakeRunningTask,
+            "json": json,
+            "logger": types.SimpleNamespace(
+                info=lambda *_: None,
+                error=lambda *_: None,
+            ),
+            "new_agent_text_message": lambda *args, **kwargs: (args, kwargs),
+            "os": os,
+            "uuid": types.SimpleNamespace(
+                uuid4=lambda: types.SimpleNamespace(hex="12345678abcdef")
+            ),
+        },
+    )
+    executor = executor_class(
+        workspace_base=str(tmp_path),
+        docker_container_id="container-id",
+        agent_type="phycode",
+        provider_env={"PHYCODE_API_KEY": "synthetic-value"},
+    )
+
+    assert executor.max_tool_calls == 40  # type: ignore[attr-defined]
+    assert executor.max_context_chars == 12_000  # type: ignore[attr-defined]
+    asyncio.run(
+        executor.execute(FakeContext(), FakeEventQueue())  # type: ignore[attr-defined]
+    )
+
+    assert len(commands) == 1
+    assert commands[0][-1].endswith(
+        "--approval-wait-seconds 0 "
+        "--max-tool-calls 40 "
+        "--max-context-chars 12000"
+    )
+    assert "synthetic-value" not in str(commands[0])
 
 
 @pytest.mark.parametrize("approval_wait_seconds", [-1, 901])
@@ -3228,18 +3412,67 @@ def test_full_public_contract_uses_only_instruction_declared_artifacts() -> None
 
     assert contract.instruction_file == "instruction.md"
     assert contract.paper_file == "white1993.md"
-    assert "reproduction/ANALYSIS.md" in contract.expected_files
-    assert len(contract.expected_files) == 20
+    assert contract.input_files == ()
+    assert contract.expected_files == (
+        "reproduction/ANALYSIS.md",
+        "reproduction/operators.py",
+        "reproduction/block.py",
+        "reproduction/superblock.py",
+        "reproduction/dmrg_infinite.py",
+        "reproduction/dmrg_finite.py",
+        "reproduction/fig2_compute.py",
+        "reproduction/fig3_compute.py",
+        "reproduction/fig4_compute.py",
+        "reproduction/fig5_compute.py",
+        "reproduction/fig6_compute.py",
+        "reproduction/fig7_compute.py",
+        "reproduction/fig8_compute.py",
+        "data/fig2.csv",
+        "data/fig3.csv",
+        "data/fig4.csv",
+        "data/fig5.csv",
+        "data/fig6.csv",
+        "data/fig7.csv",
+        "data/fig8.csv",
+    )
     assert contract.execution_entrypoints == tuple(
         f"reproduction/fig{figure}_compute.py" for figure in range(2, 9)
     )
-    assert len(contract.constraints) == 7
-    assert {item.csv_data_row_count for item in contract.constraints} == {
-        15,
-        24,
-        50,
-        60,
+    assert {
+        item.path: (item.csv_header, item.csv_data_row_count)
+        for item in contract.constraints
+    } == {
+        "data/fig2.csv": (
+            (
+                "alpha",
+                "Open, S=1/2",
+                "Open, S=1",
+                "Periodic, S=1/2",
+                "Periodic, S=1",
+            ),
+            50,
+        ),
+        "data/fig3.csv": (("m", "Open BCs", "Periodic BCs"), 24),
+        "data/fig4.csv": (("m", "Open BCs", "Periodic BCs"), 24),
+        "data/fig5.csv": (("L", "1/L", "Gap S=1/2", "Gap S=1"), 15),
+        "data/fig6.csv": (
+            ("i", "Panel (a)", "Panel (b)", "Panel (c)"),
+            60,
+        ),
+        "data/fig7.csv": (("i", "Bond Strength", "Local Sz"), 60),
+        "data/fig8.csv": (
+            (
+                "alpha",
+                "1 Target",
+                "2 Targets",
+                "3 Targets",
+                "4 Targets",
+                "5 Targets",
+            ),
+            50,
+        ),
     }
+    assert all(item.csv_rows is None for item in contract.constraints)
     assert "metadata" not in raw.casefold()
     assert "ground_truth" not in raw.casefold()
     assert "reference" not in raw.casefold()

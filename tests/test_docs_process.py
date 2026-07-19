@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import stat
 import subprocess
+import sys
 import tomllib
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -203,7 +206,10 @@ def test_public_smoke_script_has_closed_credential_and_approval_contract():
 
 
 def test_public_full_script_has_exact_local_only_contract() -> None:
-    script = _read("integrations/prbench/run_public_full.ps1")
+    script_path = ROOT / "integrations/prbench/run_public_full.ps1"
+    script_bytes = script_path.read_bytes()
+    assert script_bytes.isascii()
+    script = script_bytes.decode("ascii")
     normalized = script.replace("\r\n", "\n")
     assert normalized.startswith(
         "param(\n"
@@ -256,15 +262,18 @@ def test_public_full_script_has_exact_local_only_contract() -> None:
     assert "$TaskIds" not in script
 
 
-def test_public_full_script_parses_with_powershell_ast() -> None:
-    pwsh = shutil.which("pwsh")
-    if pwsh is None:
-        pytest.skip("PowerShell is unavailable")
+@pytest.mark.parametrize("powershell_name", ["pwsh", "powershell"])
+def test_public_full_script_parses_with_powershell_ast(
+    powershell_name: str,
+) -> None:
+    powershell = shutil.which(powershell_name)
+    if powershell is None:
+        pytest.skip(f"{powershell_name} is unavailable")
 
     script_path = ROOT / "integrations/prbench/run_public_full.ps1"
     parse_result = subprocess.run(
         [
-            pwsh,
+            powershell,
             "-NoProfile",
             "-Command",
             "$tokens=$null; $errors=$null; "
@@ -282,76 +291,71 @@ def test_public_full_script_parses_with_powershell_ast() -> None:
 
 @pytest.mark.parametrize("fake_uv_failure", [False, True])
 @pytest.mark.parametrize("preexisting_opencode", [False, True])
+@pytest.mark.parametrize("powershell_name", ["pwsh", "powershell"])
 def test_public_full_restores_environment_and_passes_exact_fake_uv_arguments(
     tmp_path: Path,
     fake_uv_failure: bool,
     preexisting_opencode: bool,
+    powershell_name: str,
 ) -> None:
-    pwsh = shutil.which("pwsh")
-    if pwsh is None:
-        pytest.skip("PowerShell is unavailable")
+    powershell = shutil.which(powershell_name)
+    if powershell is None:
+        pytest.skip(f"{powershell_name} is unavailable")
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    observation = tmp_path / "uv-observation.txt"
+    observation = tmp_path / "uv-observation.jsonl"
+    recorder = tmp_path / "record_uv.py"
+    recorder.write_text(
+        "import json\n"
+        "import os\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "\n"
+        "arguments = sys.argv[1:]\n"
+        "provider_names = (\n"
+        "    'OPENCODE_API_KEY', 'OPENCODE_BASE_URL', 'OPENCODE_MODEL'\n"
+        ")\n"
+        "record = {\n"
+        "    'argv': arguments,\n"
+        "    'cwd': os.getcwd(),\n"
+        "    'opencode': {\n"
+        "        name: {\n"
+        "            'present': name in os.environ,\n"
+        "            'value': os.environ.get(name),\n"
+        "        }\n"
+        "        for name in provider_names\n"
+        "    },\n"
+        "}\n"
+        "if '--phycode-approvals' in arguments:\n"
+        "    index = arguments.index('--phycode-approvals')\n"
+        "    approval_path = Path(arguments[index + 1])\n"
+        "    record['approvals_path'] = str(approval_path)\n"
+        "    record['approvals_exists'] = approval_path.is_file()\n"
+        "    if approval_path.is_file():\n"
+        "        record['approvals'] = json.loads(\n"
+        "            approval_path.read_text(encoding='utf-8-sig')\n"
+        "        )\n"
+        "with open(os.environ['FAKE_UV_OBSERVATION'], 'a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps(record, sort_keys=True) + '\\n')\n"
+        "is_adapter = any(Path(value).name == 'apply_adapter.py' for value in arguments)\n"
+        "if not is_adapter and os.environ.get('FAKE_UV_FAIL') == '1':\n"
+        "    raise SystemExit(23)\n",
+        encoding="ascii",
+    )
     if os.name == "nt":
         (fake_bin / "uv.cmd").write_text(
             "@echo off\r\n"
-            "echo %* | findstr /C:\"apply_adapter.py\" >nul\r\n"
-            "if errorlevel 1 goto evaluator\r\n"
-            "if \"%EXPECTED_ORIGINAL%\"==\"1\" (\r\n"
-            "  if not \"%OPENCODE_API_KEY%\"==\"original-key\" exit /b 61\r\n"
-            "  if not \"%OPENCODE_BASE_URL%\"==\"https://original.invalid\" exit /b 62\r\n"
-            "  if not \"%OPENCODE_MODEL%\"==\"openai/original-model\" exit /b 63\r\n"
-            ") else (\r\n"
-            "  if defined OPENCODE_API_KEY exit /b 64\r\n"
-            "  if defined OPENCODE_BASE_URL exit /b 65\r\n"
-            "  if defined OPENCODE_MODEL exit /b 66\r\n"
-            ")\r\n"
-            "exit /b 0\r\n"
-            ":evaluator\r\n"
-            "> \"%FAKE_UV_OBSERVATION%\" echo %*\r\n"
-            "if not \"%OPENCODE_API_KEY%\"==\"fake-phycode-key\" exit /b 71\r\n"
-            "if not \"%OPENCODE_BASE_URL%\"==\"https://fake.invalid/v1\" exit /b 72\r\n"
-            "if not \"%OPENCODE_MODEL%\"==\"openai/fake-model\" exit /b 73\r\n"
-            "echo %* | findstr /C:\"--task-id task_white_1993\" >nul || exit /b 74\r\n"
-            "echo %* | findstr /C:\"--phycode-max-tool-calls 50\" >nul || exit /b 75\r\n"
-            "echo %* | findstr /C:\"--phycode-max-context-chars 24000\" >nul || exit /b 76\r\n"
-            "echo %* | findstr /C:\"--approval-wait-seconds 900\" >nul || exit /b 77\r\n"
-            "echo %* | findstr /C:\"task_white_1993.json\" >nul || exit /b 78\r\n"
-            "if \"%FAKE_UV_FAIL%\"==\"1\" exit /b 23\r\n"
-            "exit /b 0\r\n",
-            encoding="utf-8",
+            "\"%FAKE_UV_PYTHON%\" \"%FAKE_UV_RECORDER%\" %*\r\n"
+            "exit /b %errorlevel%\r\n",
+            encoding="ascii",
         )
     else:
         fake_uv = fake_bin / "uv"
         fake_uv.write_text(
             "#!/bin/sh\n"
-            "case \"$*\" in\n"
-            "  *apply_adapter.py*)\n"
-            "    if [ \"$EXPECTED_ORIGINAL\" = \"1\" ]; then\n"
-            "      [ \"$OPENCODE_API_KEY\" = \"original-key\" ] || exit 61\n"
-            "      [ \"$OPENCODE_BASE_URL\" = \"https://original.invalid\" ] || exit 62\n"
-            "      [ \"$OPENCODE_MODEL\" = \"openai/original-model\" ] || exit 63\n"
-            "    else\n"
-            "      [ -z \"${OPENCODE_API_KEY+x}\" ] || exit 64\n"
-            "      [ -z \"${OPENCODE_BASE_URL+x}\" ] || exit 65\n"
-            "      [ -z \"${OPENCODE_MODEL+x}\" ] || exit 66\n"
-            "    fi\n"
-            "    exit 0 ;;\n"
-            "esac\n"
-            "printf '%s\\n' \"$*\" > \"$FAKE_UV_OBSERVATION\"\n"
-            "[ \"$OPENCODE_API_KEY\" = \"fake-phycode-key\" ] || exit 71\n"
-            "[ \"$OPENCODE_BASE_URL\" = \"https://fake.invalid/v1\" ] || exit 72\n"
-            "[ \"$OPENCODE_MODEL\" = \"openai/fake-model\" ] || exit 73\n"
-            "case \"$*\" in *'--task-id task_white_1993'*) ;; *) exit 74 ;; esac\n"
-            "case \"$*\" in *'--phycode-max-tool-calls 50'*) ;; *) exit 75 ;; esac\n"
-            "case \"$*\" in *'--phycode-max-context-chars 24000'*) ;; *) exit 76 ;; esac\n"
-            "case \"$*\" in *'--approval-wait-seconds 900'*) ;; *) exit 77 ;; esac\n"
-            "case \"$*\" in *task_white_1993.json*) ;; *) exit 78 ;; esac\n"
-            "[ \"$FAKE_UV_FAIL\" = \"1\" ] && exit 23\n"
-            "exit 0\n",
-            encoding="utf-8",
+            "exec \"$FAKE_UV_PYTHON\" \"$FAKE_UV_RECORDER\" \"$@\"\n",
+            encoding="ascii",
         )
         fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
 
@@ -395,7 +399,8 @@ def test_public_full_restores_environment_and_passes_exact_fake_uv_arguments(
             "PHYCODE_MODEL": "fake-model",
             "FAKE_UV_FAIL": "1" if fake_uv_failure else "0",
             "FAKE_UV_OBSERVATION": str(observation),
-            "EXPECTED_ORIGINAL": "1" if preexisting_opencode else "0",
+            "FAKE_UV_PYTHON": sys.executable,
+            "FAKE_UV_RECORDER": str(recorder),
         }
     )
     originals = {
@@ -409,10 +414,11 @@ def test_public_full_restores_environment_and_passes_exact_fake_uv_arguments(
         else:
             environment.pop(name, None)
 
-    completed = subprocess.run(
+    powershell_arguments = [powershell, "-NoProfile"]
+    if powershell_name == "powershell":
+        powershell_arguments.extend(["-ExecutionPolicy", "Bypass"])
+    powershell_arguments.extend(
         [
-            pwsh,
-            "-NoProfile",
             "-File",
             str(wrapper),
             "-FullScript",
@@ -425,7 +431,10 @@ def test_public_full_restores_environment_and_passes_exact_fake_uv_arguments(
             "1" if fake_uv_failure else "0",
             "-HadOriginal",
             "1" if preexisting_opencode else "0",
-        ],
+        ]
+    )
+    completed = subprocess.run(
+        powershell_arguments,
         check=False,
         capture_output=True,
         encoding="utf-8",
@@ -435,12 +444,110 @@ def test_public_full_restores_environment_and_passes_exact_fake_uv_arguments(
     )
     assert completed.returncode == 0, (completed.stdout, completed.stderr)
     assert "environment-restored" in completed.stdout
-    invocation = observation.read_text(encoding="utf-8")
-    assert "--task-id task_white_1993" in invocation
-    assert "task_white_1993.json" in invocation
-    assert "--phycode-max-tool-calls 50" in invocation
-    assert "--phycode-max-context-chars 24000" in invocation
-    assert "--approval-wait-seconds 900" in invocation
+    calls = tuple(
+        json.loads(line)
+        for line in observation.read_text(encoding="utf-8").splitlines()
+    )
+    assert len(calls) == 2
+
+    adapter_call, evaluator_call = calls
+    adapter_arguments = adapter_call["argv"]
+    assert adapter_arguments[:2] == ["run", "python"]
+    assert len(adapter_arguments) == 5
+    assert Path(adapter_arguments[2]).resolve() == (
+        ROOT / "integrations/prbench/apply_adapter.py"
+    ).resolve()
+    assert Path(adapter_arguments[3]).resolve() == evaluator.resolve()
+    assert Path(adapter_arguments[4]).resolve() == wheel.resolve()
+    assert Path(adapter_call["cwd"]).resolve() == ROOT.resolve()
+
+    evaluator_arguments = evaluator_call["argv"]
+    assert Path(evaluator_call["cwd"]).resolve() == evaluator.resolve()
+    approval_index = evaluator_arguments.index("--phycode-approvals")
+    approval_path = Path(evaluator_arguments[approval_index + 1])
+    contract_path = (
+        ROOT
+        / "integrations/prbench/public_contracts/task_white_1993.json"
+    ).resolve()
+    assert evaluator_arguments == [
+        "run",
+        "--with",
+        "a2a-sdk[http-server]==0.3.8",
+        "python",
+        "main.py",
+        "launch",
+        "--task-id",
+        "task_white_1993",
+        "--white-agent-type",
+        "phycode",
+        "--green-agent-type",
+        "opencode",
+        "--phycode-contract",
+        str(contract_path),
+        "--phycode-approvals",
+        str(approval_path),
+        "--approval-wait-seconds",
+        "900",
+        "--phycode-max-tool-calls",
+        "50",
+        "--phycode-max-context-chars",
+        "24000",
+    ]
+
+    expected_paths = (
+        "reproduction/ANALYSIS.md",
+        "reproduction/operators.py",
+        "reproduction/block.py",
+        "reproduction/superblock.py",
+        "reproduction/dmrg_infinite.py",
+        "reproduction/dmrg_finite.py",
+        "reproduction/fig2_compute.py",
+        "reproduction/fig3_compute.py",
+        "reproduction/fig4_compute.py",
+        "reproduction/fig5_compute.py",
+        "reproduction/fig6_compute.py",
+        "reproduction/fig7_compute.py",
+        "reproduction/fig8_compute.py",
+    )
+    assert evaluator_call["approvals_exists"] is True
+    assert Path(evaluator_call["approvals_path"]) == approval_path
+    manifest = evaluator_call["approvals"]
+    assert set(manifest) == {"grants"}
+    grants = manifest["grants"]
+    assert len(grants) == 39
+    assert all(set(grant) == {"tool_name", "path"} for grant in grants)
+    grant_counts = Counter(
+        (grant["tool_name"], grant["path"]) for grant in grants
+    )
+    assert grant_counts == Counter(
+        {
+            **{("file.write", path): 1 for path in expected_paths},
+            **{("file.edit", path): 2 for path in expected_paths},
+        }
+    )
+    assert not approval_path.exists()
+
+    expected_adapter_values = (
+        {
+            "OPENCODE_API_KEY": "original-key",
+            "OPENCODE_BASE_URL": "https://original.invalid",
+            "OPENCODE_MODEL": "openai/original-model",
+        }
+        if preexisting_opencode
+        else {}
+    )
+    for name in ("OPENCODE_API_KEY", "OPENCODE_BASE_URL", "OPENCODE_MODEL"):
+        adapter_state = adapter_call["opencode"][name]
+        assert adapter_state["present"] is preexisting_opencode
+        assert adapter_state["value"] == expected_adapter_values.get(name)
+    assert evaluator_call["opencode"] == {
+        "OPENCODE_API_KEY": {"present": True, "value": "fake-phycode-key"},
+        "OPENCODE_BASE_URL": {
+            "present": True,
+            "value": "https://fake.invalid/v1",
+        },
+        "OPENCODE_MODEL": {"present": True, "value": "openai/fake-model"},
+    }
     for secret in (
         "fake-phycode-key",
         "https://fake.invalid/v1",
@@ -451,10 +558,14 @@ def test_public_full_restores_environment_and_passes_exact_fake_uv_arguments(
         assert secret not in completed.stderr
 
 
-def test_public_full_rejects_missing_provider_before_uv(tmp_path: Path) -> None:
-    pwsh = shutil.which("pwsh")
-    if pwsh is None:
-        pytest.skip("PowerShell is unavailable")
+@pytest.mark.parametrize("powershell_name", ["pwsh", "powershell"])
+def test_public_full_rejects_missing_provider_before_uv(
+    tmp_path: Path,
+    powershell_name: str,
+) -> None:
+    powershell = shutil.which(powershell_name)
+    if powershell is None:
+        pytest.skip(f"{powershell_name} is unavailable")
 
     evaluator = tmp_path / "evaluator"
     evaluator.mkdir()
@@ -464,17 +575,21 @@ def test_public_full_rejects_missing_provider_before_uv(tmp_path: Path) -> None:
     for name in ("PHYCODE_API_KEY", "PHYCODE_BASE_URL", "PHYCODE_MODEL"):
         environment.pop(name, None)
 
-    completed = subprocess.run(
+    powershell_arguments = [powershell, "-NoProfile"]
+    if powershell_name == "powershell":
+        powershell_arguments.extend(["-ExecutionPolicy", "Bypass"])
+    powershell_arguments.extend(
         [
-            pwsh,
-            "-NoProfile",
             "-File",
             str(ROOT / "integrations/prbench/run_public_full.ps1"),
             "-EvaluatorRoot",
             str(evaluator),
             "-WheelPath",
             str(wheel),
-        ],
+        ]
+    )
+    completed = subprocess.run(
+        powershell_arguments,
         check=False,
         capture_output=True,
         encoding="utf-8",

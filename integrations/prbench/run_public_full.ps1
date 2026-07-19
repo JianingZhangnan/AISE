@@ -11,7 +11,7 @@ if ([string]::IsNullOrWhiteSpace($env:PHYCODE_API_KEY) -or
     [string]::IsNullOrWhiteSpace($env:PHYCODE_MODEL)) {
     throw 'PHYCODE_API_KEY, PHYCODE_BASE_URL, and PHYCODE_MODEL must be configured in the current process.'
 }
-Write-Host 'PhyCode 提供方环境已配置（不会显示具体值）。'
+Write-Host 'PhyCode provider environment configured (values are not displayed).'
 
 $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
 $EvaluatorRoot = (Resolve-Path -LiteralPath $EvaluatorRoot).Path
@@ -19,7 +19,7 @@ $WheelPath = (Resolve-Path -LiteralPath $WheelPath).Path
 $AdapterPath = Join-Path $PSScriptRoot 'apply_adapter.py'
 $ContractPath = Join-Path $PSScriptRoot 'public_contracts\task_white_1993.json'
 if (-not (Test-Path -LiteralPath $ContractPath -PathType Leaf)) {
-    throw 'task_white_1993 的公开 contract 不可用。'
+    throw 'Public contract for task_white_1993 is unavailable.'
 }
 
 $approvalGrants = @(
@@ -102,14 +102,14 @@ try {
     try {
         & uv run python $AdapterPath $EvaluatorRoot $WheelPath
         if ($LASTEXITCODE -ne 0) {
-            throw '固定版本 PRBench evaluator 适配失败。'
+            throw 'Pinned PRBench evaluator adapter failed.'
         }
     }
     finally {
         Pop-Location
     }
 
-    Write-Host '正在为公开任务 task_white_1993 启动官方 PRBench evaluator。'
+    Write-Host 'Starting the official PRBench evaluator for task_white_1993.'
     Push-Location $EvaluatorRoot
     try {
         $env:OPENCODE_API_KEY = $env:PHYCODE_API_KEY
@@ -125,7 +125,7 @@ try {
             --phycode-max-tool-calls 50 `
             --phycode-max-context-chars 24000
         if ($LASTEXITCODE -ne 0) {
-            throw 'task_white_1993 的官方 PRBench evaluator 运行失败。'
+            throw 'Official PRBench evaluator failed for task_white_1993.'
         }
     }
     finally {
