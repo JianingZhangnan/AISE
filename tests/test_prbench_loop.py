@@ -12,6 +12,7 @@ from phycode.context import ContextBuilder, MemoryStore, SessionStore
 from phycode.execution import ExecutionJournal
 from phycode.llm import LLMClient, ReactiveLLM, ScriptedLLM
 from phycode.models import (
+    AgentEvent,
     AgentEventType,
     AgentProfile,
     Session,
@@ -166,6 +167,262 @@ def test_successful_tool_auto_completes_only_when_opted_in_verifier_passes(
     assert result.final_text is None
     assert llm.index == 1
     assert not (tmp_path / "must-not-run.txt").exists()
+
+
+def test_successful_tool_failed_verification_is_recorded_and_visible_next_turn(
+    tmp_path: Path,
+) -> None:
+    failed = VerificationResult(
+        ok=False,
+        issues=(
+            VerificationIssue(
+                code="missing_artifact",
+                path="data/output.csv",
+                message="Run the reproduction script to create the CSV",
+            ),
+        ),
+    )
+
+    class RecordingLLM:
+        def __init__(self) -> None:
+            self.messages: list[list[dict[str, object]]] = []
+
+        def generate(self, messages, tools):
+            del tools
+            self.messages.append(messages)
+            if len(self.messages) == 1:
+                return [
+                    AgentEvent(
+                        session_id="provider",
+                        type=AgentEventType.TOOL_CALL_REQUESTED,
+                        payload={
+                            "provider_call_id": "call_script",
+                            "tool_name": "file.write",
+                            "args": {"path": "reproduction.py", "content": "print('ready')\n"},
+                        },
+                    )
+                ]
+            return [
+                AgentEvent(
+                    session_id="provider",
+                    type=AgentEventType.INCOMPLETE,
+                    payload={"reason": "test observed feedback"},
+                )
+            ]
+
+    llm = RecordingLLM()
+    result = _build_loop(
+        tmp_path,
+        llm,
+        expected_files=("data/output.csv",),
+        completion_verifier=lambda: failed,
+        verify_after_successful_tool=True,
+    ).run("reproduce")
+
+    assert result.stopped_reason == "incomplete"
+    feedback = [
+        event
+        for event in result.events
+        if event.type == AgentEventType.FEEDBACK_SIGNAL
+        and event.payload.get("kind") == "artifact_verification_failed"
+    ]
+    assert len(feedback) == 1
+    assert "missing_artifact" in str(llm.messages[1])
+    assert "Run the reproduction script" in str(llm.messages[1])
+
+
+def test_mutation_establishes_feedback_barrier_for_remaining_provider_batch(tmp_path: Path) -> None:
+    llm = ScriptedLLM(
+        [
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "provider_call_id": "call_first",
+                        "tool_name": "file.write",
+                        "args": {"path": "first.txt", "content": "first"},
+                    },
+                },
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "provider_call_id": "call_stale",
+                        "tool_name": "file.write",
+                        "args": {"path": "stale.txt", "content": "stale"},
+                    },
+                },
+            ],
+            [{"type": "incomplete", "payload": {"reason": "barrier observed"}}],
+        ]
+    )
+
+    loop = _build_loop(
+        tmp_path,
+        llm,
+        expected_files=("not-complete.txt",),
+        verify_after_successful_tool=False,
+    )
+    result = loop.run("write serially")
+
+    assert result.stopped_reason == "incomplete"
+    assert (tmp_path / "first.txt").read_text(encoding="utf-8") == "first"
+    assert not (tmp_path / "stale.txt").exists()
+    outputs = [event for event in result.events if event.type == AgentEventType.TOOL_CALL_OUTPUT]
+    assert len(outputs) == 2
+    assert outputs[1].payload["status"] == "stale_tool_batch"
+    tool_messages = [
+        message
+        for message in loop.context_builder.build("continue from feedback")
+        if message["role"] == "tool"
+    ]
+    assert [message["tool_call_id"] for message in tool_messages] == [
+        "call_first",
+        "call_stale",
+    ]
+
+
+def test_denied_call_establishes_feedback_barrier_for_remaining_provider_batch(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path.parent / "outside-denied.txt"
+    llm = ScriptedLLM(
+        [
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "provider_call_id": "call_denied",
+                        "tool_name": "file.write",
+                        "args": {"path": str(outside), "content": "denied"},
+                    },
+                },
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "provider_call_id": "call_after_deny",
+                        "tool_name": "file.write",
+                        "args": {"path": "must-not-run.txt", "content": "stale"},
+                    },
+                },
+            ],
+            [{"type": "incomplete", "payload": {"reason": "barrier observed"}}],
+        ]
+    )
+
+    result = _build_loop(
+        tmp_path,
+        llm,
+        expected_files=("not-complete.txt",),
+    ).run("respect denial")
+
+    assert result.stopped_reason == "incomplete"
+    assert not outside.exists()
+    assert not (tmp_path / "must-not-run.txt").exists()
+    outputs = [event for event in result.events if event.type == AgentEventType.TOOL_CALL_OUTPUT]
+    assert [event.payload["status"] for event in outputs] == [
+        "policy_blocked",
+        "stale_tool_batch",
+    ]
+
+
+def test_skipped_stale_calls_do_not_trigger_repeated_failure_before_feedback_turn(
+    tmp_path: Path,
+) -> None:
+    batch = [
+        {
+            "type": "tool_call_requested",
+            "payload": {
+                "provider_call_id": "call_mutation",
+                "tool_name": "file.write",
+                "args": {"path": "first.txt", "content": "first"},
+            },
+        }
+    ]
+    batch.extend(
+        {
+            "type": "tool_call_requested",
+            "payload": {
+                "provider_call_id": f"call_stale_{index}",
+                "tool_name": "file.read",
+                "args": {"path": "first.txt"},
+            },
+        }
+        for index in range(3)
+    )
+    llm = ScriptedLLM(
+        [
+            batch,
+            [{"type": "incomplete", "payload": {"reason": "feedback turn reached"}}],
+        ]
+    )
+
+    result = _build_loop(
+        tmp_path,
+        llm,
+        expected_files=("not-complete.txt",),
+    ).run("serialize stale calls")
+
+    assert result.stopped_reason == "incomplete"
+    assert llm.index == 2
+    outputs = [event for event in result.events if event.type == AgentEventType.TOOL_CALL_OUTPUT]
+    assert [event.payload["status"] for event in outputs] == [
+        "ok",
+        "stale_tool_batch",
+        "stale_tool_batch",
+        "stale_tool_batch",
+    ]
+
+
+def test_verifier_backed_budget_warning_requires_only_missing_artifact_work(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "status.txt").write_text("ready", encoding="utf-8")
+    failed = VerificationResult(
+        ok=False,
+        issues=(
+            VerificationIssue(
+                code="missing_artifact",
+                path="result.txt",
+                message="result is missing",
+            ),
+        ),
+    )
+    llm = ScriptedLLM(
+        [
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "provider_call_id": "call_status",
+                        "tool_name": "file.read",
+                        "args": {"path": "status.txt"},
+                    },
+                }
+            ],
+            [{"type": "incomplete", "payload": {"reason": "warning observed"}}],
+        ]
+    )
+
+    result = _build_loop(
+        tmp_path,
+        llm,
+        expected_files=("result.txt",),
+        completion_verifier=lambda: failed,
+        verify_after_successful_tool=True,
+        max_tool_calls=3,
+    ).run("finish")
+
+    warning = next(
+        event
+        for event in result.events
+        if event.type == AgentEventType.FEEDBACK_SIGNAL
+        and event.payload.get("kind") == "tool_budget_near_limit"
+    )
+    rendered = str(warning.payload)
+    assert "final answer" not in rendered.casefold()
+    assert "missing" in rendered.casefold()
+    assert "run" in rendered.casefold()
+    assert "verify" in rendered.casefold()
 
 
 def test_failed_tool_does_not_auto_complete_from_preexisting_artifact(tmp_path: Path) -> None:

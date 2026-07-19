@@ -1,4 +1,5 @@
 from pathlib import Path
+import copy
 import time
 
 import pytest
@@ -144,6 +145,64 @@ def test_openai_adapter_sends_provider_safe_tool_names_and_maps_them_back():
 
     assert events[0].payload["tool_name"] == "file.read"
     assert client.chat.completions.kwargs["tools"][0]["function"]["name"] == "file_read"
+
+
+def test_openai_adapter_aliases_historical_tool_calls_without_mutating_messages():
+    from phycode.llm import OpenAICompatibleChatAdapter
+    from phycode.models import ToolRiskLevel, ToolSpec
+
+    client = FakeOpenAIClient()
+    adapter = OpenAICompatibleChatAdapter("https://example.com/v1", "model", "secret", client=client)
+    tools = [
+        ToolSpec(
+            name="file.read",
+            description="Read a file",
+            input_schema={"type": "object"},
+            risk_level=ToolRiskLevel.SAFE,
+        )
+    ]
+    messages = [
+        {"role": "user", "content": "read"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_history",
+                    "type": "function",
+                    "function": {"name": "file.read", "arguments": '{"path": "README.md"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_history", "content": '{"status": "ok"}'},
+    ]
+    original = copy.deepcopy(messages)
+
+    adapter.generate(messages, tools)
+
+    sent = client.chat.completions.kwargs["messages"]
+    assert sent[1]["tool_calls"][0]["function"]["name"] == "file_read"
+    assert messages == original
+
+
+def test_openai_adapter_disables_parallel_tool_calls_when_tools_are_available():
+    from phycode.llm import OpenAICompatibleChatAdapter
+    from phycode.models import ToolRiskLevel, ToolSpec
+
+    client = FakeOpenAIClient()
+    adapter = OpenAICompatibleChatAdapter("https://example.com/v1", "model", "secret", client=client)
+    tools = [
+        ToolSpec(
+            name="file.read",
+            description="Read a file",
+            input_schema={"type": "object"},
+            risk_level=ToolRiskLevel.SAFE,
+        )
+    ]
+
+    adapter.generate([{"role": "user", "content": "read"}], tools)
+
+    assert client.chat.completions.kwargs["parallel_tool_calls"] is False
 
 
 def test_openai_adapter_does_not_keep_api_key_attribute():

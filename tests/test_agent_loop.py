@@ -83,6 +83,43 @@ def test_agent_preserves_original_user_input_after_tool_turn(tmp_path: Path):
     assert "User: original task" in str(llm.messages[1])
 
 
+def test_reused_loop_orders_new_user_turn_after_previous_assistant_history(tmp_path: Path) -> None:
+    class RecordingFinalLLM:
+        def __init__(self) -> None:
+            self.messages: list[list[dict[str, object]]] = []
+
+        def generate(self, messages, tools):
+            del tools
+            self.messages.append(messages)
+            turn = len(self.messages)
+            return [
+                AgentEvent(
+                    session_id="recording",
+                    type=AgentEventType.ASSISTANT_FINAL,
+                    payload={"text": f"answer-{turn}"},
+                )
+            ]
+
+    llm = RecordingFinalLLM()
+    loop = build_loop(tmp_path, llm)
+
+    loop.run("first turn")
+    loop.run("second turn")
+
+    second_messages = llm.messages[1]
+    previous_assistant_index = next(
+        index
+        for index, message in enumerate(second_messages)
+        if message["role"] == "assistant" and message.get("content") == "answer-1"
+    )
+    current_user_index = next(
+        index
+        for index, message in enumerate(second_messages)
+        if message["role"] == "user" and "second turn" in str(message.get("content", ""))
+    )
+    assert previous_assistant_index < current_user_index
+
+
 AUTO_APPROVE = lambda call, decision: True  # noqa: E731
 
 

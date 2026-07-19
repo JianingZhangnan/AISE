@@ -128,6 +128,7 @@ def register_state_tools(
         memory_write,
         properties={"category": {"type": "string"}, "content": {"type": "string"}},
         required=["category", "content"],
+        mutates_state=True,
     )
     _register(registry, "config.read", "Read non-sensitive project configuration", ToolRiskLevel.SAFE, config_read)
     _register(
@@ -138,6 +139,7 @@ def register_state_tools(
         config_write,
         properties={"section": {"type": "string"}, "key": {"type": "string"}, "value": {}},
         required=["section", "key", "value"],
+        mutates_state=True,
     )
     _register(
         registry,
@@ -149,13 +151,28 @@ def register_state_tools(
     )
 
 
-def _register(registry, name, description, risk_level, executor, properties=None, required=None) -> None:
+def _register(
+    registry,
+    name,
+    description,
+    risk_level,
+    executor,
+    properties=None,
+    required=None,
+    mutates_state=False,
+) -> None:
     schema: dict[str, Any] = {"type": "object"}
     if properties is not None:
         schema["properties"] = properties
     if required is not None:
         schema["required"] = required
     registry.register(
-        ToolSpec(name=name, description=description, input_schema=schema, risk_level=risk_level),
+        ToolSpec(
+            name=name,
+            description=description,
+            input_schema=schema,
+            risk_level=risk_level,
+            mutates_state=mutates_state,
+        ),
         executor,
     )

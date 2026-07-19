@@ -14,6 +14,7 @@ STATUS_TO_KIND = {
     "invalid_tool_args": FeedbackKind.INVALID_TOOL_ARGS,
     "tool_error": FeedbackKind.TOOL_ERROR,
     "timeout": FeedbackKind.TIMEOUT,
+    "stale_tool_batch": FeedbackKind.STALE_TOOL_BATCH,
 }
 
 
@@ -98,4 +99,6 @@ def _next_step_for(
         return "Ask the user for approval"
     if kind == FeedbackKind.COMMAND_FAILED:
         return "Inspect stderr and choose a smaller command"
+    if kind == FeedbackKind.STALE_TOOL_BATCH:
+        return "Re-evaluate workspace state and request only the next required tool call"
     return None

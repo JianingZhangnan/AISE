@@ -64,3 +64,33 @@ def test_file_specs_declare_required_fields():
     assert spec is not None
     schema = spec.input_schema
     assert set(schema.get("required", [])) == {"path", "old", "new"}
+
+
+def test_default_registry_declares_state_mutation_for_batch_serialization(tmp_path: Path) -> None:
+    from phycode.composition import build_default_registry
+    from phycode.context import MemoryStore
+
+    registry = build_default_registry(
+        workspace_root=tmp_path,
+        test_command="uv run pytest",
+        memory_store=MemoryStore.ephemeral(),
+    )
+
+    mutating = {
+        "file.write",
+        "file.edit",
+        "memory.write",
+        "config.write",
+        "shell.run",
+        "test.run",
+        "process.run",
+    }
+    for name in mutating:
+        spec = registry.spec_for(name)
+        assert spec is not None
+        assert spec.mutates_state, name
+
+    for name in {"file.read", "file.list", "workspace.status", "memory.read", "config.read"}:
+        spec = registry.spec_for(name)
+        assert spec is not None
+        assert not spec.mutates_state, name

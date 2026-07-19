@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import queue
 import re
@@ -29,6 +30,33 @@ def _provider_tool_aliases(tools: list[ToolSpec]) -> tuple[dict[str, str], dict[
         original_to_alias[spec.name] = alias
         alias_to_original[alias] = spec.name
     return original_to_alias, alias_to_original
+
+
+def _provider_messages(
+    messages: list[dict[str, object]],
+    original_to_alias: dict[str, str],
+) -> list[dict[str, object]]:
+    projected = copy.deepcopy(messages)
+    for message in projected:
+        if message.get("role") != "assistant":
+            continue
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            name = function.get("name")
+            if not isinstance(name, str):
+                continue
+            function["name"] = original_to_alias.get(
+                name,
+                (_PROVIDER_TOOL_NAME_PATTERN.sub("_", name) or "tool")[:_MAX_PROVIDER_TOOL_NAME_LENGTH],
+            )
+    return projected
 
 
 class LLMClient(Protocol):
@@ -64,10 +92,28 @@ class ScriptedLLM:
 
 class EchoLLM:
     def generate(self, messages: list[dict[str, object]], tools: list[ToolSpec]) -> list[AgentEvent]:
-        last = str(messages[-1]["content"]) if messages else ""
-        if "\nUser: " in last:
-            last = last.rsplit("\nUser: ", 1)[1]
-        return [AgentEvent(session_id="echo", type=AgentEventType.ASSISTANT_FINAL, payload={"text": f"Echo: {last}"})]
+        user_contents = [
+            str(message.get("content", ""))
+            for message in messages
+            if message.get("role") == "user"
+        ]
+        current = next(
+            (
+                content.rsplit("\nUser: ", 1)[1]
+                if "\nUser: " in content
+                else content.removeprefix("User: ")
+                for content in user_contents
+                if "\nUser: " in content or content.startswith("User: ")
+            ),
+            user_contents[-1] if user_contents else "",
+        )
+        return [
+            AgentEvent(
+                session_id="echo",
+                type=AgentEventType.ASSISTANT_FINAL,
+                payload={"text": f"Echo: {current}"},
+            )
+        ]
 
 
 class ReactiveLLM:
@@ -169,9 +215,13 @@ class OpenAICompatibleChatAdapter:
             }
             for spec in tools
         ]
-        kwargs: dict[str, Any] = {"model": self.model, "messages": messages}
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": _provider_messages(messages, original_to_alias),
+        }
         if tool_payload:
             kwargs["tools"] = tool_payload
+            kwargs["parallel_tool_calls"] = False
 
         response = self._call_with_deadline(lambda: self.client.chat.completions.create(**kwargs))
         message = response.choices[0].message

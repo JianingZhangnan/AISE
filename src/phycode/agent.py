@@ -10,7 +10,7 @@ from phycode.context import ContextBuilder, SessionStore
 from phycode.event_projection import project_agent_event
 from phycode.feedback import artifact_verification_feedback, classify_feedback
 from phycode.llm import LLMClient
-from phycode.models import AgentEvent, AgentEventType, ToolCall
+from phycode.models import AgentEvent, AgentEventType, ToolCall, ToolResult
 from phycode.policy import PolicyContext
 from phycode.tools.base import ApprovalHandler, ToolRuntime
 from phycode.trace import TraceStore
@@ -94,6 +94,7 @@ class AgentLoop:
 
     def run(self, user_input: str) -> AgentRunResult:
         all_events: list[AgentEvent] = []
+        self.context_builder.begin_turn(user_input)
         if self.max_tool_calls <= 0:
             return self._finish_tool_budget(user_input, all_events, None)
         final_text: str | None = None
@@ -117,6 +118,7 @@ class AgentLoop:
                 all_events.append(error_event)
                 return AgentRunResult(final_text, all_events, "error", "provider_error")
 
+            feedback_barrier = False
             for event in events:
                 normalized = event.model_copy(update={"session_id": self.session_store.session.id})
                 self._record(normalized)
@@ -162,7 +164,12 @@ class AgentLoop:
 
                 if normalized.type == AgentEventType.TOOL_CALL_REQUESTED:
                     tool_call_count += 1
-                    tool_events = self._handle_tool_event(normalized)
+                    skipped_by_barrier = feedback_barrier
+                    tool_events = (
+                        self._skip_stale_tool_event(normalized)
+                        if skipped_by_barrier
+                        else self._handle_tool_event(normalized)
+                    )
                     all_events.extend(tool_events)
                     current_blocker = self._updated_blocker(
                         current_blocker,
@@ -170,14 +177,20 @@ class AgentLoop:
                         tool_events,
                     )
                     action_result_key = self._successful_action_result_key(normalized, tool_events)
+                    if not skipped_by_barrier and self._establishes_feedback_barrier(
+                        normalized,
+                        tool_events,
+                    ):
+                        feedback_barrier = True
                     if self.verify_after_successful_tool and action_result_key is not None:
                         verification = self._verify_completion()
                         if verification.ok:
                             return AgentRunResult(None, all_events, "completed")
+                        assert verification.feedback_event is not None
+                        self._record(verification.feedback_event)
+                        all_events.append(verification.feedback_event)
+                        feedback_barrier = True
                         if verification.fatal:
-                            assert verification.feedback_event is not None
-                            self._record(verification.feedback_event)
-                            all_events.append(verification.feedback_event)
                             return AgentRunResult(
                                 None,
                                 all_events,
@@ -185,14 +198,33 @@ class AgentLoop:
                                 "artifact_verification_failed",
                             )
                     if tool_call_count == tool_budget_warning_at:
+                        if self.completion_verifier is None:
+                            summary = (
+                                "Tool budget is nearly exhausted; synthesize the best-supported "
+                                "final answer now"
+                            )
+                            retryable = False
+                            suggested_next_step = (
+                                "Return the final answer using the evidence already gathered"
+                            )
+                        else:
+                            summary = (
+                                "Tool budget is nearly exhausted and required artifacts are still "
+                                "unverified"
+                            )
+                            retryable = True
+                            suggested_next_step = (
+                                "Use remaining calls only to fill missing artifacts, run required "
+                                "steps, inspect outputs, and verify completion"
+                            )
                         budget_event = self._new_event(
                             AgentEventType.FEEDBACK_SIGNAL,
                             {
                                 "kind": "tool_budget_near_limit",
-                                "summary": "Tool budget is nearly exhausted; synthesize the best-supported final answer now",
+                                "summary": summary,
                                 "evidence": {"used": tool_call_count, "limit": self.max_tool_calls},
-                                "retryable": False,
-                                "suggested_next_step": "Return the final answer using the evidence already gathered",
+                                "retryable": retryable,
+                                "suggested_next_step": suggested_next_step,
                             },
                         )
                         self._record(budget_event)
@@ -322,6 +354,7 @@ class AgentLoop:
             "Tool use is now disabled. Do not emit a tool call, search expression, or plan. "
             "Using only the evidence already gathered, return the best-supported answer now in the requested format."
         )
+        self.context_builder.begin_turn(finalization_input)
         messages = self.context_builder.build(finalization_input, [])
         try:
             events = self.llm.generate(messages, [])
@@ -384,6 +417,45 @@ class AgentLoop:
         for item in emitted:
             self._record(item)
         return emitted
+
+    def _skip_stale_tool_event(self, event: AgentEvent) -> list[AgentEvent]:
+        result = ToolResult(
+            tool_call_id=str(event.payload.get("provider_call_id") or event.id),
+            status="stale_tool_batch",
+            stderr=(
+                "Skipped because an earlier call in the same provider response changed state "
+                "or produced corrective feedback"
+            ),
+        )
+        result_event = self._new_event(
+            AgentEventType.TOOL_CALL_OUTPUT,
+            result.model_dump(mode="json"),
+        )
+        feedback_events = [
+            self._new_event(AgentEventType.FEEDBACK_SIGNAL, signal.model_dump(mode="json"))
+            for signal in classify_feedback(
+                result,
+                profile=self.policy_context.profile_spec.profile,
+            )
+        ]
+        emitted = [result_event, *feedback_events]
+        for item in emitted:
+            self._record(item)
+        return emitted
+
+    def _establishes_feedback_barrier(
+        self,
+        request: AgentEvent,
+        tool_events: list[AgentEvent],
+    ) -> bool:
+        output = next(
+            (event for event in tool_events if event.type == AgentEventType.TOOL_CALL_OUTPUT),
+            None,
+        )
+        if output is None or output.payload.get("status") != "ok":
+            return True
+        spec = self.tool_runtime.registry.spec_for(str(request.payload.get("tool_name", "")))
+        return bool(spec is not None and spec.mutates_state)
 
     def _failure_key(self, request: AgentEvent, tool_events: list[AgentEvent]) -> tuple[str, str] | None:
         tool_name = str(request.payload.get("tool_name", ""))

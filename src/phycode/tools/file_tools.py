@@ -387,6 +387,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
                 "required": ["path", "content"],
             },
             risk_level=ToolRiskLevel.RISKY,
+            mutates_state=True,
         ),
         _file_write,
     )
@@ -404,6 +405,7 @@ def register_file_tools(registry: ToolRegistry) -> None:
                 "required": ["path", "old", "new"],
             },
             risk_level=ToolRiskLevel.RISKY,
+            mutates_state=True,
         ),
         _file_edit,
     )

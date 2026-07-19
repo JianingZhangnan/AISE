@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from phycode.conversation import project_conversation
 from phycode.models import AgentEvent, MemoryEntry, Session, ToolSpec
 from phycode.redaction import redact_obj, redact_text
 
@@ -102,8 +103,16 @@ class ContextBuilder:
         self.max_chars = max_chars
         self.system_prompt = system_prompt
         self.workspace_label = workspace_label
+        self._turn_input: str | None = None
+        self._turn_start_index = 0
+
+    def begin_turn(self, current_input: str) -> None:
+        self._turn_input = current_input
+        self._turn_start_index = len(self.session_store.events)
 
     def build(self, current_input: str, tools: list[ToolSpec] | None = None) -> list[dict[str, object]]:
+        if self._turn_input != current_input:
+            self.begin_turn(current_input)
         memory = _clip_text(self.memory_store.summary(), min(1_500, self.max_chars // 8))
         tool_lines = "\n".join(f"- {spec.name} ({spec.risk_level.value}): {spec.description}" for spec in (tools or []))
         tool_lines = _clip_text(tool_lines, min(2_500, self.max_chars // 5))
@@ -118,23 +127,44 @@ class ContextBuilder:
             f"Workspace: {workspace}\n"
             f"Tools:\n{tool_lines}\n"
             f"Memory:\n{memory}\n"
-            "Recent events:\n"
         )
-        suffix = f"\nUser: {user_input}"
-        recent_budget = max(0, self.max_chars - len(fixed) - len(suffix))
-        recent_parts: list[str] = []
-        remaining = recent_budget
-        for event in reversed(self.session_store.recent_events()):
-            rendered = json.dumps(event.model_dump(mode="json"), ensure_ascii=False, default=str)
-            separator_length = 1 if recent_parts else 0
-            if remaining <= separator_length:
-                break
-            clipped = _clip_text(rendered, min(16_000, remaining - separator_length))
-            recent_parts.append(clipped)
-            remaining -= len(clipped) + separator_length
-        recent_parts.reverse()
-        content = fixed + "\n".join(recent_parts) + suffix
+        state_budget = min(4_500, max(600, self.max_chars // 3))
+        initial_projection = project_conversation(self.session_store.events, 0)
+        state = _clip_text(
+            json.dumps(
+                redact_obj(initial_projection.execution_state),
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            ),
+            state_budget,
+        )
+        content = redact_text(
+            fixed
+            + "Deterministic execution state:\n"
+            + state
+        )
+        current_user: dict[str, object] = {
+            "role": "user",
+            "content": f"User: {redact_text(user_input)}",
+        }
+        recent_budget = max(0, self.max_chars - len(content) - len(user_input))
+        turn_start = min(self._turn_start_index, len(self.session_store.events))
+        before_turn = self.session_store.events[:turn_start]
+        after_turn = self.session_store.events[turn_start:]
+        if before_turn and after_turn:
+            before_budget = recent_budget // 3
+        elif before_turn:
+            before_budget = recent_budget
+        else:
+            before_budget = 0
+        after_budget = recent_budget - before_budget
+        before_projection = project_conversation(before_turn, before_budget)
+        after_projection = project_conversation(after_turn, after_budget)
         return [
             {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": redact_text(content)},
+            {"role": "system", "content": content},
+            *before_projection.messages,
+            current_user,
+            *after_projection.messages,
         ]

@@ -51,6 +51,7 @@ def register_shell_tools(registry: ToolRegistry, workspace_root: Path, test_comm
                 "required": ["command"],
             },
             risk_level=ToolRiskLevel.RISKY,
+            mutates_state=True,
         ),
         shell_run,
     )
@@ -63,6 +64,7 @@ def register_shell_tools(registry: ToolRegistry, workspace_root: Path, test_comm
                 "properties": {"command": {"type": "string"}, "timeout": {"type": "integer"}},
             },
             risk_level=ToolRiskLevel.RISKY,
+            mutates_state=True,
         ),
         test_run,
     )

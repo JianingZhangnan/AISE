@@ -189,6 +189,7 @@ def register_process_tools(
                 "additionalProperties": False,
             },
             risk_level=ToolRiskLevel.RISKY,
+            mutates_state=True,
         ),
         process_run,
     )

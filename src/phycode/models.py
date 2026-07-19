@@ -49,6 +49,7 @@ class FeedbackKind(str, Enum):
     TOOL_ERROR = "tool_error"
     TIMEOUT = "timeout"
     OUTPUT_TRUNCATED = "output_truncated"
+    STALE_TOOL_BATCH = "stale_tool_batch"
 
 
 class MemoryCategory(str, Enum):
@@ -83,6 +84,7 @@ class ToolSpec(BaseModel):
     description: str
     input_schema: dict[str, Any]
     risk_level: ToolRiskLevel
+    mutates_state: bool = False
 
 
 class ToolCall(BaseModel):
