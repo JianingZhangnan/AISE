@@ -197,6 +197,7 @@ def test_runner_recovers_from_denied_direct_csv_via_script_and_runtime_approval(
         "reproduction/reproduce.py",
         "data/output.csv",
     ]
+    contract_payload["execution_entrypoints"] = ["reproduction/reproduce.py"]
     contract_payload["constraints"] = [
         {
             "path": "data/output.csv",

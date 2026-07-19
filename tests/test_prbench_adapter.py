@@ -3152,6 +3152,7 @@ def test_public_contracts_contain_only_instruction_declared_constraints(
     assert contract.paper_file == "paper.md"
     assert contract.input_files == ()
     assert contract.expected_files == expected_files
+    assert contract.execution_entrypoints == (expected_files[0],)
     assert len(contract.constraints) == 1
     assert contract.constraints[0].csv_header == header
     assert contract.constraints[0].csv_rows == rows

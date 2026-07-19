@@ -21,6 +21,7 @@ def write_public_task_files(workspace: Path, *, approvals: bool = True) -> tuple
                 "instruction_file": "instruction.md",
                 "paper_file": "paper.md",
                 "expected_files": ["reproduce.py", "result.csv"],
+                "execution_entrypoints": ["reproduce.py"],
                 "constraints": [
                     {
                         "path": "result.csv",

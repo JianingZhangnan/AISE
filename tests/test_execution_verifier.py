@@ -24,6 +24,7 @@ def _contract() -> TaskContract:
         instruction_file="instruction.md",
         paper_file="paper.md",
         expected_files=("reproduction/generate.py", "data/output.csv"),
+        execution_entrypoints=("reproduction/generate.py",),
         constraints=(
             ArtifactConstraint(
                 path="data/output.csv",
@@ -85,7 +86,7 @@ def test_csv_requires_successful_script_provenance(tmp_path: Path) -> None:
 
     assert not result.ok
     assert {issue.code for issue in result.issues} == {
-        "script_not_executed",
+        "missing_artifact",
         "csv_without_provenance",
     }
 
@@ -138,6 +139,33 @@ def test_contract_models_forbid_unknown_fields() -> None:
                 "expected_files": ("data/output.csv",),
                 "unexpected": True,
             }
+        )
+
+
+def test_contract_rejects_entrypoint_outside_expected_files() -> None:
+    with pytest.raises(ValidationError, match="entrypoint"):
+        TaskContract(
+            instruction_file="instruction.md",
+            paper_file="paper.md",
+            expected_files=("reproduction/core.py",),
+            execution_entrypoints=("reproduction/run.py",),
+        )
+
+
+def test_contract_rejects_non_python_and_duplicate_entrypoints() -> None:
+    with pytest.raises(ValidationError, match="Python"):
+        TaskContract(
+            instruction_file="instruction.md",
+            paper_file="paper.md",
+            expected_files=("data/output.csv",),
+            execution_entrypoints=("data/output.csv",),
+        )
+    with pytest.raises(ValidationError, match="duplicate"):
+        TaskContract(
+            instruction_file="instruction.md",
+            paper_file="paper.md",
+            expected_files=("reproduction/run.py",),
+            execution_entrypoints=("reproduction/run.py", "reproduction/run.py"),
         )
 
 
@@ -204,7 +232,7 @@ def test_csv_provenance_must_share_record_with_current_script_hash(tmp_path: Pat
     assert {issue.code for issue in result.issues} == {"csv_without_provenance"}
 
 
-def test_any_current_expected_script_can_support_csv_in_same_record(tmp_path: Path) -> None:
+def test_any_current_entrypoint_can_support_csv_in_same_record(tmp_path: Path) -> None:
     (tmp_path / "reproduction").mkdir()
     passive_script = tmp_path / "reproduction/passive.py"
     passive_script.write_text("pass\n", encoding="utf-8")
@@ -223,6 +251,7 @@ def test_any_current_expected_script_can_support_csv_in_same_record(tmp_path: Pa
             "reproduction/generate.py",
             "data/output.csv",
         ),
+        execution_entrypoints=("reproduction/generate.py",),
         constraints=(
             ArtifactConstraint(
                 path="data/output.csv",
@@ -237,6 +266,60 @@ def test_any_current_expected_script_can_support_csv_in_same_record(tmp_path: Pa
     assert _run_call(tmp_path, journal, argv=["reproduction/generate.py"]) == "ok"
 
     assert ArtifactVerifier(tmp_path, contract, journal).verify().ok
+
+
+def test_imported_core_module_does_not_require_direct_execution(tmp_path: Path) -> None:
+    reproduction = tmp_path / "reproduction"
+    reproduction.mkdir()
+    (reproduction / "core.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (reproduction / "generate.py").write_text(
+        "from pathlib import Path\n"
+        "from core import VALUE\n"
+        "Path('data').mkdir(exist_ok=True)\n"
+        "Path('data/output.csv').write_text(f'a,b\\n1,{VALUE}\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=(
+            "reproduction/core.py",
+            "reproduction/generate.py",
+            "data/output.csv",
+        ),
+        execution_entrypoints=("reproduction/generate.py",),
+        constraints=(
+            ArtifactConstraint(
+                path="data/output.csv",
+                csv_header=("a", "b"),
+                csv_data_row_count=1,
+            ),
+        ),
+    )
+    journal = ExecutionJournal(tmp_path, contract.expected_files)
+
+    assert _run_python(tmp_path, journal) == "ok"
+    assert ArtifactVerifier(tmp_path, contract, journal).verify().ok
+
+
+def test_current_entrypoint_hash_is_required_after_edit(tmp_path: Path) -> None:
+    reproduction = tmp_path / "reproduction"
+    reproduction.mkdir()
+    script = reproduction / "generate.py"
+    script.write_text("print('first')\n", encoding="utf-8")
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=("reproduction/generate.py",),
+        execution_entrypoints=("reproduction/generate.py",),
+    )
+    journal = ExecutionJournal(tmp_path, contract.expected_files)
+    assert _run_python(tmp_path, journal) == "ok"
+    script.write_text("print('second')\n", encoding="utf-8")
+
+    result = ArtifactVerifier(tmp_path, contract, journal).verify()
+    assert not result.ok
+    assert {issue.code for issue in result.issues} == {"script_not_executed"}
 
 
 def test_timeout_cannot_establish_csv_provenance(tmp_path: Path) -> None:

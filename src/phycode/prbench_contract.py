@@ -4,7 +4,7 @@ import csv
 import os
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from phycode.execution import ExecutionJournal, ProcessExecutionRecord, file_sha256
 from phycode.visibility import normalize_public_relative_path
@@ -20,6 +20,7 @@ class ArtifactConstraint(BaseModel):
     path: str
     csv_header: tuple[str, ...] | None = None
     csv_rows: tuple[tuple[str, ...], ...] | None = None
+    csv_data_row_count: int | None = Field(default=None, ge=0)
 
     @field_validator("path")
     @classmethod
@@ -34,6 +35,7 @@ class TaskContract(BaseModel):
     paper_file: str
     input_files: tuple[str, ...] = ()
     expected_files: tuple[str, ...]
+    execution_entrypoints: tuple[str, ...] = ()
     constraints: tuple[ArtifactConstraint, ...] = ()
 
     @field_validator("instruction_file", "paper_file")
@@ -41,7 +43,7 @@ class TaskContract(BaseModel):
     def validate_single_path(cls, value: str) -> str:
         return normalize_public_relative_path(value)
 
-    @field_validator("input_files", "expected_files")
+    @field_validator("input_files", "expected_files", "execution_entrypoints")
     @classmethod
     def validate_path_list(cls, values: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(normalize_public_relative_path(value) for value in values)
@@ -52,6 +54,13 @@ class TaskContract(BaseModel):
         if len(set(expected_keys)) != len(expected_keys):
             raise ValueError("expected_files contains duplicate paths")
         expected_key_set = set(expected_keys)
+        entrypoint_keys = tuple(_path_key(path) for path in self.execution_entrypoints)
+        if len(set(entrypoint_keys)) != len(entrypoint_keys):
+            raise ValueError("execution_entrypoints contains duplicate paths")
+        if any(key not in expected_key_set for key in entrypoint_keys):
+            raise ValueError("execution entrypoints must belong to expected_files")
+        if any(Path(path).suffix.casefold() != ".py" for path in self.execution_entrypoints):
+            raise ValueError("execution entrypoints must be Python files")
         constraint_keys = tuple(_path_key(constraint.path) for constraint in self.constraints)
         if len(set(constraint_keys)) != len(constraint_keys):
             raise ValueError("constraints contains duplicate paths")
@@ -86,6 +95,7 @@ class ArtifactVerifier:
     def verify(self) -> VerificationResult:
         issues: list[VerificationIssue] = []
         paths: dict[str, Path] = {}
+        entrypoint_keys = {_path_key(path) for path in self.contract.execution_entrypoints}
         for relative_path in self.contract.expected_files:
             path = self._resolve(relative_path)
             if path is None:
@@ -94,13 +104,18 @@ class ArtifactVerifier:
             paths[self._key(relative_path)] = path
             try:
                 if not path.is_file():
-                    code = "script_not_executed" if path.suffix.casefold() == ".py" else "missing_artifact"
-                    issues.append(self._issue(code, relative_path, "Required artifact is missing"))
+                    issues.append(self._issue("missing_artifact", relative_path, "Required artifact is missing"))
                     continue
                 if path.stat().st_size == 0:
                     issues.append(self._issue("empty_artifact", relative_path, "Required artifact is empty"))
-                if path.suffix.casefold() == ".py" and not self._script_has_provenance(relative_path, path):
-                    issues.append(self._issue("script_not_executed", relative_path, "Script was not executed successfully"))
+                if self._key(relative_path) in entrypoint_keys and not self._script_has_provenance(relative_path, path):
+                    issues.append(
+                        self._issue(
+                            "script_not_executed",
+                            relative_path,
+                            "Entrypoint was not executed successfully",
+                        )
+                    )
                 if path.suffix.casefold() == ".csv" and not self._csv_has_provenance(relative_path, path):
                     issues.append(
                         self._issue(
@@ -141,7 +156,7 @@ class ArtifactVerifier:
     def _csv_has_provenance(self, relative_path: str, path: Path) -> bool:
         current_hash = file_sha256(path)
         key = self._key(relative_path)
-        expected_scripts = self._current_expected_script_hashes()
+        expected_scripts = self._current_entrypoint_hashes()
         for record in self.journal.records:
             if (
                 record.status != "ok"
@@ -156,11 +171,9 @@ class ArtifactVerifier:
                 return True
         return False
 
-    def _current_expected_script_hashes(self) -> dict[str, str]:
+    def _current_entrypoint_hashes(self) -> dict[str, str]:
         scripts: dict[str, str] = {}
-        for relative_path in self.contract.expected_files:
-            if Path(relative_path).suffix.casefold() != ".py":
-                continue
+        for relative_path in self.contract.execution_entrypoints:
             path = self._resolve(relative_path)
             if path is not None and path.is_file():
                 scripts[self._key(relative_path)] = file_sha256(path)
@@ -182,6 +195,14 @@ class ArtifactVerifier:
         actual_rows = tuple(tuple(row) for row in rows[1:]) if rows else ()
         if constraint.csv_rows is not None and actual_rows != constraint.csv_rows:
             issues.append(self._issue("csv_rows_mismatch", constraint.path, "CSV rows do not match"))
+        if constraint.csv_data_row_count is not None and len(actual_rows) != constraint.csv_data_row_count:
+            issues.append(
+                self._issue(
+                    "csv_row_count_mismatch",
+                    constraint.path,
+                    "CSV data row count does not match",
+                )
+            )
         return issues
 
     def _resolve(self, relative_path: str) -> Path | None:
