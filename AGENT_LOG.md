@@ -434,6 +434,22 @@
   Quality Approved、Task quality Approved；Critical 0、Important 0、Minor 0。版本契约
   测试直接从项目元数据推导 wheel 文件名，后续版本升级遗漏任一 PRBench 消费端都会
   失败，不再依赖手工复制版本常量。
+- 最终全分支 reviewer 首轮为 Ready to merge、Critical 0、Important 0，并提出两项
+  Minor：缺少同 turn 多次审批/同 loop 多 turn 的直接回归，以及 spinner 重启异常可能
+  覆盖原审批异常。按 final-review fix wave 一次性处理：多审批/多 turn 用例在旧实现上
+  已通过，记录为覆盖增强；双重异常用例有效 RED 为期望 `approval failed`、实际得到
+  `status restart failed`。最小修复在双重失败时保留并重新抛出原审批异常，只附加固定
+  note；审批成功后的重启失败仍传播。共享 recording helper 收敛了五组重复夹具，聚焦
+  生命周期测试为 5 passed，提交 `b900998`。
+- final re-review 确认两项 Minor 均关闭，Critical 0、Important 0、Minor 0，Ready to
+  merge；没有修改策略、工具权限、凭据或模型路径。
+- 主 agent 对最终实现运行 `uv run pytest -q`，完整进度达到 100%、exit 0；
+  `uvx pyright` 为 0 errors / 0 warnings；`uv build` 成功生成 `0.1.1` wheel/sdist；
+  `git diff --check` 通过。真实 Windows PTY 冒烟在任何输入前明确显示
+  `Approve this action? [y/N]:`，输入 `n` 后返回 `approved=False`，直接关闭用户截图中的
+  不可见症状。最终构建 SHA-256：wheel
+  `aa8e87d124c4443ec10247aa2c7d2c17ad10d569739cf548808ffa25f69b7b31`，sdist
+  `28b4fac4f9480094323ad38f6d4bb213344acf5b807b924934a1afe8a1098ba3`。
 - whole-branch final review 判定 Ready to merge，同时给出两个 Minor 生命周期加固项。
   Finding 1 增加同一 turn 两次审批、同一 loop 连续两 turn 的事件序列与原 handler
   身份断言；首跑聚焦集合为 3 passed，证明现实现已满足，这是覆盖增强而非有效 RED，

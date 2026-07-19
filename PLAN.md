@@ -2500,4 +2500,5 @@ upstream import API 漂移；overlay 不修改上游依赖声明。最终只有 
 - [x] Task 26：在阻塞式审批前暂停 Rich spinner，审批结束后恢复，并保证原始
   `approval_handler` 在正常和异常路径都被恢复；用 PTY 根因证据和确定性事件顺序
   测试固化。修复构建版本为 `0.1.1`，不在本任务内发布 GitHub Release。commits：
-  `7b22800`、`8484cdc`；task spec/quality review clean（Critical 0 / Important 0）。
+  `7b22800`、`8484cdc`、`b900998`；task spec/quality review 与最终全分支 review
+  clean（Critical 0 / Important 0 / Minor 0，Ready to merge）。
