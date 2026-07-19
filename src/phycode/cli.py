@@ -214,6 +214,9 @@ def _handle_slash(line: str) -> str | None:
     if parsed.spec is None:
         console.print(f"unknown command: /{parsed.raw_name} (try /help)", markup=False)
         return None
+    if parsed.has_unexpected_argument:
+        console.print(f"usage: {parsed.spec.usage}", markup=False)
+        return None
     action = parsed.spec.action
     if action is SlashAction.EXIT:
         return "exit"

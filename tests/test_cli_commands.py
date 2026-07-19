@@ -179,6 +179,51 @@ def test_chat_slash_unknown_is_reported_and_not_sent_to_agent(tmp_path, monkeypa
     assert "Echo:" not in result.stdout  # a slash line is never forwarded to the agent
 
 
+def test_chat_rejects_arguments_for_argumentless_commands_without_side_effects(
+    monkeypatch,
+):
+    import phycode.cli as cli
+    from phycode.agent import AgentRunResult
+
+    turns: list[str] = []
+
+    class Loop:
+        def run(self, user_input: str) -> AgentRunResult:
+            turns.append(user_input)
+            return AgentRunResult(final_text="continued", events=[], stopped_reason="final")
+
+    class FakePrompt:
+        def __init__(self) -> None:
+            self.inputs = iter(
+                [
+                    "/key accidental-secret",
+                    "/exit later",
+                    "ordinary chat",
+                    "/exit",
+                ]
+            )
+
+        def read(self) -> str:
+            return next(self.inputs)
+
+        def refresh_models(self) -> None:
+            raise AssertionError("unexpected arguments must not trigger a refresh")
+
+    def fail_hidden_prompt(*args, **kwargs):
+        raise AssertionError("unexpected /key argument must not open hidden input")
+
+    monkeypatch.setattr(cli, "build_agent", lambda *a, **k: Loop())
+    monkeypatch.setattr(cli, "create_chat_prompt", lambda *a, **k: FakePrompt())
+    monkeypatch.setattr(cli.typer, "prompt", fail_hidden_prompt)
+
+    result = runner.invoke(app, ["chat"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "usage: /key" in result.stdout
+    assert "usage: /exit" in result.stdout
+    assert turns == ["ordinary chat"]
+
+
 def test_chat_prompt_ctrl_c_recovers_and_reload_refreshes_models(tmp_path, monkeypatch):
     import phycode.cli as cli
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from threading import Thread
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event, Lock, Thread
 from time import sleep
 
 import pytest
@@ -68,6 +69,14 @@ def test_parse_slash_normalizes_quotes_and_reports_missing_required_argument():
     assert unknown.raw_name == "bogus"
 
 
+def test_parse_slash_marks_arguments_for_argumentless_commands_as_unexpected():
+    assert parse_slash("/key accidental-secret").has_unexpected_argument is True
+    assert parse_slash("/LOGIN accidental-secret").has_unexpected_argument is True
+    assert parse_slash("/exit later").has_unexpected_argument is True
+    assert parse_slash("/key").has_unexpected_argument is False
+    assert parse_slash("/model manual-model").has_unexpected_argument is False
+
+
 def test_render_slash_help_is_derived_from_every_canonical_spec():
     help_text = render_slash_help()
     for spec in SLASH_COMMANDS:
@@ -119,9 +128,120 @@ def test_model_completion_is_cached_filtered_and_refreshable():
     assert calls == 2
 
 
-def test_completion_menu_never_returns_more_than_eight_visible_rows():
-    catalog = SessionModelCatalog(lambda: [f"model-{index:02d}" for index in range(20)])
-    assert len(_completions("/model ", SlashCompleter(catalog))) == 8
+def test_model_catalog_refresh_returns_while_loader_is_in_flight():
+    loader_started = Event()
+    release_loader = Event()
+
+    def load_models() -> list[str]:
+        loader_started.set()
+        assert release_loader.wait(timeout=2)
+        return ["stale-model"]
+
+    catalog = SessionModelCatalog(load_models)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        load_future = executor.submit(catalog.get_models)
+        assert loader_started.wait(timeout=1)
+        refresh_future = executor.submit(catalog.refresh)
+        try:
+            refresh_future.result(timeout=0.25)
+        finally:
+            release_loader.set()
+        assert load_future.result(timeout=1) == ("stale-model",)
+
+
+def test_model_catalog_refresh_starts_new_generation_without_stale_overwrite():
+    first_loader_started = Event()
+    release_first_loader = Event()
+    calls_lock = Lock()
+    calls = 0
+
+    def load_models() -> list[str]:
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            call = calls
+        if call == 1:
+            first_loader_started.set()
+            assert release_first_loader.wait(timeout=2)
+            return ["stale-model"]
+        return ["fresh-model"]
+
+    catalog = SessionModelCatalog(load_models)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        old_generation = executor.submit(catalog.get_models)
+        assert first_loader_started.wait(timeout=1)
+        refresh_future = executor.submit(catalog.refresh)
+        try:
+            refresh_future.result(timeout=0.25)
+            new_generation = executor.submit(catalog.get_models)
+            assert new_generation.result(timeout=0.5) == ("fresh-model",)
+        finally:
+            release_first_loader.set()
+        assert old_generation.result(timeout=1) == ("fresh-model",)
+
+    assert catalog.get_models() == ("fresh-model",)
+    assert calls == 2
+
+
+def test_model_catalog_concurrent_first_access_is_single_flight():
+    worker_count = 5
+    callers_ready = Barrier(worker_count + 1)
+    loader_started = Event()
+    release_loader = Event()
+    calls_lock = Lock()
+    calls = 0
+
+    def load_models() -> list[str]:
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        loader_started.set()
+        assert release_loader.wait(timeout=2)
+        return ["shared-model"]
+
+    catalog = SessionModelCatalog(load_models)
+
+    def get_models_together() -> tuple[str, ...]:
+        callers_ready.wait(timeout=1)
+        return catalog.get_models()
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(get_models_together) for _ in range(worker_count)]
+        callers_ready.wait(timeout=1)
+        assert loader_started.wait(timeout=1)
+        try:
+            assert calls == 1
+        finally:
+            release_loader.set()
+        assert [future.result(timeout=1) for future in futures] == [
+            ("shared-model",)
+        ] * worker_count
+
+    assert calls == 1
+
+
+def test_model_completion_keeps_all_candidates_and_ninth_can_be_accepted():
+    models = [f"model-{index:02d}" for index in range(10)]
+    catalog = SessionModelCatalog(lambda: models)
+
+    assert [
+        item.text for item in _completions("/model ", SlashCompleter(catalog))
+    ] == models
+
+    with create_pipe_input() as pipe:
+        prompt = InteractivePrompt(lambda: models, input=pipe, output=DummyOutput())
+
+        def send_keys() -> None:
+            pipe.send_text("/model ")
+            sleep(0.1)
+            pipe.send_bytes(b"\x1b[B" * 9)
+            pipe.send_text("\r")
+
+        sender = Thread(target=send_keys)
+        sender.start()
+        assert prompt.read() == "/model model-08"
+        sender.join(timeout=1)
+        assert not sender.is_alive()
 
 
 def test_model_completion_failure_is_generic_and_manual_values_remain_valid():
@@ -146,6 +266,32 @@ def test_enter_executes_complete_no_argument_command():
         )
         pipe.send_text("/he\r")
         assert prompt.read() == "/help"
+
+
+def test_sensitive_slash_lines_are_filtered_from_history_and_arrow_recall():
+    with create_pipe_input() as pipe:
+        prompt = InteractivePrompt(lambda: [], input=pipe, output=DummyOutput())
+
+        pipe.send_text("/KeY accidental-secret-one\r")
+        assert prompt.read() == "/KeY accidental-secret-one"
+        pipe.send_text("/LOGIN accidental-secret-two\r")
+        assert prompt.read() == "/LOGIN accidental-secret-two"
+        assert list(prompt._session.history.get_strings()) == []
+
+        pipe.send_bytes(b"\x1b[A")
+        pipe.send_text("ordinary chat\r")
+        assert prompt.read() == "ordinary chat"
+        assert list(prompt._session.history.get_strings()) == ["ordinary chat"]
+
+        def recall_history() -> None:
+            sleep(0.05)
+            pipe.send_bytes(b"\x1b[A\r")
+
+        sender = Thread(target=recall_history)
+        sender.start()
+        assert prompt.read() == "ordinary chat"
+        sender.join(timeout=1)
+        assert not sender.is_alive()
 
 
 def test_enter_accepts_required_command_then_waits_for_argument():

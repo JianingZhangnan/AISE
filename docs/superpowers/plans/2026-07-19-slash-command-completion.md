@@ -413,9 +413,12 @@ def test_model_completion_is_cached_filtered_and_refreshable():
     assert calls == 2
 
 
-def test_completion_menu_never_returns_more_than_eight_visible_rows():
-    catalog = SessionModelCatalog(lambda: [f"model-{index:02d}" for index in range(20)])
-    assert len(_completions("/model ", SlashCompleter(catalog))) == 8
+def test_model_completion_returns_every_match_for_scrollable_menu():
+    models = [f"model-{index:02d}" for index in range(10)]
+    catalog = SessionModelCatalog(lambda: models)
+    completions = _completions("/model ", SlashCompleter(catalog))
+    assert [item.text for item in completions] == models
+    assert [item.text for item in completions[8:]] == ["model-08", "model-09"]
 
 
 def test_model_completion_failure_is_generic_and_manual_values_remain_valid():
@@ -536,7 +539,7 @@ class SlashCompleter(Completer):
             return
         body = text[1:]
         if " " not in body:
-            for spec in _ranked_commands(body)[:8]:
+            for spec in _ranked_commands(body):
                 insertion = f"/{spec.name}{' ' if spec.argument else ''}"
                 yield Completion(
                     insertion,
@@ -554,7 +557,7 @@ class SlashCompleter(Completer):
             score = _subsequence_score(partial, model)
             if score is not None:
                 ranked_models.append(((*score, index), model))
-        for _, model in sorted(ranked_models)[:8]:
+        for _, model in sorted(ranked_models):
             yield Completion(
                 model,
                 start_position=-len(partial),
@@ -659,6 +662,23 @@ def test_down_arrow_changes_the_selected_command():
         sender = Thread(target=send_keys)
         sender.start()
         assert prompt.read() == "/url https://example.com/v1"
+        sender.join(timeout=1)
+
+
+def test_ninth_model_completion_can_be_selected_through_scroll_window():
+    models = [f"model-{index:02d}" for index in range(10)]
+    with create_pipe_input() as pipe:
+        prompt = InteractivePrompt(lambda: models, input=pipe, output=DummyOutput())
+
+        def send_keys() -> None:
+            pipe.send_text("/model ")
+            sleep(0.1)
+            pipe.send_bytes(b"\x1b[B" * 9)
+            pipe.send_text("\r")
+
+        sender = Thread(target=send_keys)
+        sender.start()
+        assert prompt.read() == "/model model-08"
         sender.join(timeout=1)
 
 
@@ -808,6 +828,7 @@ class InteractivePrompt:
             complete_while_typing=True,
             complete_in_thread=True,
             complete_style=CompleteStyle.COLUMN,
+            # 八行仅是可见窗口；完整候选集保留在 completion state 中供方向键滚动。
             reserve_space_for_menu=8,
             key_bindings=bindings,
             history=InMemoryHistory(),

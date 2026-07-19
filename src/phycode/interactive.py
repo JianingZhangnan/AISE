@@ -4,7 +4,7 @@ import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
-from threading import Lock
+from threading import Condition
 from typing import Literal, Protocol
 
 from prompt_toolkit import PromptSession
@@ -63,6 +63,7 @@ class ParsedSlashCommand:
     raw_name: str
     spec: SlashCommandSpec | None
     argument: str
+    argument_provided: bool
 
     @property
     def needs_argument(self) -> bool:
@@ -71,6 +72,12 @@ class ParsedSlashCommand:
             and self.spec.argument
             and self.spec.argument.required
             and not self.argument
+        )
+
+    @property
+    def has_unexpected_argument(self) -> bool:
+        return bool(
+            self.spec and self.spec.argument is None and self.argument_provided
         )
 
 
@@ -119,9 +126,15 @@ def parse_slash(line: str) -> ParsedSlashCommand:
         raise ValueError("slash commands must start with '/'")
     parts = line[1:].split(maxsplit=1)
     raw_name = parts[0].casefold() if parts else ""
-    argument = _strip_wrapping_quotes(parts[1].strip()) if len(parts) > 1 else ""
+    argument_provided = len(parts) > 1
+    argument = _strip_wrapping_quotes(parts[1].strip()) if argument_provided else ""
     spec = resolve_slash_command(raw_name) if raw_name else resolve_slash_command("help")
-    return ParsedSlashCommand(raw_name=raw_name, spec=spec, argument=argument)
+    return ParsedSlashCommand(
+        raw_name=raw_name,
+        spec=spec,
+        argument=argument,
+        argument_provided=argument_provided,
+    )
 
 
 def render_slash_help() -> str:
@@ -136,33 +149,60 @@ def render_slash_help() -> str:
 class SessionModelCatalog:
     def __init__(self, loader: Callable[[], list[str]]) -> None:
         self._loader = loader
-        self._lock = Lock()
-        self._loaded = False
+        self._condition = Condition()
+        self._generation = 0
+        self._loaded_generation: int | None = None
+        self._loading_generations: set[int] = set()
         self._models: tuple[str, ...] = ()
-        self.status = ""
+        self._status = ""
+
+    @property
+    def status(self) -> str:
+        with self._condition:
+            return self._status
 
     def get_models(self) -> tuple[str, ...]:
-        with self._lock:
-            if self._loaded:
-                return self._models
+        while True:
+            with self._condition:
+                generation = self._generation
+                if self._loaded_generation == generation:
+                    return self._models
+                if generation in self._loading_generations:
+                    self._condition.wait_for(
+                        lambda: self._generation != generation
+                        or generation not in self._loading_generations
+                    )
+                    continue
+                self._loading_generations.add(generation)
+
             try:
                 values = self._loader()
-            except Exception:
-                self._models = ()
-                self.status = "模型列表暂不可用；可以手工输入模型名"
-            else:
-                self._models = tuple(
+                models = tuple(
                     dict.fromkeys(value.strip() for value in values if value.strip())
                 )
-                self.status = "" if self._models else "未返回模型；可以手工输入模型名"
-            self._loaded = True
-            return self._models
+            except Exception:
+                models = ()
+                status = "模型列表暂不可用；可以手工输入模型名"
+            else:
+                status = "" if models else "未返回模型；可以手工输入模型名"
+
+            with self._condition:
+                self._loading_generations.discard(generation)
+                if self._generation == generation:
+                    self._models = models
+                    self._status = status
+                    self._loaded_generation = generation
+                self._condition.notify_all()
+                if self._generation == generation:
+                    return self._models
 
     def refresh(self) -> None:
-        with self._lock:
-            self._loaded = False
+        with self._condition:
+            self._generation += 1
+            self._loaded_generation = None
             self._models = ()
-            self.status = ""
+            self._status = ""
+            self._condition.notify_all()
 
 
 def _subsequence_score(query: str, candidate: str) -> tuple[int, int, int] | None:
@@ -232,7 +272,7 @@ class SlashCompleter(Completer):
             score = _subsequence_score(partial, model)
             if score is not None:
                 ranked_models.append(((*score, index), model))
-        for _, model in sorted(ranked_models)[:8]:
+        for _, model in sorted(ranked_models):
             yield Completion(
                 model,
                 start_position=-len(partial),
@@ -256,6 +296,15 @@ class BasicPrompt:
 
     def refresh_models(self) -> None:
         return None
+
+
+class _SessionHistory(InMemoryHistory):
+    def append_string(self, string: str) -> None:
+        if string.startswith("/"):
+            parsed = parse_slash(string)
+            if parsed.spec is not None and parsed.spec.action is SlashAction.KEY:
+                return
+        super().append_string(string)
 
 
 def _selected_or_first(buffer: Buffer) -> Completion | None:
@@ -310,7 +359,7 @@ class InteractivePrompt:
             complete_style=CompleteStyle.COLUMN,
             reserve_space_for_menu=8,
             key_bindings=bindings,
-            history=InMemoryHistory(),
+            history=_SessionHistory(),
             validate_while_typing=False,
             editing_mode=EditingMode.EMACS,
             style=Style.from_dict(
