@@ -205,6 +205,46 @@ def test_openai_adapter_disables_parallel_tool_calls_when_tools_are_available():
     assert client.chat.completions.kwargs["parallel_tool_calls"] is False
 
 
+class FakeReasoningMessage:
+    content = "the answer"
+    reasoning_content = "let me think step by step about this"
+    tool_calls = None
+
+
+class FakeReasoningClient:
+    class chat:
+        class completions:
+            @staticmethod
+            def create(**kwargs):
+                return type("R", (), {"choices": [type("C", (), {"message": FakeReasoningMessage()})()]})()
+
+
+def test_openai_adapter_emits_reasoning_summary():
+    from phycode.llm import OpenAICompatibleChatAdapter
+
+    adapter = OpenAICompatibleChatAdapter(base_url="http://x/v1", model="reasoner", api_key="k", client=FakeReasoningClient())
+    events = adapter.generate([{"role": "user", "content": "hi"}], [])
+    assert events[0].type == AgentEventType.REASONING_SUMMARY
+    assert "think" in events[0].payload["text"]
+    assert any(e.type == AgentEventType.ASSISTANT_FINAL for e in events)
+
+
+class FakeModelsClient:
+    class models:
+        @staticmethod
+        def list():
+            return type(
+                "R", (), {"data": [type("M", (), {"id": "deepseek-chat"})(), type("M", (), {"id": "kimi-k2"})()]}
+            )()
+
+
+def test_adapter_list_models_returns_ids():
+    from phycode.llm import OpenAICompatibleChatAdapter
+
+    adapter = OpenAICompatibleChatAdapter(base_url="http://x/v1", model="m", api_key="k", client=FakeModelsClient())
+    assert adapter.list_models() == ["deepseek-chat", "kimi-k2"]
+
+
 def test_openai_adapter_does_not_keep_api_key_attribute():
     from phycode.llm import OpenAICompatibleChatAdapter
 

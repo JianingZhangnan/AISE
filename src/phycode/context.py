@@ -91,6 +91,53 @@ class MemoryStore:
         return "\n".join(f"- {entry.category.value}: {entry.content}" for entry in self.entries())
 
 
+def _render_message(message: dict[str, object]) -> str | None:
+    """Render one already-projected provider message without changing its semantics."""
+    role = message.get("role")
+    if role == "assistant" and message.get("tool_calls"):
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list) or not tool_calls:
+            return None
+        first = tool_calls[0]
+        if not isinstance(first, dict):
+            return None
+        function = first.get("function")
+        if not isinstance(function, dict):
+            return None
+        return (
+            f"[tool call] {function.get('name', '')} "
+            f"{function.get('arguments', '{}')}"
+        )
+    if role == "tool":
+        content = message.get("content", "")
+        try:
+            payload = json.loads(content) if isinstance(content, str) else {}
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        body = str(payload.get("stdout") or payload.get("stderr") or "").strip()[:600]
+        return f"[tool result] status={payload.get('status', '')} {body}".rstrip()
+    if role == "user":
+        content = message.get("content", "")
+        try:
+            payload = json.loads(content) if isinstance(content, str) else {}
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        feedback = payload.get("runtime_feedback")
+        if not isinstance(feedback, dict):
+            return None
+        return (
+            f"[feedback] {feedback.get('kind', '')}: "
+            f"{feedback.get('summary', '')}"
+        ).rstrip()
+    if role == "assistant" and message.get("content"):
+        return f"[assistant] {message.get('content', '')}"
+    return None
+
+
 class ContextBuilder:
     def __init__(
         self,
@@ -125,6 +172,18 @@ class ContextBuilder:
         if self._turn_input != current_input:
             self.begin_turn(current_input)
         memory = _clip_text(self.memory_store.summary(), min(1_500, self.max_chars // 8))
+        readable_projection = project_conversation(
+            self.session_store.recent_events(),
+            min(2_500, self.max_chars // 5),
+        )
+        recent = _clip_text(
+            "\n".join(
+                rendered
+                for message in readable_projection.messages
+                if (rendered := _render_message(message)) is not None
+            ),
+            min(2_500, self.max_chars // 5),
+        )
         tool_lines = "\n".join(f"- {spec.name} ({spec.risk_level.value}): {spec.description}" for spec in (tools or []))
         tool_lines = _clip_text(tool_lines, min(2_500, self.max_chars // 5))
         user_input = _clip_text(current_input, max(1_000, self.max_chars // 3))
@@ -138,6 +197,7 @@ class ContextBuilder:
             f"Workspace: {workspace}\n"
             f"Tools:\n{tool_lines}\n"
             f"Memory:\n{memory}\n"
+            f"Recent activity:\n{recent}\n"
         )
         state_budget = min(4_500, max(600, self.max_chars // 3))
         initial_projection = project_conversation(self.session_store.events, 0)

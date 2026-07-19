@@ -72,6 +72,21 @@
 - 验证：`uv run pytest` 为 **97 passed**；`uvx pyright` 为 0 errors；实机 `phycode run "hello again"` 无 key 时回退输出 `Echo: hello again`。
 - 合并：应用户要求，`codex/task-10-12` 以 fast-forward 合并到 `main` 并推送 `origin/main`（这批含全部评审修复 + Task 10–12 + 本次 run/chat 收口才首次落到主线）。
 
+## 2026-07-09 真实供应商测试反馈：API key 非 ASCII 崩溃
+
+- 用户填入真实 URL/key 测试失败。查 `<workspace>/.phycode/traces/*.jsonl` 见 `error` 事件：`'ascii' codec can't encode characters in position 7-30`。position 7 = `"Bearer "` 之后，即 `Authorization: Bearer <key>` 头里 key 含非 ASCII/不可见字符（常见于从网页复制 key 带入零宽空格/全角字符）。已用 httpx 复现同款报错。
+- 修复：新增 `_clean_api_key`——录入 key 时 strip 空白、拒绝空值、拒绝非 ASCII（含零宽空格），给出可读提示；`keys set` 与 chat 内 `/key` 均接入。TDD 覆盖非 ASCII 拒绝与前后空白裁剪。验证：`uv run pytest` 全绿、`uvx pyright` 0 errors。
+- 用户侧处理：`phycode keys clear openai-compatible` 后重新 `/key` 干净粘贴（或手打）即可。
+
+## 2026-07-09 真实测试改进：防兜圈子 + 上下文可读化 + 终端可视化
+
+- 真实供应商跑通后观察到模型在只读工具上兜圈子（同一 file.list/workspace.status 反复调用 6–17 次直到额度耗尽），且终端只在最后才显示错误、过程无任何提示。按用户要求做三项改进（均 TDD）：
+  1. 无进展重复调用护栏：`AgentLoop` 统计 `(tool, args)` 签名；成功的可变更工具（write/edit/shell/test 等）视为进展并清零，纯只读重复达 `max_repeated_calls`（默认 5）即以 `repeated_calls` 停机。合法的“编辑→重测”迭代不受影响（重测前有可变更成功会重置）。
+  2. 上下文可读化：`ContextBuilder` 不再把最近事件以 Python dict 的 `repr` 塞进 prompt，改为逐条 `[tool call]/[tool result]/[feedback]/[policy]/[assistant]/[error]` 文本，弱模型更易理解、更省 token。相应更新 `ReactiveLLM` 演示/测试触发词。
+  3. 终端实时可视化：`AgentLoop` 增加 `event_sink` 回调；CLI 用它把 commentary/思考、工具调用、ask/deny 策略、工具结果、错误逐条流式渲染（真终端下带 `thinking...` spinner）。适配器新增解析 `reasoning_content`，对 reasoning 模型显示“thinking”。
+- Windows 终端修复：渲染标记原用 `→/✓/✗` 和 braille spinner，在用户的 GBK(cp936) 控制台 `✓` 直接 `UnicodeEncodeError` 崩溃。改为纯 ASCII 标记（`->`/`[ok]`/`[!]`/`[error]`）+ ASCII `line` spinner，并加 `_safe_print`（遇到不可编码字符降级为 ascii replace）。已在 `PYTHONIOENCODING=gbk` 下复现并验证不再崩溃。
+- 验证：`uv run pytest` 全绿、`uvx pyright` 0 errors；GBK 模拟下活动流正常输出且护栏在第 5 次重复调用时以 `repeated_calls` 停机。
+
 ## 2026-07-18 PRBench 运行时真正重构（Task 14–20）
 
 - 工作流：在 `codex/prbench-runtime-refactor` 隔离 worktree 中使用本地
@@ -360,3 +375,20 @@
   `3e5bee4545cad2138832f06302e9c98bd81f5216` 的最终全量回归为 **579 passed / 14
   skipped**；`uvx pyright` 为 0 errors / 0 warnings；`uv build` 成功；
   `git diff --check` 通过，测试后 upstream source 与当前 worktree 均为 clean。
+
+## 2026-07-18 v0.1.0 发布前主线整合
+
+- 发布前先将 `main@7c4ab1d` 的 6 个真实供应商/CLI 提交合入
+  `codex/prbench-runtime-refactor`，而不是直接从功能分支打 tag。双方在 AgentLoop、
+  context、CLI、demo 与测试共 8 个文件发生内容冲突；按 core 与 CLI 两组由独立
+  subagent 做语义合并，未采用整文件 ours/theirs。
+- core 合并保留 native tool conversation、causal feedback/blocker、stale batch、
+  verifier/provenance，同时接入 main 的只读重复调用保护、可读 activity summary 和
+  脱敏 event sink。CLI 合并保留 profile-aware composition/PRBench 与 main 的
+  `config set`、slash commands、models、quote stripping 和 ASCII-safe live renderer。
+- CLI focused 首跑暴露薄 wrapper 未显式走可注入 `_build_llm`，测试因而意外命中本机
+  已配置 provider 并收到掩码 401；没有读取或记录凭据。修复为先由 CLI `_build_llm`
+  解析，再传入安全 composition，重跑不再访问外部 provider。
+- 固定 clean evaluator source 的合并后全量门禁为 **603 passed / 14 skipped**；
+  `uvx pyright` 为 0 errors / 0 warnings；`uv build` 成功生成 v0.1.0 sdist/wheel；
+  `git diff --cached --check` 通过，evaluator source 仍为 clean。

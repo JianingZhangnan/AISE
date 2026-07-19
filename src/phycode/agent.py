@@ -17,6 +17,8 @@ from phycode.redaction import redact_obj
 from phycode.tools.base import ApprovalHandler, ToolRuntime
 from phycode.trace import TraceStore
 
+EventSink = Callable[[AgentEvent], None]
+
 # Feedback kinds that mean "the same corrective action is not making progress".
 _FAILURE_KINDS = {
     "command_failed",
@@ -98,6 +100,8 @@ class AgentLoop:
         completion_verifier: Callable[[], CompletionVerification] | None = None,
         progress_fingerprint: Callable[[], str] | None = None,
         verify_after_successful_tool: bool = False,
+        max_repeated_calls: int = 5,
+        event_sink: EventSink | None = None,
     ) -> None:
         self.llm = llm
         self.context_builder = context_builder
@@ -113,6 +117,8 @@ class AgentLoop:
         self.completion_verifier = completion_verifier
         self.progress_fingerprint = progress_fingerprint
         self.verify_after_successful_tool = verify_after_successful_tool
+        self.max_repeated_calls = max_repeated_calls
+        self.event_sink = event_sink
 
     def run_once(self, user_input: str) -> AgentRunResult:
         return self.run(user_input)
@@ -135,6 +141,7 @@ class AgentLoop:
         tool_call_count = 0
         current_blocker: _CausalBlocker | None = None
         tool_budget_warning_at = max(1, self.max_tool_calls - 2)
+        call_counts: dict[tuple[str, str], int] = {}
 
         for _step in range(self.max_steps):
             messages = self.context_builder.build(user_input, specs)
@@ -268,7 +275,10 @@ class AgentLoop:
                                 current_blocker,
                             )
                         continue
-                    if action_result_key is not None:
+                    if action_result_key is not None and (
+                        self.completion_verifier is not None
+                        or self.progress_fingerprint is not None
+                    ):
                         try:
                             progress_fingerprint = (
                                 self.progress_fingerprint() if self.progress_fingerprint is not None else None
@@ -331,6 +341,21 @@ class AgentLoop:
                                 self._blocker_reason(current_blocker)
                                 or "artifact_verification_failed",
                             )
+                    if (
+                        self.completion_verifier is None
+                        and self.progress_fingerprint is None
+                    ):
+                        if self._made_progress(normalized, tool_events):
+                            call_counts.clear()
+                        else:
+                            signature = self._call_signature(normalized)
+                            call_counts[signature] = call_counts.get(signature, 0) + 1
+                            if call_counts[signature] >= self.max_repeated_calls:
+                                return AgentRunResult(
+                                    final_text,
+                                    all_events,
+                                    "repeated_calls",
+                                )
         if self.completion_verifier is not None:
             verification = self._verify_completion()
             if verification.ok:
@@ -453,6 +478,35 @@ class AgentLoop:
             ):
                 return True
         return False
+
+    def _made_progress(
+        self,
+        request: AgentEvent,
+        tool_events: list[AgentEvent],
+    ) -> bool:
+        spec = self.tool_runtime.registry.spec_for(
+            str(request.payload.get("tool_name", ""))
+        )
+        if spec is None or not spec.mutates_state:
+            return False
+        return any(
+            item.type == AgentEventType.FEEDBACK_SIGNAL
+            and item.payload.get("kind") == "success"
+            for item in tool_events
+        )
+
+    @staticmethod
+    def _call_signature(request: AgentEvent) -> tuple[str, str]:
+        tool_name = str(request.payload.get("tool_name", ""))
+        try:
+            args_key = json.dumps(
+                request.payload.get("args", {}),
+                sort_keys=True,
+                default=str,
+            )
+        except TypeError:
+            args_key = str(request.payload.get("args", {}))
+        return tool_name, args_key
 
     def _handle_tool_event(self, event: AgentEvent) -> list[AgentEvent]:
         call = ToolCall(
@@ -695,6 +749,8 @@ class AgentLoop:
         safe = projected.model_copy(update={"payload": redact_obj(projected.payload)})
         self.session_store.add_event(safe)
         self.trace_store.append(safe)
+        if self.event_sink is not None:
+            self.event_sink(safe)
         return safe
 
     def _record_and_collect(

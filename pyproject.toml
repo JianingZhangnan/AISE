@@ -2,6 +2,7 @@
 name = "phycode"
 version = "0.1.0"
 description = "CLI-first coding agent harness with policy-aware tool runtime"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "cryptography>=43.0.0",
@@ -39,6 +40,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/phycode"]
+
+# Ship a lean source distribution: only the package, its docs entry, and metadata.
+# Excludes course_resource/*.pptx, PLAN/SPEC/tests, and other repo-only material.
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/phycode",
+    "README.md",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

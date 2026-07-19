@@ -202,6 +202,11 @@ class OpenAICompatibleChatAdapter:
             raise RuntimeError(str(value))
         return value
 
+    def list_models(self) -> list[str]:
+        """Return the model ids the configured provider/token exposes (GET /v1/models)."""
+        response = self.client.models.list()
+        return [getattr(item, "id", str(item)) for item in getattr(response, "data", [])]
+
     def generate(self, messages: list[dict[str, object]], tools: list[ToolSpec]) -> list[AgentEvent]:
         original_to_alias, alias_to_original = _provider_tool_aliases(tools)
         tool_payload = [
@@ -228,6 +233,12 @@ class OpenAICompatibleChatAdapter:
         events: list[AgentEvent] = []
         content = getattr(message, "content", None)
         tool_calls = getattr(message, "tool_calls", None)
+
+        reasoning = getattr(message, "reasoning_content", None)
+        if reasoning:  # reasoning models (e.g. deepseek-reasoner) expose a separate field
+            events.append(
+                AgentEvent(session_id="provider", type=AgentEventType.REASONING_SUMMARY, payload={"text": reasoning})
+            )
 
         if content:
             event_type = AgentEventType.ASSISTANT_COMMENTARY if tool_calls else AgentEventType.ASSISTANT_FINAL

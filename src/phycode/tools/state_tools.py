@@ -4,48 +4,11 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from phycode.config import load_project_config
+from phycode.config import load_project_config, write_config_value
 from phycode.context import MemoryStore
 from phycode.credentials import CredentialStore
 from phycode.models import MemoryCategory, MemoryEntry, ToolCall, ToolResult, ToolRiskLevel, ToolSpec
 from phycode.tools.base import ToolRegistry
-
-# Only non-sensitive scalar configuration may be written by a model-callable tool.
-_ALLOWED_CONFIG_KEYS = {
-    ("agent", "max_steps"),
-    ("test", "command"),
-    ("llm", "provider"),
-    ("llm", "base_url"),
-    ("llm", "model"),
-}
-
-
-def _toml_value(value: Any) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, float):
-        return repr(value)
-    if isinstance(value, list):
-        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
-    if not isinstance(value, str):
-        # dict (subtable) / other shapes cannot be faithfully emitted here; refuse
-        # rather than silently coerce to a string.
-        raise TypeError(f"unsupported TOML value type: {type(value).__name__}")
-    if any(ord(ch) < 0x20 and ch != "\t" for ch in value):
-        raise ValueError("string value contains control characters")
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
-
-
-def _dump_toml(data: dict[str, dict[str, Any]]) -> str:
-    blocks: list[str] = []
-    for section, values in data.items():
-        lines = [f"[{section}]"]
-        lines.extend(f"{key} = {_toml_value(val)}" for key, val in values.items())
-        blocks.append("\n".join(lines))
-    return "\n\n".join(blocks) + "\n"
 
 
 def register_state_tools(
@@ -83,34 +46,10 @@ def register_state_tools(
     def config_write(call: ToolCall) -> ToolResult:
         section = str(call.args["section"])
         key = str(call.args["key"])
-        if (section, key) not in _ALLOWED_CONFIG_KEYS:
-            allowed = ", ".join(f"{s}.{k}" for s, k in sorted(_ALLOWED_CONFIG_KEYS))
-            return ToolResult(
-                tool_call_id=call.id,
-                status="invalid_tool_args",
-                stderr=f"config key {section}.{key} is not writable; allowed: {allowed}",
-            )
-        value: Any = call.args["value"]
-        if key == "max_steps":
-            try:
-                value = int(value)
-            except (TypeError, ValueError):
-                return ToolResult(tool_call_id=call.id, status="invalid_tool_args", stderr="max_steps must be an integer")
-        config_path = root / "phycode.toml"
-        # Render to a string first; only write if the whole file serializes cleanly,
-        # so a bad value or an un-serializable existing file never corrupts config.
         try:
-            existing = tomllib.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
-            data: dict[str, dict[str, Any]] = {}
-            for existing_key, existing_value in existing.items():
-                if not isinstance(existing_value, dict):
-                    raise ValueError(f"cannot rewrite phycode.toml: top-level key {existing_key!r} is not a table")
-                data[existing_key] = dict(existing_value)
-            data.setdefault(section, {})[key] = value
-            rendered = _dump_toml(data)
+            write_config_value(root, section, key, call.args["value"])
         except (ValueError, TypeError, tomllib.TOMLDecodeError) as exc:
             return ToolResult(tool_call_id=call.id, status="invalid_tool_args", stderr=str(exc))
-        config_path.write_text(rendered, encoding="utf-8")
         return ToolResult(tool_call_id=call.id, status="ok", stdout=f"set {section}.{key}")
 
     def keys_status(call: ToolCall) -> ToolResult:
