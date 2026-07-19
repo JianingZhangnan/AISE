@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
+from threading import Lock
 from typing import Literal
+
+from prompt_toolkit.completion import CompleteEvent, Completer, Completion
+from prompt_toolkit.document import Document
 
 
 class SlashAction(str, Enum):
@@ -114,3 +119,111 @@ def render_slash_help() -> str:
         f"  {spec.usage:<{width}}  {spec.description}" for spec in SLASH_COMMANDS
     )
     return "\n".join(lines)
+
+
+class SessionModelCatalog:
+    def __init__(self, loader: Callable[[], list[str]]) -> None:
+        self._loader = loader
+        self._lock = Lock()
+        self._loaded = False
+        self._models: tuple[str, ...] = ()
+        self.status = ""
+
+    def get_models(self) -> tuple[str, ...]:
+        with self._lock:
+            if self._loaded:
+                return self._models
+            try:
+                values = self._loader()
+            except Exception:
+                self._models = ()
+                self.status = "模型列表暂不可用；可以手工输入模型名"
+            else:
+                self._models = tuple(
+                    dict.fromkeys(value.strip() for value in values if value.strip())
+                )
+                self.status = "" if self._models else "未返回模型；可以手工输入模型名"
+            self._loaded = True
+            return self._models
+
+    def refresh(self) -> None:
+        with self._lock:
+            self._loaded = False
+            self._models = ()
+            self.status = ""
+
+
+def _subsequence_score(query: str, candidate: str) -> tuple[int, int, int] | None:
+    query = query.casefold()
+    candidate = candidate.casefold()
+    if not query:
+        return (0, 0, 0)
+    if candidate.startswith(query):
+        return (0, 0, len(candidate))
+    positions: list[int] = []
+    start = 0
+    for character in query:
+        position = candidate.find(character, start)
+        if position < 0:
+            return None
+        positions.append(position)
+        start = position + 1
+    return (1, positions[-1] - positions[0], positions[0])
+
+
+def _ranked_commands(query: str) -> list[SlashCommandSpec]:
+    ranked: list[tuple[tuple[int, int, int, int, int], SlashCommandSpec]] = []
+    for index, spec in enumerate(SLASH_COMMANDS):
+        canonical = _subsequence_score(query, spec.name)
+        aliases = [
+            score
+            for alias in spec.aliases
+            if (score := _subsequence_score(query, alias)) is not None
+        ]
+        candidates: list[tuple[int, tuple[int, int, int]]] = []
+        if canonical is not None:
+            candidates.append((0 if canonical[0] == 0 else 2, canonical))
+        candidates.extend((1 if score[0] == 0 else 3, score) for score in aliases)
+        if candidates:
+            source_rank, score = min(candidates)
+            ranked.append(((source_rank, *score, index), spec))
+    return [spec for _, spec in sorted(ranked, key=lambda item: item[0])]
+
+
+class SlashCompleter(Completer):
+    def __init__(self, catalog: SessionModelCatalog) -> None:
+        self.catalog = catalog
+
+    def get_completions(
+        self, document: Document, complete_event: CompleteEvent
+    ) -> Iterator[Completion]:
+        text = document.text_before_cursor
+        if not text.startswith("/") or "\n" in text:
+            return
+        body = text[1:]
+        if " " not in body:
+            for spec in _ranked_commands(body)[:8]:
+                insertion = f"/{spec.name}{' ' if spec.argument else ''}"
+                yield Completion(
+                    insertion,
+                    start_position=-len(text),
+                    display=spec.usage,
+                    display_meta=spec.description,
+                )
+            return
+        raw_name, partial = body.split(" ", 1)
+        spec = resolve_slash_command(raw_name)
+        if not spec or not spec.argument or spec.argument.completion_source != "models":
+            return
+        ranked_models = []
+        for index, model in enumerate(self.catalog.get_models()):
+            score = _subsequence_score(partial, model)
+            if score is not None:
+                ranked_models.append(((*score, index), model))
+        for _, model in sorted(ranked_models)[:8]:
+            yield Completion(
+                model,
+                start_position=-len(partial),
+                display=model,
+                display_meta="可用模型",
+            )
