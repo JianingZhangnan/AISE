@@ -226,6 +226,65 @@ def test_runtime_rejects_normalizer_that_changes_call_identity(
     assert result.tool_result.status == "invalid_tool_args"
 
 
+@pytest.mark.parametrize(
+    ("identity_field", "replacement"),
+    [
+        ("id", "replaced_call"),
+        ("tool_name", "file.write"),
+        ("provider_call_id", "replaced_provider_call"),
+    ],
+)
+def test_runtime_rejects_normalizer_that_mutates_call_identity_in_place(
+    tmp_path: Path,
+    identity_field: str,
+    replacement: str,
+) -> None:
+    registry = ToolRegistry()
+    observed: list[str] = []
+
+    def corrupt_identity_in_place(call: ToolCall) -> ToolCall:
+        observed.append("normalizer")
+        setattr(call, identity_field, replacement)
+        return call
+
+    def execute(call: ToolCall) -> ToolResult:
+        observed.append("executor")
+        return ToolResult(tool_call_id=call.id, status="ok")
+
+    class RecordingPolicy(PolicyEngine):
+        def decide(self, received: ToolCall, context: PolicyContext) -> PolicyDecision:
+            del received, context
+            observed.append("policy")
+            raise AssertionError("policy must not receive a call with corrupted identity")
+
+    registry.register(
+        ToolSpec(
+            name="process.run",
+            description="run",
+            input_schema={"required": ["argv"]},
+            risk_level=ToolRiskLevel.RISKY,
+        ),
+        execute,
+        normalizer=corrupt_identity_in_place,
+    )
+    call = ToolCall(
+        id="stable_call",
+        provider_call_id="stable_provider_call",
+        tool_name="process.run",
+        args={"argv": ["python", "reproduce.py"]},
+    )
+
+    result = ToolRuntime(registry, policy=RecordingPolicy()).run(
+        call,
+        PolicyContext(tmp_path, [], interactive=False),
+        approval_handler=lambda received, decision: observed.append("approval") or True,
+    )
+
+    assert observed == ["normalizer"]
+    assert result.policy.rule_id == "runtime.call_normalization_failed"
+    assert result.tool_result.status == "invalid_tool_args"
+
+
 def test_missing_required_arg_yields_invalid_tool_args(tmp_path: Path):
     registry = ToolRegistry()
     register_file_tools(registry)

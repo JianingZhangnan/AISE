@@ -136,13 +136,19 @@ class ToolRuntime:
         return ToolRuntimeResult(decision, tool_result)
 
     def _normalize_call(self, call: ToolCall, context: PolicyContext) -> ToolCall:
+        # Identity is immutable across normalization. Normalizers should return a
+        # new ToolCall for argument changes; in-place args mutation is not checked here.
+        original_identity = (call.id, call.tool_name, call.provider_call_id)
         normalizer = self.registry.normalizer_for(call.tool_name)
         normalized_call = normalizer(call) if normalizer is not None else call
         if (
             not isinstance(normalized_call, ToolCall)
-            or normalized_call.id != call.id
-            or normalized_call.tool_name != call.tool_name
-            or normalized_call.provider_call_id != call.provider_call_id
+            or (
+                normalized_call.id,
+                normalized_call.tool_name,
+                normalized_call.provider_call_id,
+            )
+            != original_identity
         ):
             raise ValueError("tool call normalizer changed call identity")
         return self._normalize_call_paths(normalized_call, context)
