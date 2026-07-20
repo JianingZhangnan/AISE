@@ -1715,7 +1715,7 @@ def test_official_phycode_controls_reject_missing_contract_without_fallback(
         "expected_outputs": {"code": ["reproduce.py"], "data": ["result.csv"]},
     }
 
-    with pytest.raises(RuntimeError, match="explicit PhyCode contract"):
+    with pytest.raises(RuntimeError, match="Explicit PhyCode contract"):
         copy_controls(  # type: ignore[operator]
             task_config,
             str(task_dir),
@@ -2275,7 +2275,12 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
                 return types.SimpleNamespace(st_mode=stat.S_IFLNK | 0o777)
             return original_lstat(path)
 
-    def guarded_open(path: str | os.PathLike[str], mode: str = "r") -> object:
+    def guarded_open(
+        path: str | os.PathLike[str],
+        mode: str = "r",
+        *args: object,
+        **kwargs: object,
+    ) -> object:
         unsafe_path = (
             os.fspath(path) == str(report_path)
             and outcome in {"report_symlink", "report_outside"}
@@ -2285,7 +2290,7 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
         )
         if unsafe_path:
             raise AssertionError("untrusted report must not be opened")
-        return original_open(path, mode)
+        return original_open(path, mode, *args, **kwargs)  # type: ignore[call-overload]
 
     launcher_path = patched_official_evaluator / "src/launcher.py"
     report_os = ReportOsProxy()

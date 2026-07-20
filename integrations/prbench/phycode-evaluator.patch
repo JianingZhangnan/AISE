@@ -578,6 +578,9 @@ index c705de8..62b1e15 100644
 @@ -362 +543 @@ async def launch_evaluation(
 -        return
 +        return False
+@@ -364 +545 @@ async def launch_evaluation(
+-    with open(task_yaml, "r") as f:
++    with open(task_yaml, "r", encoding="utf-8") as f:
 @@ -374,0 +556,10 @@ async def launch_evaluation(
 +    report_path = os.path.join(workspace_dir, "eval_logs", "eval_report.json")
 +    run_result_path = os.path.join(
@@ -658,6 +661,9 @@ index c705de8..62b1e15 100644
 +            send_succeeded and report_valid and phycode_succeeded
 +        )
 +
+@@ -505 +733 @@ async def launch_evaluation(
+-                with open(os.path.join(eval_logs_dir, "docker_container.log"), "w") as f:
++                with open(os.path.join(eval_logs_dir, "docker_container.log"), "w", encoding="utf-8") as f:
 @@ -534,0 +763 @@ async def launch_evaluation(
 +    return evaluation_succeeded
 @@ -558 +787 @@ async def batch_evaluate(
