@@ -290,36 +290,142 @@ def test_process_docs_record_full_public_result_without_artifacts() -> None:
     )
 
 
-def test_process_docs_keep_branch_review_pending_and_close_task35_review() -> None:
-    documents = {
-        name: re.sub(r"\s+", " ", _read(name))
-        for name in ("PLAN.md", "SPEC_PROCESS.md", "AGENT_LOG.md")
+def _normalized_region(
+    document: str,
+    start_marker: str,
+    end_marker: str | None,
+) -> str:
+    start = document.index(start_marker)
+    end = (
+        document.index(end_marker, start + len(start_marker))
+        if end_marker is not None
+        else len(document)
+    )
+    return re.sub(r"\s+", " ", document[start:end])
+
+
+def _process_doc_state_problems(documents: dict[str, str]) -> list[str]:
+    task35_regions = {
+        "PLAN.md Task 35": _normalized_region(
+            documents["PLAN.md"],
+            "- [x] Task 35：",
+            "- [x] Task 34B / 34C：",
+        ),
+        "SPEC_PROCESS.md 第四轮": _normalized_region(
+            documents["SPEC_PROCESS.md"],
+            "### 第四轮：Task 35",
+            "### 第五轮：",
+        ),
+        "AGENT_LOG.md Task 35": _normalized_region(
+            documents["AGENT_LOG.md"],
+            "- Task 35 新鲜实现 subagent",
+            "## 2026-07-19 Task 36：",
+        ),
+    }
+    task36_regions = {
+        "PLAN.md Task 36": _normalized_region(
+            documents["PLAN.md"],
+            "- [x] Task 36A：",
+            "### task_white_1993 完整公开任务真实验收",
+        ),
+        "SPEC_PROCESS.md 第五轮": _normalized_region(
+            documents["SPEC_PROCESS.md"],
+            "### 第五轮：",
+            "## 仓库平台记录",
+        ),
+        "AGENT_LOG.md Task 36": _normalized_region(
+            documents["AGENT_LOG.md"],
+            "## 2026-07-19 Task 36：",
+            None,
+        ),
     }
     problems: list[str] = []
-    plan = documents["PLAN.md"]
-    if "- [x] Task 36A：脱敏结果记录" not in plan:
-        problems.append("PLAN.md does not limit completed work to Task 36A")
-    if "- [ ] Task 36B：whole-branch review 与最终复验（pending）" not in plan:
-        problems.append("PLAN.md does not keep Task 36B pending")
+    base = "7547db2a9ed8db98cb6b86d6ea95c186e30192d7"
+    head = "0c0b5b0f6e322e1c6a8e0f57d23716f24a1ec23f"
+    clean = "Review clean，Critical / Important / Minor 为 0 / 0 / 0"
+    stale_phrases = (
+        "修复后独立复审尚未发生",
+        "修复后复审仍待执行",
+        "修复后复审尚未发生",
+    )
+    current_marker = "Task 35 修复后独立复审完成"
+    for name, region in task35_regions.items():
+        if current_marker not in region:
+            problems.append(f"{name} missing {current_marker!r}")
+            continue
+        current_status = region[region.index(current_marker) :]
+        for phrase in (
+            base,
+            head,
+            clean,
+        ):
+            if phrase not in current_status:
+                problems.append(f"{name} missing {phrase!r}")
+        for stale in stale_phrases:
+            if stale in current_status:
+                problems.append(f"{name} retains stale status {stale!r}")
 
-    for name, document in documents.items():
+    plan_task36 = task36_regions["PLAN.md Task 36"]
+    if "- [x] Task 36A：脱敏结果记录" not in plan_task36:
+        problems.append("PLAN.md Task 36 does not complete only Task 36A")
+    if (
+        "- [ ] Task 36B：whole-branch review 与最终复验（pending）"
+        not in plan_task36
+    ):
+        problems.append("PLAN.md Task 36 does not keep Task 36B pending")
+    for name, region in task36_regions.items():
         for phrase in (
             "Task 36 脱敏结果记录已完成",
             "Task 36 whole-branch review 与最终复验仍为 pending",
-            "Task 35 修复后独立复审完成",
-            "Review clean，Critical / Important / Minor 为 0 / 0 / 0",
         ):
-            if phrase not in document:
+            if phrase not in region:
                 problems.append(f"{name} missing {phrase!r}")
-        for stale in (
-            "修复后独立复审尚未发生",
-            "修复后复审仍待执行",
-            "修复后复审尚未发生",
-        ):
-            if stale in document:
-                problems.append(f"{name} retains stale status {stale!r}")
 
-    assert not problems, problems
+    return problems
+
+
+def test_process_docs_keep_branch_review_pending_and_close_task35_review() -> None:
+    documents = {
+        name: _read(name)
+        for name in ("PLAN.md", "SPEC_PROCESS.md", "AGENT_LOG.md")
+    }
+    assert not _process_doc_state_problems(documents)
+
+
+def test_process_docs_reject_task35_clean_owned_only_by_task34() -> None:
+    documents = {
+        name: _read(name)
+        for name in ("PLAN.md", "SPEC_PROCESS.md", "AGENT_LOG.md")
+    }
+    clean = "Review clean，Critical / Important / Minor 为 0 / 0 / 0"
+    mutated_plan = documents["PLAN.md"].replace(clean, "Review pending")
+    assert "- [x] Task 34：" in mutated_plan
+    mutated_plan = mutated_plan.replace(
+        "- [x] Task 34：",
+        f"- [x] Task 34：{clean}；",
+        1,
+    )
+    documents["PLAN.md"] = mutated_plan
+
+    assert _process_doc_state_problems(documents) == [
+        f"PLAN.md Task 35 missing {clean!r}"
+    ]
+
+
+def test_process_docs_allow_historical_pending_before_current_status() -> None:
+    documents = {
+        name: _read(name)
+        for name in ("PLAN.md", "SPEC_PROCESS.md", "AGENT_LOG.md")
+    }
+    marker = "- [x] Task 35："
+    assert marker in documents["PLAN.md"]
+    documents["PLAN.md"] = documents["PLAN.md"].replace(
+        marker,
+        f"{marker}修复后复审仍待执行（历史状态）；",
+        1,
+    )
+
+    assert not _process_doc_state_problems(documents)
 
 
 def test_public_smoke_script_has_closed_credential_and_approval_contract():
