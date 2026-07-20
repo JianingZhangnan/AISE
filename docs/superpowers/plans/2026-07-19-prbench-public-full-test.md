@@ -738,7 +738,7 @@ uvx pyright
 另对全新 fixed clone 执行：
 
 ```powershell
-uv run python integrations/prbench/apply_adapter.py <fresh-fixed-clone> dist/phycode-0.1.2-py3-none-any.whl
+uv run python integrations/prbench/apply_adapter.py <fresh-fixed-clone> dist/phycode-0.1.3-py3-none-any.whl
 uv run --with 'a2a-sdk[http-server]==0.3.8' python <fresh-fixed-clone>/main.py launch --help
 ```
 

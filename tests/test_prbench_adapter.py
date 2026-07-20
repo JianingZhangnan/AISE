@@ -78,7 +78,7 @@ def _configured_adapter_fixture(
         "+adapted\n",
         encoding="utf-8",
     )
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"new-wheel")
     monkeypatch.setattr(adapter_module, "EXPECTED_EVALUATOR_COMMIT", head)
     monkeypatch.setattr(adapter_module, "PATCH_PATH", patch_path)
@@ -127,7 +127,7 @@ def patched_official_evaluator(tmp_path: Path) -> Path:
         capture_output=True,
         text=True,
     )
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"dynamic-adapter-probe")
     apply_adapter(repository, wheel)
     return repository
@@ -520,7 +520,7 @@ def test_adapter_rejects_tracked_changes_at_expected_commit(
 ) -> None:
     head = _commit_file(tmp_path, "README.md", "base\n")
     (tmp_path / "README.md").write_text("locally changed\n", encoding="utf-8")
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"wheel")
     monkeypatch.setattr(adapter_module, "EXPECTED_EVALUATOR_COMMIT", head)
 
@@ -655,7 +655,7 @@ def test_adapter_checks_applies_and_copies_wheel(
         "+adapted\n",
         encoding="utf-8",
     )
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"wheel-bytes")
     monkeypatch.setattr(adapter_module, "EXPECTED_EVALUATOR_COMMIT", head)
     monkeypatch.setattr(adapter_module, "PATCH_PATH", patch_path)
@@ -675,7 +675,7 @@ def test_adapter_subprocess_errors_are_sanitized(
     secret = "sensitive-provider-value"
     invalid_patch = tmp_path / "invalid.patch"
     invalid_patch.write_text(secret, encoding="utf-8")
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"wheel")
     monkeypatch.setattr(adapter_module, "EXPECTED_EVALUATOR_COMMIT", head)
     monkeypatch.setattr(adapter_module, "PATCH_PATH", invalid_patch)
@@ -704,7 +704,7 @@ def test_adapter_rolls_back_when_wheel_staging_fails(
         "+adapted\n",
         encoding="utf-8",
     )
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"wheel")
     monkeypatch.setattr(adapter_module, "EXPECTED_EVALUATOR_COMMIT", head)
     monkeypatch.setattr(adapter_module, "PATCH_PATH", patch_path)
@@ -739,7 +739,7 @@ def test_adapter_reverses_patch_when_atomic_wheel_publish_fails(
         "+adapted\n",
         encoding="utf-8",
     )
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"wheel")
     monkeypatch.setattr(adapter_module, "EXPECTED_EVALUATOR_COMMIT", head)
     monkeypatch.setattr(adapter_module, "PATCH_PATH", patch_path)
@@ -3807,7 +3807,7 @@ def test_public_smoke_stops_after_first_evaluator_failure_with_fake_uv(
         fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
     evaluator = tmp_path / "evaluator"
     evaluator.mkdir()
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"fake wheel")
     wrapper = tmp_path / "invoke-smoke.ps1"
     wrapper.write_text(
@@ -4786,7 +4786,7 @@ def test_patch_uses_pinned_uv_without_pip_bootstrap() -> None:
     )
 
     assert (
-        "uv pip install --system /tmp/phycode-0.1.2-py3-none-any.whl" in added
+        "uv pip install --system /tmp/phycode-0.1.3-py3-none-any.whl" in added
     )
     assert '"/tmp/phycode.whl"' not in added
     assert "python -m pip install" not in added

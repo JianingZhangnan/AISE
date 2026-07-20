@@ -68,6 +68,21 @@ def test_prbench_wheel_contract_matches_project_version():
     assert actual_filenames == dict.fromkeys(actual_filenames, wheel_filename)
 
 
+def test_sdist_excludes_local_runtime_and_test_artifact_trees() -> None:
+    project = tomllib.loads(_read("pyproject.toml"))
+    exclusions = set(
+        project["tool"]["hatch"]["build"]["targets"]["sdist"].get("exclude", [])
+    )
+
+    assert {
+        "/.superpowers",
+        "/.worktrees",
+        "/.venv",
+        "/.pytest_cache",
+        "/dist",
+    } <= exclusions
+
+
 def test_readme_documents_all_user_facing_commands():
     readme = _read("README.md")
     required = [
@@ -169,7 +184,7 @@ def test_docs_define_full_public_task_and_local_artifact_boundary() -> None:
         "完整公开任务",
         "不是隐藏 holdout",
         "3e5bee4545cad2138832f06302e9c98bd81f5216",
-        "phycode-0.1.2-py3-none-any.whl",
+        "phycode-0.1.3-py3-none-any.whl",
         "pwsh -NoProfile -File",
         "powershell.exe -NoProfile -ExecutionPolicy Bypass -File",
         "run_public_full.ps1",
@@ -731,7 +746,7 @@ def test_public_full_restores_environment_and_passes_exact_fake_uv_arguments(
 
     evaluator = tmp_path / "evaluator"
     evaluator.mkdir()
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"fake wheel")
     wrapper = tmp_path / "invoke-full.ps1"
     wrapper.write_text(
@@ -939,7 +954,7 @@ def test_public_full_rejects_missing_provider_before_uv(
 
     evaluator = tmp_path / "evaluator"
     evaluator.mkdir()
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"fake wheel")
     environment = os.environ.copy()
     for name in ("PHYCODE_API_KEY", "PHYCODE_BASE_URL", "PHYCODE_MODEL"):
@@ -1013,7 +1028,7 @@ def test_public_smoke_restores_or_removes_opencode_environment_with_fake_uv(
         fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
     evaluator = tmp_path / "evaluator"
     evaluator.mkdir()
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"fake wheel")
     wrapper = tmp_path / "invoke-smoke.ps1"
     wrapper.write_text(

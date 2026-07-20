@@ -97,7 +97,7 @@ uv run phycode prbench run `
 ```powershell
 .\integrations\prbench\run_public_smoke.ps1 `
   -EvaluatorRoot D:\path\to\PRBench-Eval-Handson `
-  -WheelPath D:\path\to\AISE\dist\phycode-0.1.2-py3-none-any.whl `
+  -WheelPath D:\path\to\AISE\dist\phycode-0.1.3-py3-none-any.whl `
   -TaskIds aaatest_helloworld,bbbtest_alphabet
 ```
 
@@ -176,12 +176,12 @@ evaluator 结果；不能用确定性 GREEN、adapter apply 或部分评分替�
 uv build
 pwsh -NoProfile -File .\integrations\prbench\run_public_full.ps1 `
   -EvaluatorRoot D:\path\to\PRBench-Eval-Handson `
-  -WheelPath D:\path\to\AISE\dist\phycode-0.1.2-py3-none-any.whl
+  -WheelPath D:\path\to\AISE\dist\phycode-0.1.3-py3-none-any.whl
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
   .\integrations\prbench\run_public_full.ps1 `
   -EvaluatorRoot D:\path\to\PRBench-Eval-Handson `
-  -WheelPath D:\path\to\AISE\dist\phycode-0.1.2-py3-none-any.whl
+  -WheelPath D:\path\to\AISE\dist\phycode-0.1.3-py3-none-any.whl
 ```
 
 `run_public_full.ps1` 固定只运行 `task_white_1993`，显式传入最多 `50` 次工具调用、
