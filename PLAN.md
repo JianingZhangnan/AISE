@@ -2602,7 +2602,7 @@ Task 32 → Task 33 → Task 34 → Task 35 → Task 34B/34C/34D/34E → 主 age
   用户把上限扩展到五次后，本次继续在 Task 36A 范围内补齐最终五次未成功验收、review
   与泄漏扫描，只修改过程文档及其合同测试。
 - [x] Task 36B：whole-branch review 与最终复验。Task 36 whole-branch review 与最终复验已完成；
-  commit：本次文档提交。最终审查范围为
+  commit：`7c623d7`。最终审查范围为
   `588aa08ab56f929b4ac61895227574306a16ee13..50f1089f47eda141b8715bf937ecd318c49d2a48`，
   共 35 commits / 30 files，结论为 Critical / Important / Minor = 0 / 0 / 3，Ready。
   Task 36 整体按过程门禁完成，但五次正式尝试仍未跑通，绝不改写为成功。
