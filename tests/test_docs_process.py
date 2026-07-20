@@ -124,6 +124,34 @@ def test_readme_documents_install_layout_limits_and_licensing():
     assert project.get("license") == "MIT"
 
 
+def test_pypi_readme_is_user_focused_with_detailed_install():
+    project = tomllib.loads(_read("pyproject.toml"))["project"]
+    assert project.get("readme") == "README_PYPI.md"
+    pypi_readme = _read("README_PYPI.md")
+    for banned in ("PRBench", "prbench", "GAIA", "task_white_1993", "evaluator"):
+        assert banned not in pypi_readme, banned
+    for required in (
+        "## 安装",
+        "uvx phycode version",
+        "uv tool install phycode",
+        "python -m venv",
+        "pip install phycode",
+        "pip install -U phycode",
+        "phycode-<version>-py3-none-any.whl",
+        "git clone https://github.com/JianingZhangnan/AISE",
+        "## 配置真实供应商",
+        "keys set openai-compatible",
+    ):
+        assert required in pypi_readme, required
+    readme = _read("README.md")
+    for required in (
+        "uv tool install phycode",
+        "python -m venv",
+        "pip install -U phycode",
+    ):
+        assert required in readme, required
+
+
 def test_plan_marks_tasks_10_to_12_complete_and_records_scope():
     plan = _read("PLAN.md")
     assert "### Task 10: CLI Run、Chat、Config、Keys 和工具列表 - ✅" in plan
