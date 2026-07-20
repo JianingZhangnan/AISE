@@ -130,6 +130,7 @@ def build_agent(
     trace_dir: Path | None = None,
     runtime_settings: AgentRuntimeSettings | None = None,
     max_context_chars: int | None = None,
+    max_discovery_tool_calls: int | None = None,
 ) -> AgentLoop:
     """Compose an agent loop from explicit runtime dependencies or normal project config."""
     spec = profile_spec(profile)
@@ -199,6 +200,7 @@ def build_agent(
         completion_verifier=completion_verifier,
         progress_fingerprint=progress_fingerprint,
         verify_after_successful_tool=verify_after_successful_tool,
+        max_discovery_tool_calls=max_discovery_tool_calls,
     )
 
 

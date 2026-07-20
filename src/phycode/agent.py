@@ -11,7 +11,14 @@ from phycode.context import ContextBuilder, SessionStore
 from phycode.event_projection import project_agent_event
 from phycode.feedback import artifact_verification_feedback, classify_feedback
 from phycode.llm import LLMClient
-from phycode.models import AgentEvent, AgentEventType, ToolCall, ToolResult
+from phycode.models import (
+    AgentEvent,
+    AgentEventType,
+    PolicyAction,
+    PolicyDecision,
+    ToolCall,
+    ToolResult,
+)
 from phycode.policy import PolicyContext
 from phycode.redaction import redact_obj
 from phycode.tools.base import ApprovalHandler, ToolRuntime
@@ -36,6 +43,16 @@ _TERMINAL_EVENT_REASONS = {
     AgentEventType.INCOMPLETE: "incomplete",
     AgentEventType.USER_INTERRUPT: "user_interrupt",
 }
+_DISCOVERY_TOOL_NAMES = frozenset(
+    {
+        "file.read",
+        "file.inspect",
+        "file.list",
+        "search.glob",
+        "search.grep",
+        "workspace.status",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -101,8 +118,15 @@ class AgentLoop:
         progress_fingerprint: Callable[[], str] | None = None,
         verify_after_successful_tool: bool = False,
         max_repeated_calls: int = 5,
+        max_discovery_tool_calls: int | None = None,
         event_sink: EventSink | None = None,
     ) -> None:
+        if max_discovery_tool_calls is not None and (
+            isinstance(max_discovery_tool_calls, bool)
+            or not isinstance(max_discovery_tool_calls, int)
+            or max_discovery_tool_calls < 0
+        ):
+            raise ValueError("max_discovery_tool_calls must be a non-negative integer or None")
         self.llm = llm
         self.context_builder = context_builder
         self.tool_runtime = tool_runtime
@@ -118,6 +142,7 @@ class AgentLoop:
         self.progress_fingerprint = progress_fingerprint
         self.verify_after_successful_tool = verify_after_successful_tool
         self.max_repeated_calls = max_repeated_calls
+        self.max_discovery_tool_calls = max_discovery_tool_calls
         self.event_sink = event_sink
 
     def run_once(self, user_input: str) -> AgentRunResult:
@@ -139,6 +164,7 @@ class AgentLoop:
         last_progress_fingerprint: str | None = None
         progress_epoch_signatures: list[str] = []
         tool_call_count = 0
+        discovery_tool_call_count = 0
         current_blocker: _CausalBlocker | None = None
         tool_budget_warning_at = max(1, self.max_tool_calls - 2)
         call_counts: dict[tuple[str, str], int] = {}
@@ -199,11 +225,17 @@ class AgentLoop:
                     tool_call_count += 1
                     action_identity = self._action_identity(normalized)
                     skipped_by_barrier = feedback_barrier
-                    tool_events = (
-                        self._skip_stale_tool_event(normalized)
-                        if skipped_by_barrier
-                        else self._handle_tool_event(normalized)
-                    )
+                    if skipped_by_barrier:
+                        tool_events = self._skip_stale_tool_event(normalized)
+                    elif self._discovery_budget_exhausted(
+                        normalized,
+                        discovery_tool_call_count,
+                    ):
+                        tool_events = self._deny_discovery_tool_event(normalized)
+                    else:
+                        if self._is_discovery_tool_event(normalized):
+                            discovery_tool_call_count += 1
+                        tool_events = self._handle_tool_event(normalized)
                     all_events.extend(tool_events)
                     current_blocker = self._updated_blocker(
                         current_blocker,
@@ -541,6 +573,70 @@ class AgentLoop:
         ]
         return [self._record(item) for item in [policy_event, result_event, *feedback_events]]
 
+    @staticmethod
+    def _is_discovery_tool_event(event: AgentEvent) -> bool:
+        return str(event.payload.get("tool_name", "")) in _DISCOVERY_TOOL_NAMES
+
+    def _discovery_budget_exhausted(
+        self,
+        event: AgentEvent,
+        discovery_tool_call_count: int,
+    ) -> bool:
+        return (
+            self.max_discovery_tool_calls is not None
+            and self._is_discovery_tool_event(event)
+            and discovery_tool_call_count >= self.max_discovery_tool_calls
+        )
+
+    def _deny_discovery_tool_event(self, event: AgentEvent) -> list[AgentEvent]:
+        tool_name = str(event.payload.get("tool_name", ""))
+        tool_call_id = str(event.payload.get("provider_call_id") or event.id)
+        reason = (
+            "PRBench discovery tool-call budget exhausted; switch to production tools"
+        )
+        decision = PolicyDecision(
+            tool_call_id=tool_call_id,
+            decision=PolicyAction.DENY,
+            rule_id="runtime.discovery_budget",
+            reason=reason,
+            requires_user=False,
+        )
+        result = ToolResult(
+            tool_call_id=tool_call_id,
+            status="policy_blocked",
+            stderr=reason,
+        )
+        policy_event = self._new_event(
+            AgentEventType.POLICY_DECISION,
+            decision.model_dump(mode="json"),
+        )
+        result_event = self._new_event(
+            AgentEventType.TOOL_CALL_OUTPUT,
+            result.model_dump(mode="json"),
+        )
+        feedback_event = self._new_event(
+            AgentEventType.FEEDBACK_SIGNAL,
+            {
+                "kind": "policy_blocked",
+                "cause": f"{tool_name}:runtime.discovery_budget:policy_blocked",
+                "summary": reason,
+                "evidence": {
+                    "tool_name": tool_name,
+                    "used": self.max_discovery_tool_calls,
+                    "limit": self.max_discovery_tool_calls,
+                },
+                "retryable": True,
+                "suggested_next_step": (
+                    "Use file.write or file.edit to implement required artifacts, then "
+                    "request process.run for each execution entrypoint"
+                ),
+            },
+        )
+        return [
+            self._record(item)
+            for item in (policy_event, result_event, feedback_event)
+        ]
+
     def _skip_stale_tool_event(self, event: AgentEvent) -> list[AgentEvent]:
         result = ToolResult(
             tool_call_id=str(event.payload.get("provider_call_id") or event.id),
@@ -617,6 +713,8 @@ class AgentLoop:
         )
         rule_id = str(policy.payload.get("rule_id", "unknown")) if policy is not None else "unknown"
         if status == "policy_blocked":
+            if rule_id == "runtime.discovery_budget":
+                return current
             return _CausalBlocker("policy_blocked", rule_id, action)
         if status == "policy_requires_approval":
             return _CausalBlocker("approval_required", rule_id, action)

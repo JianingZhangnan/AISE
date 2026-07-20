@@ -912,16 +912,36 @@ def test_runner_constructs_provider_only_from_phycode_environment(
 
 def test_task_brief_lists_contract_without_inlining_public_documents(tmp_path: Path) -> None:
     from phycode.prbench_eval import build_prbench_task_brief
-    from phycode.prbench_contract import TaskContract
+    from phycode.prbench_contract import ArtifactConstraint, TaskContract
 
     contract = TaskContract(
         instruction_file="instruction.md",
         paper_file="white1993.md",
-        expected_files=tuple(f"reproduction/file_{index}.py" for index in range(12)),
+        expected_files=(
+            *(f"reproduction/file_{index}.py" for index in range(12)),
+            "data/summary.csv",
+            "data/exact.csv",
+        ),
         execution_entrypoints=("reproduction/file_11.py",),
+        constraints=(
+            ArtifactConstraint(
+                path="data/summary.csv",
+                csv_header=("name", "value"),
+                csv_data_row_count=8,
+            ),
+            ArtifactConstraint(
+                path="data/exact.csv",
+                csv_header=("label",),
+                csv_rows=(("public",), ("evidence",)),
+            ),
+        ),
     )
 
-    brief = build_prbench_task_brief(contract)
+    brief = build_prbench_task_brief(
+        contract,
+        max_tool_calls=50,
+        max_discovery_tool_calls=10,
+    )
 
     assert len(brief) < 4_000
     assert "instruction.md" in brief
@@ -930,6 +950,83 @@ def test_task_brief_lists_contract_without_inlining_public_documents(tmp_path: P
     assert "reproduction/file_11.py" in brief
     assert "file.read" in brief
     assert "search.grep" in brief
+    assert "data/summary.csv" in brief
+    assert 'exact header: ["name", "value"]' in brief
+    assert "exact data row count: 8" in brief
+    assert 'exact rows: [["public"], ["evidence"]]' in brief
+    assert "Total tool-call budget: 50" in brief
+    assert "Minimum production calls: 13" in brief
+    assert "non-constraint artifact writes" in brief
+    assert "entrypoint process.run" in brief
+    assert "Discovery call cap: 10" in brief
+    assert "Read full instruction" in brief
+    assert "next_offset" in brief
+    assert "characters, not lines" in brief
+    assert "Do not overlap" in brief
+    assert "Do not exhaustively page through the paper" in brief
+
+
+def test_full_public_contract_reserves_production_budget_and_wires_same_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import phycode.prbench_eval as prbench_eval
+    from phycode.prbench_contract import ArtifactConstraint, TaskContract
+
+    source_files = tuple(f"reproduction/source_{index}.py" for index in range(13))
+    entrypoints = source_files[-7:]
+    csv_files = tuple(f"data/figure_{index}.csv" for index in range(7))
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=(*source_files, *csv_files),
+        execution_entrypoints=entrypoints,
+        constraints=tuple(
+            ArtifactConstraint(
+                path=path,
+                csv_header=("x", "y"),
+                csv_data_row_count=10,
+            )
+            for path in csv_files
+        ),
+    )
+    (tmp_path / "instruction.md").write_text("public task", encoding="utf-8")
+    (tmp_path / "paper.md").write_text("public paper", encoding="utf-8")
+    contract_path = tmp_path / "contract.json"
+    contract_path.write_text(contract.model_dump_json(), encoding="utf-8")
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text('{"grants": []}', encoding="utf-8")
+    captured: dict[str, object] = {}
+    original_build_agent = prbench_eval.build_agent
+
+    def tracked_build_agent(*args, **kwargs):
+        captured["max_tool_calls"] = kwargs.get("max_tool_calls")
+        captured["max_discovery_tool_calls"] = kwargs.get(
+            "max_discovery_tool_calls"
+        )
+        return original_build_agent(*args, **kwargs)
+
+    monkeypatch.setattr(prbench_eval, "build_agent", tracked_build_agent)
+    llm = _PromptRecorder()
+
+    result = run_prbench(
+        tmp_path,
+        contract_path,
+        approvals,
+        llm=llm,
+        max_tool_calls=50,
+        max_context_chars=24_000,
+    )
+
+    assert result.status == PRBenchRunStatus.ARTIFACT_VERIFICATION_FAILED
+    assert captured == {
+        "max_tool_calls": 50,
+        "max_discovery_tool_calls": 10,
+    }
+    rendered = json.dumps(llm.messages)
+    assert "Minimum production calls: 20" in rendered
+    assert "Discovery call cap: 10" in rendered
+    assert "Total tool-call budget: 50" in rendered
 
 
 def test_runner_fails_closed_when_task_brief_exceeds_current_input_slot(

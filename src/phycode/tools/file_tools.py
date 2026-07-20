@@ -17,6 +17,8 @@ from phycode.models import ToolCall, ToolResult, ToolRiskLevel, ToolSpec
 from phycode.tools.base import ToolRegistry
 
 MAX_INSPECT_CHARS = 20_000
+DEFAULT_FILE_READ_CHARS = 1_200
+MAX_FILE_READ_CHARS = 1_200
 MAX_ARCHIVE_MEMBERS = 100
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 50_000_000
 MAX_ARCHIVE_MEMBER_BYTES = 10_000_000
@@ -25,17 +27,44 @@ MAX_ARCHIVE_DEPTH = 2
 MAX_SPREADSHEET_CELLS = 50_000
 
 
-def _read(path: Path, limit: int | None = None, offset: int = 0) -> tuple[str, bool]:
+def _read(path: Path, limit: int, offset: int) -> tuple[str, bool]:
     text = path.read_text(encoding="utf-8")
     sliced = text[offset:]
-    if limit is not None and len(sliced) > limit:
+    if len(sliced) > limit:
         return sliced[:limit], True
     return sliced, False
 
 
+def _file_read_window(args: dict[str, object]) -> tuple[int, int]:
+    offset = args.get("offset", 0)
+    limit = args.get("limit", DEFAULT_FILE_READ_CHARS)
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("offset must be a non-negative UTF-8 decoded character index")
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 1 <= limit <= MAX_FILE_READ_CHARS
+    ):
+        raise ValueError(
+            f"limit must be between 1 and {MAX_FILE_READ_CHARS} UTF-8 decoded characters"
+        )
+    return offset, limit
+
+
 def _file_read(call: ToolCall) -> ToolResult:
-    content, truncated = _read(Path(call.args["path"]), call.args.get("limit"), call.args.get("offset", 0))
-    return ToolResult(tool_call_id=call.id, status="ok", stdout=content, truncated=truncated)
+    offset, limit = _file_read_window(call.args)
+    content, truncated = _read(Path(call.args["path"]), limit, offset)
+    stdout = (
+        f"{content}\nnext_offset={offset + len(content)}"
+        if truncated
+        else content
+    )
+    return ToolResult(
+        tool_call_id=call.id,
+        status="ok",
+        stdout=stdout,
+        truncated=truncated,
+    )
 
 
 def _file_list(call: ToolCall) -> ToolResult:
@@ -338,13 +367,33 @@ def register_file_tools(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="file.read",
-            description="Read a file",
+            description=(
+                "Read one bounded text page. offset and limit count zero-based UTF-8 "
+                "decoded characters, not line numbers. Follow the returned next_offset "
+                "when truncated; do not overlap or repeat previous pages."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
-                    "offset": {"type": "integer"},
-                    "limit": {"type": "integer"},
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": (
+                            "Zero-based UTF-8 decoded character offset; use next_offset "
+                            "from the prior truncated page."
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_FILE_READ_CHARS,
+                        "default": DEFAULT_FILE_READ_CHARS,
+                        "description": (
+                            "Maximum UTF-8 decoded characters in this page; never a line count."
+                        ),
+                    },
                 },
                 "required": ["path"],
             },

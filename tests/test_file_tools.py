@@ -11,6 +11,8 @@ from phycode.policy import PolicyContext
 from phycode.tools.base import ToolRegistry, ToolRuntime
 from phycode.tools.file_tools import register_file_tools
 
+EXPECTED_FILE_READ_CHARS = 1_200
+
 
 def test_file_read_reads_workspace_file(tmp_path: Path):
     (tmp_path / "README.md").write_text("hello", encoding="utf-8")
@@ -33,6 +35,94 @@ def test_file_read_resolves_paths_against_policy_workspace(tmp_path: Path):
         PolicyContext(tmp_path, [], True),
     )
     assert result.tool_result.stdout == "workspace copy"
+
+
+def test_file_read_default_pages_utf8_text_with_recoverable_next_offset(
+    tmp_path: Path,
+) -> None:
+    content = "起点🙂" + "甲乙丙丁" * 700 + "终点🚀"
+    (tmp_path / "long.txt").write_text(content, encoding="utf-8")
+    registry = ToolRegistry()
+    register_file_tools(registry)
+    runtime = ToolRuntime(registry)
+    restored: list[str] = []
+    offset = 0
+    page_count = 0
+
+    while True:
+        page_count += 1
+        result = runtime.run(
+            ToolCall(
+                tool_name="file.read",
+                args={"path": "long.txt", "offset": offset},
+            ),
+            PolicyContext(tmp_path, [], True),
+        )
+        assert result.tool_result.status == "ok"
+        if not result.tool_result.truncated:
+            restored.append(result.tool_result.stdout)
+            break
+        page, separator, marker = result.tool_result.stdout.rpartition("\n")
+        assert separator == "\n"
+        assert marker.startswith("next_offset=")
+        next_offset = int(marker.removeprefix("next_offset="))
+        assert 0 < len(page) <= EXPECTED_FILE_READ_CHARS
+        assert next_offset == offset + len(page)
+        assert len(result.tool_result.stdout) < 1_500
+        restored.append(page)
+        offset = next_offset
+
+    assert "".join(restored) == content
+    assert page_count > 1
+
+
+def test_file_read_schema_documents_character_paging_contract() -> None:
+    registry = ToolRegistry()
+    register_file_tools(registry)
+    spec = registry.spec_for("file.read")
+
+    assert spec is not None
+    description = spec.description.casefold()
+    assert "zero-based" in description
+    assert "utf-8 decoded characters" in description
+    assert "not line" in description
+    assert "next_offset" in description
+    assert "do not overlap" in description
+    offset = spec.input_schema["properties"]["offset"]
+    limit = spec.input_schema["properties"]["limit"]
+    assert offset["minimum"] == 0
+    assert offset["default"] == 0
+    assert limit["minimum"] == 1
+    assert limit["default"] == EXPECTED_FILE_READ_CHARS
+    assert limit["maximum"] == EXPECTED_FILE_READ_CHARS
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"offset": True},
+        {"offset": -1},
+        {"offset": 1.5},
+        {"limit": True},
+        {"limit": 0},
+        {"limit": -1},
+        {"limit": EXPECTED_FILE_READ_CHARS + 1},
+    ],
+)
+def test_file_read_rejects_invalid_or_unbounded_windows(
+    tmp_path: Path,
+    args: dict[str, object],
+) -> None:
+    (tmp_path / "evidence.txt").write_text("public evidence", encoding="utf-8")
+    registry = ToolRegistry()
+    register_file_tools(registry)
+
+    result = ToolRuntime(registry).run(
+        ToolCall(tool_name="file.read", args={"path": "evidence.txt", **args}),
+        PolicyContext(tmp_path, [], True),
+    )
+
+    assert result.tool_result.status in {"invalid_tool_args", "tool_error"}
 
 
 def test_file_edit_requires_approval_then_writes_diff(tmp_path: Path):

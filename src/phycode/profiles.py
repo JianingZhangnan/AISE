@@ -12,7 +12,10 @@ Do not write or edit expected CSV files or other data outputs directly. Create o
 reproduction script so that the script generates every expected data output, then call process.run
 to execute that script. process.run may wait for a human-reviewed, hash-bound approval; request the
 exact execution and wait for the policy result instead of bypassing it.
-Inspect required artifacts before finishing; final is accepted only after artifact verification."""
+Respect the task brief's discovery quota and switch directly to artifact implementation before it
+is exhausted. The deterministic verifier reports after every successful tool action, so do not
+spend an extra inspect call solely to trigger completion.
+final is accepted only after artifact verification."""
 
 _CODING_TOOL_NAMES = frozenset(
     {
