@@ -216,6 +216,62 @@ def _load_launcher_output_helpers(
     }
 
 
+def _load_public_task_contract_metadata(task_yaml: Path) -> dict[str, object]:
+    """Read only the public task fields consumed by the contract validator."""
+
+    def scalar(value: str) -> str:
+        value = value.strip()
+        return cast(str, json.loads(value)) if value.startswith('"') else value
+
+    task_config: dict[str, object] = {
+        "input_files": [],
+        "paper": {},
+        "expected_outputs": {},
+    }
+    section: str | None = None
+    output_group: str | None = None
+    for raw_line in task_yaml.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if indent == 0:
+            section = None
+            output_group = None
+            if stripped == "paper:":
+                section = "paper"
+            elif stripped == "input_files:":
+                section = "input_files"
+            elif stripped == "expected_outputs:":
+                section = "expected_outputs"
+            elif stripped.startswith("instruction_file:"):
+                task_config["instruction_file"] = scalar(stripped.split(":", 1)[1])
+            continue
+        if section == "paper" and indent == 2 and stripped.startswith("paper_file:"):
+            paper = cast(dict[str, object], task_config["paper"])
+            paper["paper_file"] = scalar(stripped.split(":", 1)[1])
+        elif section == "input_files" and indent == 2 and stripped.startswith("- "):
+            inputs = cast(list[str], task_config["input_files"])
+            inputs.append(scalar(stripped[2:]))
+        elif section == "expected_outputs" and indent == 2 and stripped.endswith(":"):
+            output_group = stripped[:-1]
+            outputs = cast(dict[str, object], task_config["expected_outputs"])
+            outputs[output_group] = []
+        elif (
+            section == "expected_outputs"
+            and output_group is not None
+            and indent == 4
+            and stripped.startswith("- ")
+        ):
+            outputs = cast(dict[str, list[str]], task_config["expected_outputs"])
+            outputs[output_group].append(scalar(stripped[2:]))
+
+    assert isinstance(task_config.get("instruction_file"), str)
+    assert isinstance(cast(dict[str, object], task_config["paper"]).get("paper_file"), str)
+    return task_config
+
+
 def _text_open_calls_missing_utf8(source: Path) -> list[int]:
     tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
     missing_utf8: list[int] = []
@@ -1797,6 +1853,154 @@ def test_official_launcher_rejects_invalid_phycode_limits_before_container_setup
 
     with pytest.raises(ValueError, match=message):
         asyncio.run(launch_evaluation(**limits))  # type: ignore[arg-type]
+
+
+def test_official_validator_accepts_every_tracked_public_contract(
+    patched_official_evaluator: Path,
+) -> None:
+    validate_contract = cast(
+        Callable[[dict[str, object], str | None, bool], bytes],
+        _load_launcher_output_helpers(
+            patched_official_evaluator / "src/launcher.py", os
+        )["_validate_phycode_contract"],
+    )
+    contract_paths = sorted(Path("integrations/prbench/public_contracts").glob("*.json"))
+
+    assert contract_paths
+    for contract_path in contract_paths:
+        task_yaml = (
+            patched_official_evaluator
+            / "data"
+            / "tasks"
+            / contract_path.stem
+            / "task.yaml"
+        )
+        assert task_yaml.is_file(), contract_path.stem
+        task_config = _load_public_task_contract_metadata(task_yaml)
+
+        snapshot = validate_contract(task_config, str(contract_path.resolve()), False)
+
+        assert snapshot == contract_path.read_bytes(), contract_path.stem
+
+
+def test_official_launcher_validates_explicit_expected_file_superset_before_provider(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+) -> None:
+    side_effects: list[str] = []
+    task_root = tmp_path / "tasks/public-task"
+    task_root.mkdir(parents=True)
+    (task_root / "task.yaml").write_text("public task", encoding="utf-8")
+    task_config = {
+        "instruction_file": "instruction.md",
+        "paper": {"paper_file": "paper.md"},
+        "input_files": [],
+        "expected_outputs": {
+            "code": ["reproduce.py"],
+            "data": ["result.csv"],
+        },
+    }
+
+    class ProviderReached(RuntimeError):
+        pass
+
+    def resolve_env(_agent_type: str) -> dict[str, str]:
+        side_effects.append("resolve-env")
+        raise ProviderReached
+
+    launcher = patched_official_evaluator / "src/launcher.py"
+    launch_evaluation = _load_function(
+        launcher,
+        "launch_evaluation",
+        {
+            "DATA_DIR": str(tmp_path / "tasks"),
+            "json": json,
+            "logger": types.SimpleNamespace(error=lambda *_: None, info=lambda *_: None),
+            "logging": types.SimpleNamespace(
+                INFO=20,
+                basicConfig=lambda **_kwargs: None,
+                FileHandler=lambda *_args: object(),
+                StreamHandler=lambda *_args: object(),
+            ),
+            "open": open,
+            "os": os,
+            "resolve_env": resolve_env,
+            "stat": stat,
+            "yaml": types.SimpleNamespace(safe_load=lambda _handle: task_config),
+        },
+        dependencies=(
+            "_path_is_within",
+            "_read_verified_utf8",
+            "_validate_phycode_contract",
+        ),
+    )
+    contract = tmp_path / "contract.json"
+    base_contract: dict[str, object] = {
+        "instruction_file": "instruction.md",
+        "paper_file": "paper.md",
+        "input_files": [],
+        "expected_files": [
+            "reproduce.py",
+            "extras/entry.py",
+            "result.csv",
+            "extras/report.csv",
+        ],
+        "execution_entrypoints": ["extras/entry.py"],
+        "constraints": [
+            {"path": "extras/report.csv", "csv_header": ["value"]}
+        ],
+    }
+
+    contract.write_text(json.dumps(base_contract), encoding="utf-8")
+    with pytest.raises(ProviderReached):
+        asyncio.run(
+            launch_evaluation(  # type: ignore[arg-type]
+                task_id="public-task",
+                green_port=9001,
+                white_port=9002,
+                white_agent_type="phycode",
+                green_agent_type="opencode",
+                phycode_contract=str(contract),
+            )
+        )
+    assert side_effects == ["resolve-env"]
+
+    invalid_expected_files = {
+        "missing declared": ["reproduce.py", "extras/report.csv"],
+        "reordered declared": ["result.csv", "reproduce.py"],
+        "duplicate": ["reproduce.py", "result.csv", "result.csv"],
+        "empty": ["reproduce.py", "result.csv", ""],
+        "dot": ["reproduce.py", "result.csv", "."],
+        "dot-dot": ["reproduce.py", "result.csv", ".."],
+        "traversal": ["reproduce.py", "result.csv", "extra/../escape.txt"],
+        "posix absolute": ["reproduce.py", "result.csv", "/absolute.txt"],
+        "windows absolute": ["reproduce.py", "result.csv", "C:\\absolute.txt"],
+        "hidden fixture": ["reproduce.py", "result.csv", "_ground_truth/data.csv"],
+        "credential": ["reproduce.py", "result.csv", ".env"],
+    }
+    for label, expected_files in invalid_expected_files.items():
+        side_effects.clear()
+        invalid_contract = {
+            **base_contract,
+            "expected_files": expected_files,
+            "execution_entrypoints": [],
+            "constraints": [],
+        }
+        contract.write_text(json.dumps(invalid_contract), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="PhyCode contract"):
+            asyncio.run(
+                launch_evaluation(  # type: ignore[arg-type]
+                    task_id="public-task",
+                    green_port=9001,
+                    white_port=9002,
+                    white_agent_type="phycode",
+                    green_agent_type="opencode",
+                    phycode_contract=str(contract),
+                )
+            )
+
+        assert side_effects == [], label
 
 
 @pytest.mark.parametrize(
