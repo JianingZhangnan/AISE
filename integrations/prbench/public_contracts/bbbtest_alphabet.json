@@ -6,6 +6,7 @@
     "reproduction/alphabet.py",
     "data/letters.csv"
   ],
+  "execution_entrypoints": ["reproduction/alphabet.py"],
   "constraints": [
     {
       "path": "data/letters.csv",

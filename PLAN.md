@@ -2536,3 +2536,113 @@ upstream import API 漂移；overlay 不修改上游依赖声明。最终只有 
 元数据；默认测试和 CI 保持离线。最终主 agent 复验 Windows/WSL 全量测试均达到
 100% exit 0，Pyright 0/0，0.1.1 wheel/sdist 构建成功；含 22 个真实模型候选的 PTY
 滚动、补全和真实 LLM 响应通过，最终 URL/key 泄漏扫描仍为 0。分支已满足收尾门禁。
+
+---
+
+## 2026-07-19 PRBench 完整公开任务（Task 32–36）
+
+本批目标是在 `codex/prbench-public-test` 上为单个**完整公开任务**
+`task_white_1993` 建立确定性的 artifact provenance、紧凑上下文、固定 evaluator 入口
+与正式运行前文档门禁；它不代表 holdout 或课程最终成绩。实际依赖链为
+Task 32 → Task 33 → Task 34 → Task 35 → Task 34B/34C/34D/34E → 主 agent 最多五次
+正式验收 → Task 36A 脱敏记录 → Task 36B whole-branch review 与最终复验。
+
+- [x] Task 32：把可执行 Python artifact 与普通 expected Python 分开建模，只允许
+  `execution_entrypoints` 为 CSV 提供成功 execution provenance，并增加 CSV 数据行数
+  约束。实际范围 `bfae0be7eb3d7f9373929ef18a0a236e718be375..959eb44fb5af1cc897f1ec4c274013681f30fdb8`；
+  实现 `564659dd8aa66f2dfed2b5c2833a74db50865758`，审查测试修复
+  `959eb44fb5af1cc897f1ec4c274013681f30fdb8`；最终 review clean，Critical / Important /
+  Minor 为 0 / 0 / 0。
+- [x] Task 33：用仅含公开路径和产物清单的 compact brief 替换长正文 prompt，并贯通
+  `max_context_chars`；上下文不足时在 provider 前 fail closed。实际范围
+  `959eb44fb5af1cc897f1ec4c274013681f30fdb8..7fe73aa7bba48f9def3a97c0b8e8ebcbc5439139`；
+  实现 `69dadc1ef3a8314e4ebed7b88b8668006f2f0d71`，审查修复
+  `7fe73aa7bba48f9def3a97c0b8e8ebcbc5439139`；最终 review clean，0 / 0 / 0。
+- [x] Task 33 分支级回归纠正：删除过期的 runner-side read 测试假设，并锁定公开
+  instruction 的一次安全验证发生在首次 provider 调用前。实际范围
+  `e51a82ca50ddde519f353bbd4b7962a1d87ca8f7..7547db2a9ed8db98cb6b86d6ea95c186e30192d7`；提交
+  `0d4582b483530653ba1220b1d8e79673f7ca310c` 与
+  `7547db2a9ed8db98cb6b86d6ea95c186e30192d7`；完整 692 项 exit 0，修复后 review
+  clean，0 / 0 / 0。
+- [x] Task 34：增加 `task_white_1993` 完整 contract、固定 adapter 的
+  `max-tool-calls` / `max-context-chars` 参数链和 `run_public_full.ps1`。实际范围
+  `7fe73aa7bba48f9def3a97c0b8e8ebcbc5439139..e51a82ca50ddde519f353bbd4b7962a1d87ca8f7`；
+  实现 `4cde23b4edf95d98cc6ea50e4c66ee2a80fd8d43`，独立审查修复 `e51a82ca50ddde519f353bbd4b7962a1d87ca8f7`；
+  最终 review clean，0 / 0 / 0。
+- [x] Task 35：补齐中文 README、PLAN、SPEC_PROCESS、AGENT_LOG 和文档合同，完成
+  full pytest、Pyright、build、fresh adapter/patch、双 PowerShell AST、凭据与本地产物
+  门禁。主实现实际范围为
+  `7547db2a9ed8db98cb6b86d6ea95c186e30192d7..71656cf630ee1f7e87b1805b53e502596818b707`，
+  提交信息为
+  `docs(prbench): document full public evaluation gate`，主实现 commit 为
+  `71656cf630ee1f7e87b1805b53e502596818b707`。文档合同 27 passed，最终全仓收集 693
+  项、Pyright 0 / 0，构建、
+  fresh adapter/patch、双 PowerShell AST、wheel 解包、凭据与新增运行产物扫描均通过；
+  随后的独立 review 为 **Changes requested**，0 Critical / 3 Important / 0 Minor：正式
+  运行手册的 active workspace 错误、审批判别条件缺失、文档合同跨全文偶然命中。当前
+  review 修复以 section-scoped 合同得到自然 RED，再以旧 workspace 文本 mutation 得到
+  判别性 RED；恢复后聚焦测试 1 passed、完整文档 27 passed，全仓 693 项达到 100%
+  exit 0，Pyright 0 / 0，diff、凭据与新增运行产物扫描通过。修复提交信息为
+  `docs(prbench): harden full-run approval guide`，commit 为
+  `0c0b5b0f6e322e1c6a8e0f57d23716f24a1ec23f`。该阶段遵守先修复、后复审的顺序，没有
+  预写 clean 结论；随后 Task 35 修复后独立复审完成，核对范围为
+  `7547db2a9ed8db98cb6b86d6ea95c186e30192d7..0c0b5b0f6e322e1c6a8e0f57d23716f24a1ec23f`，
+  Review clean，Critical / Important / Minor 为 0 / 0 / 0，规格与文档/测试质量均通过。
+- [x] Task 34B / 34C：分别修复 green evaluator 与 white evaluator 的 UTF-8 文本
+  I/O，提交 `31704dd6aa2ca72dd9367a07ed7e00000f431d1d` 与
+  `86251927aa00e3967408637e2838eb7b03816c79`。
+- [x] Task 34D：为正式运行增加分页、保留发现阶段工具配额，并保持 positional event
+  sink 兼容；提交 `ee11a097baa1dcc42d4bf5f526f527d64ef960a8`、
+  `4da448b0ec3f6072c94576c1a7699297317de776`，最终 review clean，0 / 0 / 0。
+- [x] Task 34E：把 PRBench adapter 的 provider deadline 调整为有界 600 秒，提交
+  `23b67474d73d206d531a199e7dbcb95456022080`，最终 review clean，0 / 0 / 0；普通
+  adapter 的 120 秒 deadline 保持不变。
+- [x] Task 36A：脱敏结果记录。Task 36 脱敏结果记录已完成：只消费主 agent 提供的
+  脱敏摘要；初次三次尝试记录的 commit 为 `b303d52cf1e7cf2811d42c0aab917f056bc92922`。
+  用户把上限扩展到五次后，本次继续在 Task 36A 范围内补齐最终五次未成功验收、review
+  与泄漏扫描，只修改过程文档及其合同测试。
+- [x] Task 36B：whole-branch review 与最终复验。Task 36 whole-branch review 与最终复验已完成；
+  commit：`7c623d7`。最终审查范围为
+  `588aa08ab56f929b4ac61895227574306a16ee13..50f1089f47eda141b8715bf937ecd318c49d2a48`，
+  共 35 commits / 30 files，结论为 Critical / Important / Minor = 0 / 0 / 3，Ready。
+  Task 36 整体按过程门禁完成，但五次正式尝试仍未跑通，绝不改写为成功。
+  三项非阻塞 Minor 为：每个 CSV 的 capture 上限均为 8 MiB，但没有全局 capture 总预算；
+  没有真实 Windows junction/reparse 集成覆盖，现有覆盖为 synthetic；没有任意未知
+  output-group 名的专门变异测试，但实现对动态 values 的处理正确。
+  最终复验在清除 evaluator/provider 环境变量后完成：离线 pytest exit 0、766 collected；
+  Pyright 0 errors / 0 warnings / 0 informations；fresh、固定到 evaluator commit
+  `3e5bee4545cad2138832f06302e9c98bd81f5216` 的 clean adapter 为
+  128 collected / 126 passed / 2 skipped；`uv build` 成功；`pwsh` 与 Windows PowerShell AST
+  均通过；`git diff --check` 通过；worktree clean。HEAD 的 109 个 tracked regular blobs 中
+  credential filenames 0、高置信 secret 0，35 commits 历史相同项 0；branch diff 运行产物
+  路径 0；7 个 evaluator/provider 环境变量均 absent；`dist`、`.pytest_cache`、`.venv` 与
+  授权 source 均 ignored。
+
+### task_white_1993 完整公开任务真实验收
+
+- 固定 evaluator commit 为 `3e5bee4545cad2138832f06302e9c98bd81f5216`。用户把正式尝试上限从 3 次扩展到 5 次，
+  最后两次指定模型 `glm-5.2`；正式尝试次数为 5，上限已经用尽，
+  没有第 6 次。
+- 尝试 1：模型 `deepseek-v4-pro`，runner `tool_budget_exhausted`，50 次工具调用，`overall_score` 0.0。
+- 尝试 2：模型 `deepseek-v4-pro`，runner `provider_error`，13 次工具调用，`overall_score` 0.0。
+- 尝试 3：模型 `deepseek-v4-pro`，runner `approval_required`，42 次工具调用，20 项声明产物存在 13 项，7 项 CSV 存在 0 项，`overall_score` 0.17。
+- 尝试 4：模型 `glm-5.2`，runner `provider_error`，11 次工具调用，20 项声明产物存在 0 项，`overall_score` 0.0，约 720 秒。
+- 尝试 5：模型 `glm-5.2`，runner `provider_error`，11 次工具调用，20 项声明产物存在 0 项，white 约 662 秒、grader 约 700 秒，`overall_score` 0.0。
+- 最佳结果仍是未成功的尝试 3。成功标准保持为 runner `completed` 与有效 green report
+  同时成立；五次均未满足，因此完整公开任务未跑通，不得声称成功。
+- 首次模型响应前的基础设施/预检失败不计次数：两次 OpenCode 安装相关失败、一次旧
+  exact-equality contract preflight 失败，以及一次手动预检后的 double-adapter
+  clean-check 失败。
+- 正式运行期间修复/review 关键 commits：`4e831d1`、`a0f8df9`、`c3be45e..fb42598`、
+  `2011e84`、`1d30458`、`a5be873`、`1c410ab`、`f99cec8`。最终 contract spec review 为
+  Critical / Important / Minor = 0 / 0 / 0；quality review 为 0 / 0 / 1，Ready，唯一 Minor
+  是没有用任意未知组名做专门变异测试。artifact review 曾有两个非阻塞 Minor：缺少全局
+  CSV capture 总预算，以及缺少真实 Windows junction 集成覆盖。
+- 当前凭据泄漏扫描：HEAD 的 109 个 tracked regular blobs（仅 mode 100644/100755，排除
+  gitlink）中，两组 exact key 匹配 0、读取错误 0；本地 `.superpowers/sdd` 与 `dist` 排除
+  `.git`、`.venv`、`node_modules`、`_ground_truth`、`groundtruth`、`reference` 后的 1000 个
+  文件中，两组 exact key 匹配 0、读取错误 0，其中日志/trace/report/wheel 筛选出的 81 个
+  文件同样为两组 exact key 匹配 0、读取错误 0。7 个 provider/PRBench 相关环境变量均
+  absent，容器数 0。相关本地产物继续保持 ignored；评测产物未提交。
+- Task 36 脱敏结果记录已完成；Task 36 whole-branch review 与最终复验已完成。过程门禁完成
+  不改变真实验收结论：五次正式尝试仍未跑通。

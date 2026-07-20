@@ -804,35 +804,59 @@ def test_early_process_failure_then_success_does_not_pollute_final_artifact_stat
     assert result.status == PRBenchRunStatus.ARTIFACT_VERIFICATION_FAILED
 
 
-def test_public_input_is_revalidated_immediately_before_read(
+def test_public_instruction_is_validated_without_runner_side_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import phycode.prbench_eval as prbench_eval
 
     contract, approvals = write_text_task_files(tmp_path)
     original_resolve = prbench_eval._resolve_workspace_path
+    original_read_text = Path.read_text
     instruction = (tmp_path / "instruction.md").resolve()
     instruction_validations = 0
+    instruction_reads = 0
+    secret = "sk-runner-read-secret-123456789"
 
-    def resolve_then_reject(workspace, path, *, require_file):
+    def record_resolve(workspace, path, *, require_file):
         nonlocal instruction_validations
         resolved = original_resolve(workspace, path, require_file=require_file)
         if require_file and resolved == instruction:
             instruction_validations += 1
-            if instruction_validations == 2:
-                raise RuntimeError("sk-toctou-secret-123456789")
         return resolved
 
-    monkeypatch.setattr(prbench_eval, "_resolve_workspace_path", resolve_then_reject)
-    llm = RecordingFinalLLM()
+    def reject_instruction_read(path: Path, *args, **kwargs):
+        nonlocal instruction_reads
+        if path == instruction:
+            instruction_reads += 1
+            raise RuntimeError(secret)
+        return original_read_text(path, *args, **kwargs)
+
+    class ValidationOrderRecorder:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.validation_counts_at_calls: list[int] = []
+
+        def generate(self, messages, tools):
+            del messages, tools
+            self.calls += 1
+            self.validation_counts_at_calls.append(instruction_validations)
+            return ScriptedLLM(
+                [[{"type": "assistant_final", "payload": {"text": "done"}}]]
+            ).generate([], [])
+
+    monkeypatch.setattr(prbench_eval, "_resolve_workspace_path", record_resolve)
+    monkeypatch.setattr(Path, "read_text", reject_instruction_read)
+    llm = ValidationOrderRecorder()
 
     result = run_prbench(tmp_path, contract, approvals, llm=llm)
 
-    assert instruction_validations == 2
-    assert result.exit_code != 0
-    assert llm.calls == 0
+    assert instruction_validations == 1
+    assert instruction_reads == 0
+    assert llm.calls > 0
+    assert llm.validation_counts_at_calls[0] == 1
+    assert result.status == PRBenchRunStatus.ARTIFACT_VERIFICATION_FAILED
     persisted = (tmp_path / ".phycode/prbench/run_result.json").read_text(encoding="utf-8")
-    assert "toctou-secret" not in persisted
+    assert secret not in persisted
 
 
 @pytest.mark.parametrize("kind", ["url", "newline", "raises"])

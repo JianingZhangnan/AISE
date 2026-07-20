@@ -35,6 +35,10 @@ def test_prbench_profile_is_single_source_of_runtime_limits() -> None:
     assert "Do not write or edit expected CSV files" in spec.system_prompt
     assert "process.run" in spec.system_prompt
     assert "hash-bound approval" in spec.system_prompt
+    assert "discovery quota" in spec.system_prompt
+    assert "after every successful tool" in spec.system_prompt
+    assert "extra" in spec.system_prompt
+    assert "inspect required artifacts before finishing" not in spec.system_prompt.casefold()
 
 
 @pytest.mark.parametrize("tool_name", ["file.write", "file.edit"])

@@ -14,7 +14,7 @@ uv run python integrations/prbench/apply_adapter.py <evaluator-root> <wheel-path
 ```
 
 当前 adapter 与项目版本共同固定 wheel 文件名为
-`phycode-0.1.2-py3-none-any.whl`；其他名称会在修改 evaluator 前被拒绝。
+`phycode-0.1.3-py3-none-any.whl`；其他名称会在修改 evaluator 前被拒绝。
 若 `.phycode-adapter/phycode.whl` 已经是普通文件、symlink 或 dangling
 symlink，应用器同样 fail closed，不覆盖或解析旧目标。
 官方 `python:3.11-slim` task image 不含 uv，因此 patch 从 Astral 官方

@@ -3,13 +3,19 @@ from __future__ import annotations
 import csv
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 
 from pydantic import ValidationError
 import pytest
 
-from phycode.execution import ExecutionJournal, ExecutionJournalError
+from phycode.execution import (
+    ExecutionJournal,
+    ExecutionJournalError,
+    WorkspaceFileReadError,
+    read_workspace_regular_file,
+)
 from phycode.models import AgentProfile, ToolCall
 from phycode.policy import PolicyContext
 from phycode.prbench_contract import ArtifactConstraint, ArtifactVerifier, TaskContract
@@ -19,11 +25,74 @@ from phycode.tools.process_tools import register_process_tools
 from phycode.visibility import is_credential_path
 
 
+class _StatProxy:
+    def __init__(self, base: os.stat_result, **overrides: int) -> None:
+        self._base = base
+        self._overrides = overrides
+
+    def __getattr__(self, name: str):
+        if name in self._overrides:
+            return self._overrides[name]
+        return getattr(self._base, name)
+
+
+def _mark_reparse_point(
+    monkeypatch: pytest.MonkeyPatch,
+    path: Path,
+    *,
+    stat_source: Path | None = None,
+) -> None:
+    original_lstat = Path.lstat
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+    def marked_lstat(candidate: Path):
+        if candidate == path:
+            source = stat_source if stat_source is not None else candidate
+            base = original_lstat(source)
+            attributes = getattr(base, "st_file_attributes", 0) | reparse_flag
+            return _StatProxy(base, st_file_attributes=attributes)
+        return original_lstat(candidate)
+
+    monkeypatch.setattr(Path, "lstat", marked_lstat)
+
+
+def _prepare_internal_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative_path: str,
+    *,
+    parent_link: bool,
+) -> Path:
+    expected = tmp_path / relative_path
+    target_parent = tmp_path / "internal-target"
+    target_parent.mkdir()
+    target = target_parent / expected.name
+    target.write_text("complete\n", encoding="utf-8")
+
+    if parent_link:
+        expected_parent = expected.parent
+        try:
+            expected_parent.symlink_to(target_parent, target_is_directory=True)
+        except OSError:
+            expected_parent.mkdir()
+            expected.write_text("complete\n", encoding="utf-8")
+            _mark_reparse_point(monkeypatch, expected_parent)
+    else:
+        expected.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            expected.symlink_to(target)
+        except OSError:
+            expected.write_text("complete\n", encoding="utf-8")
+            _mark_reparse_point(monkeypatch, expected)
+    return expected
+
+
 def _contract() -> TaskContract:
     return TaskContract(
         instruction_file="instruction.md",
         paper_file="paper.md",
         expected_files=("reproduction/generate.py", "data/output.csv"),
+        execution_entrypoints=("reproduction/generate.py",),
         constraints=(
             ArtifactConstraint(
                 path="data/output.csv",
@@ -85,7 +154,7 @@ def test_csv_requires_successful_script_provenance(tmp_path: Path) -> None:
 
     assert not result.ok
     assert {issue.code for issue in result.issues} == {
-        "script_not_executed",
+        "missing_artifact",
         "csv_without_provenance",
     }
 
@@ -139,6 +208,38 @@ def test_contract_models_forbid_unknown_fields() -> None:
                 "unexpected": True,
             }
         )
+
+
+def test_contract_rejects_entrypoint_outside_expected_files() -> None:
+    with pytest.raises(ValidationError, match="entrypoint"):
+        TaskContract(
+            instruction_file="instruction.md",
+            paper_file="paper.md",
+            expected_files=("reproduction/core.py",),
+            execution_entrypoints=("reproduction/run.py",),
+        )
+
+
+def test_contract_rejects_non_python_and_duplicate_entrypoints() -> None:
+    with pytest.raises(ValidationError, match="Python"):
+        TaskContract(
+            instruction_file="instruction.md",
+            paper_file="paper.md",
+            expected_files=("data/output.csv",),
+            execution_entrypoints=("data/output.csv",),
+        )
+    with pytest.raises(ValidationError, match="duplicate"):
+        TaskContract(
+            instruction_file="instruction.md",
+            paper_file="paper.md",
+            expected_files=("reproduction/run.py",),
+            execution_entrypoints=("reproduction/run.py", "reproduction/run.py"),
+        )
+
+
+def test_contract_rejects_negative_csv_data_row_count() -> None:
+    with pytest.raises(ValidationError):
+        ArtifactConstraint(path="data/output.csv", csv_data_row_count=-1)
 
 
 def test_unchanged_csv_is_not_claimed_by_successful_script(tmp_path: Path) -> None:
@@ -204,7 +305,7 @@ def test_csv_provenance_must_share_record_with_current_script_hash(tmp_path: Pat
     assert {issue.code for issue in result.issues} == {"csv_without_provenance"}
 
 
-def test_any_current_expected_script_can_support_csv_in_same_record(tmp_path: Path) -> None:
+def test_any_current_entrypoint_can_support_csv_in_same_record(tmp_path: Path) -> None:
     (tmp_path / "reproduction").mkdir()
     passive_script = tmp_path / "reproduction/passive.py"
     passive_script.write_text("pass\n", encoding="utf-8")
@@ -223,6 +324,7 @@ def test_any_current_expected_script_can_support_csv_in_same_record(tmp_path: Pa
             "reproduction/generate.py",
             "data/output.csv",
         ),
+        execution_entrypoints=("reproduction/generate.py",),
         constraints=(
             ArtifactConstraint(
                 path="data/output.csv",
@@ -237,6 +339,121 @@ def test_any_current_expected_script_can_support_csv_in_same_record(tmp_path: Pa
     assert _run_call(tmp_path, journal, argv=["reproduction/generate.py"]) == "ok"
 
     assert ArtifactVerifier(tmp_path, contract, journal).verify().ok
+
+
+def test_expected_non_entrypoint_cannot_support_csv_provenance(tmp_path: Path) -> None:
+    reproduction = tmp_path / "reproduction"
+    reproduction.mkdir()
+    (reproduction / "entry.py").write_text("print('entry')\n", encoding="utf-8")
+    (reproduction / "ordinary.py").write_text(
+        "from pathlib import Path\n"
+        "Path('data').mkdir(exist_ok=True)\n"
+        "Path('data/output.csv').write_text('a,b\\n1,2\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=(
+            "reproduction/entry.py",
+            "reproduction/ordinary.py",
+            "data/output.csv",
+        ),
+        execution_entrypoints=("reproduction/entry.py",),
+    )
+    journal = ExecutionJournal(tmp_path, contract.expected_files)
+
+    assert _run_call(tmp_path, journal, argv=["reproduction/entry.py"]) == "ok"
+    assert _run_call(tmp_path, journal, argv=["reproduction/ordinary.py"]) == "ok"
+
+    result = ArtifactVerifier(tmp_path, contract, journal).verify()
+    assert not result.ok
+    assert {issue.code for issue in result.issues} == {"csv_without_provenance"}
+
+
+def test_imported_core_module_does_not_require_direct_execution(tmp_path: Path) -> None:
+    reproduction = tmp_path / "reproduction"
+    reproduction.mkdir()
+    (reproduction / "core.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (reproduction / "generate.py").write_text(
+        "from pathlib import Path\n"
+        "from core import VALUE\n"
+        "Path('data').mkdir(exist_ok=True)\n"
+        "Path('data/output.csv').write_text(f'a,b\\n1,{VALUE}\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=(
+            "reproduction/core.py",
+            "reproduction/generate.py",
+            "data/output.csv",
+        ),
+        execution_entrypoints=("reproduction/generate.py",),
+        constraints=(
+            ArtifactConstraint(
+                path="data/output.csv",
+                csv_header=("a", "b"),
+                csv_data_row_count=1,
+            ),
+        ),
+    )
+    journal = ExecutionJournal(tmp_path, contract.expected_files)
+
+    assert _run_python(tmp_path, journal) == "ok"
+    assert ArtifactVerifier(tmp_path, contract, journal).verify().ok
+
+
+def test_csv_data_row_count_mismatch_with_valid_provenance(tmp_path: Path) -> None:
+    reproduction = tmp_path / "reproduction"
+    reproduction.mkdir()
+    (reproduction / "generate.py").write_text(
+        "from pathlib import Path\n"
+        "Path('data').mkdir(exist_ok=True)\n"
+        "Path('data/output.csv').write_text('a,b\\n1,2\\n3,4\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=("reproduction/generate.py", "data/output.csv"),
+        execution_entrypoints=("reproduction/generate.py",),
+        constraints=(
+            ArtifactConstraint(
+                path="data/output.csv",
+                csv_header=("a", "b"),
+                csv_data_row_count=1,
+            ),
+        ),
+    )
+    journal = ExecutionJournal(tmp_path, contract.expected_files)
+
+    assert _run_python(tmp_path, journal) == "ok"
+    result = ArtifactVerifier(tmp_path, contract, journal).verify()
+
+    assert not result.ok
+    assert {issue.code for issue in result.issues} == {"csv_row_count_mismatch"}
+
+
+def test_current_entrypoint_hash_is_required_after_edit(tmp_path: Path) -> None:
+    reproduction = tmp_path / "reproduction"
+    reproduction.mkdir()
+    script = reproduction / "generate.py"
+    script.write_text("print('first')\n", encoding="utf-8")
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=("reproduction/generate.py",),
+        execution_entrypoints=("reproduction/generate.py",),
+    )
+    journal = ExecutionJournal(tmp_path, contract.expected_files)
+    assert _run_python(tmp_path, journal) == "ok"
+    script.write_text("print('second')\n", encoding="utf-8")
+
+    result = ArtifactVerifier(tmp_path, contract, journal).verify()
+    assert not result.ok
+    assert {issue.code for issue in result.issues} == {"script_not_executed"}
 
 
 def test_timeout_cannot_establish_csv_provenance(tmp_path: Path) -> None:
@@ -372,6 +589,216 @@ def test_contract_rejects_windows_absolute_path_forms(path: str) -> None:
         )
 
 
+@pytest.mark.parametrize("parent_link", [False, True], ids=["file-link", "parent-link"])
+def test_verifier_rejects_internal_reparse_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_link: bool,
+) -> None:
+    _prepare_internal_link(tmp_path, monkeypatch, "linked/result.txt", parent_link=parent_link)
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=("linked/result.txt",),
+    )
+
+    result = ArtifactVerifier(tmp_path, contract, ExecutionJournal(tmp_path, ())).verify()
+
+    assert not result.ok
+    assert {issue.code for issue in result.issues} == {"invalid_artifact_path"}
+
+
+@pytest.mark.parametrize("parent_link", [False, True], ids=["file-link", "parent-link"])
+def test_execution_journal_rejects_internal_reparse_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_link: bool,
+) -> None:
+    _prepare_internal_link(tmp_path, monkeypatch, "linked/result.txt", parent_link=parent_link)
+    journal = ExecutionJournal(tmp_path, ("linked/result.txt",))
+
+    with pytest.raises(ExecutionJournalError, match="regular file"):
+        journal.snapshot_artifacts()
+
+
+@pytest.mark.parametrize("parent_link", [False, True], ids=["file-link", "parent-link"])
+def test_execution_journal_rejects_internal_reparse_script(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_link: bool,
+) -> None:
+    _prepare_internal_link(tmp_path, monkeypatch, "linked/run.py", parent_link=parent_link)
+    journal = ExecutionJournal(tmp_path, ())
+
+    with pytest.raises(ExecutionJournalError, match="regular file"):
+        journal.snapshot_script((sys.executable, "linked/run.py"), tmp_path)
+
+
+def test_verifier_rejects_dangling_reparse_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "result.txt"
+    try:
+        artifact.symlink_to(tmp_path / "missing-target.txt")
+    except OSError:
+        _mark_reparse_point(monkeypatch, artifact, stat_source=tmp_path)
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=("result.txt",),
+    )
+
+    result = ArtifactVerifier(tmp_path, contract, ExecutionJournal(tmp_path, ())).verify()
+
+    assert not result.ok
+    assert {issue.code for issue in result.issues} == {"invalid_artifact_path"}
+
+
+def test_missing_regular_artifact_remains_missing(tmp_path: Path) -> None:
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=("missing/result.txt",),
+    )
+    journal = ExecutionJournal(tmp_path, ("missing/result.txt",))
+
+    result = ArtifactVerifier(tmp_path, contract, journal).verify()
+
+    assert {issue.code for issue in result.issues} == {"missing_artifact"}
+    assert journal.snapshot_artifacts()[0].exists is False
+
+
+def test_workspace_snapshot_does_not_capture_content_by_default(tmp_path: Path) -> None:
+    artifact = tmp_path / "result.txt"
+    artifact.write_bytes(b"bounded snapshot")
+
+    snapshot = read_workspace_regular_file(tmp_path, artifact)
+
+    assert snapshot is not None
+    assert snapshot.data is None
+    assert snapshot.size == len(b"bounded snapshot")
+
+
+def test_verifier_fails_closed_when_constrained_csv_exceeds_capture_limit(tmp_path: Path) -> None:
+    artifact = tmp_path / "large.csv"
+    with artifact.open("wb") as handle:
+        handle.write(b"a,b\n")
+        handle.truncate(8 * 1024 * 1024 + 1)
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=("large.csv",),
+        constraints=(ArtifactConstraint(path="large.csv", csv_header=("a", "b")),),
+    )
+
+    result = ArtifactVerifier(tmp_path, contract, ExecutionJournal(tmp_path, ())).verify()
+
+    assert not result.ok
+    assert {issue.code for issue in result.issues} == {"artifact_read_error"}
+
+
+def test_verifier_rejects_same_inode_mutation_with_restored_size_and_mtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "result.txt"
+    initial = b"version-one"
+    replacement = b"version-two"
+    assert len(initial) == len(replacement)
+    artifact.write_bytes(initial)
+    original_stat = artifact.stat()
+    original_read = os.read
+    mutated = False
+
+    def mutate_after_first_pass(file_descriptor: int, length: int) -> bytes:
+        nonlocal mutated
+        data = original_read(file_descriptor, length)
+        if not data and not mutated:
+            artifact.write_bytes(replacement)
+            os.utime(
+                artifact,
+                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            )
+            mutated = True
+        return data
+
+    monkeypatch.setattr("phycode.execution.os.read", mutate_after_first_pass)
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=("result.txt",),
+    )
+
+    result = ArtifactVerifier(tmp_path, contract, ExecutionJournal(tmp_path, ())).verify()
+
+    assert mutated
+    assert not result.ok
+    assert {issue.code for issue in result.issues} == {"artifact_read_error"}
+
+
+def test_workspace_snapshot_converts_close_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "result.txt"
+    artifact.write_bytes(b"complete")
+
+    def fail_close(_file_descriptor: int) -> None:
+        raise OSError("test-only close failure")
+
+    monkeypatch.setattr("phycode.execution.os.close", fail_close)
+
+    with pytest.raises(WorkspaceFileReadError, match="closed"):
+        read_workspace_regular_file(tmp_path, artifact)
+
+
+def test_workspace_snapshot_close_error_does_not_replace_read_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "result.txt"
+    artifact.write_bytes(b"complete")
+
+    def fail_read(_file_descriptor: int, _length: int) -> bytes:
+        raise OSError("test-only primary read failure")
+
+    def fail_close(_file_descriptor: int) -> None:
+        raise OSError("test-only secondary close failure")
+
+    monkeypatch.setattr("phycode.execution.os.read", fail_read)
+    monkeypatch.setattr("phycode.execution.os.close", fail_close)
+
+    with pytest.raises(WorkspaceFileReadError, match="cannot be read") as error:
+        read_workspace_regular_file(tmp_path, artifact)
+
+    assert error.value.__cause__ is not None
+    assert "primary read failure" in str(error.value.__cause__)
+
+
+def test_workspace_snapshot_rejects_fstat_version_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "result.txt"
+    artifact.write_bytes(b"complete")
+    original_fstat = os.fstat
+    calls = 0
+
+    def changing_fstat(file_descriptor: int):
+        nonlocal calls
+        calls += 1
+        result = original_fstat(file_descriptor)
+        if calls == 2:
+            return _StatProxy(result, st_mtime_ns=result.st_mtime_ns + 1)
+        return result
+
+    monkeypatch.setattr("phycode.execution.os.fstat", changing_fstat)
+
+    with pytest.raises(WorkspaceFileReadError, match="changed"):
+        read_workspace_regular_file(tmp_path, artifact)
+
+
 @pytest.mark.parametrize("hidden_target", ["_ground_truth/secret.csv", "private/.env"])
 def test_verifier_rejects_symlink_alias_to_hidden_path(tmp_path: Path, hidden_target: str) -> None:
     target = tmp_path / hidden_target
@@ -395,7 +822,7 @@ def test_verifier_rejects_symlink_alias_to_hidden_path(tmp_path: Path, hidden_ta
 
 
 @pytest.mark.parametrize("hidden_target", ["_ground_truth/secret.csv", "private/.env"])
-def test_verifier_rechecks_deterministically_resolved_hidden_alias(
+def test_verifier_rejects_synthetic_hidden_reparse_alias(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     hidden_target: str,
@@ -410,14 +837,7 @@ def test_verifier_rechecks_deterministically_resolved_hidden_alias(
         expected_files=("public.csv",),
     )
     journal = ExecutionJournal(tmp_path, ())
-    original_resolve = Path.resolve
-
-    def resolve_alias(path: Path, *args, **kwargs) -> Path:
-        if path == alias:
-            return target
-        return original_resolve(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "resolve", resolve_alias)
+    _mark_reparse_point(monkeypatch, alias, stat_source=target)
 
     result = ArtifactVerifier(tmp_path, contract, journal).verify()
 
@@ -425,27 +845,72 @@ def test_verifier_rechecks_deterministically_resolved_hidden_alias(
     assert {issue.code for issue in result.issues} == {"invalid_artifact_path"}
 
 
-def test_verifier_turns_stat_oserror_into_structured_issue(
+def test_verifier_turns_lstat_oserror_into_structured_issue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     artifact = tmp_path / "result.txt"
     artifact.write_text("complete", encoding="utf-8")
-    original_is_file = Path.is_file
-    original_stat = Path.stat
+    original_lstat = Path.lstat
 
-    def is_file(path: Path) -> bool:
-        if path == artifact:
-            return True
-        return original_is_file(path)
-
-    def fail_stat(path: Path, *args, **kwargs):
+    def fail_lstat(path: Path):
         if path == artifact:
             raise OSError("test-only inaccessible artifact")
-        return original_stat(path, *args, **kwargs)
+        return original_lstat(path)
 
-    monkeypatch.setattr(Path, "is_file", is_file)
-    monkeypatch.setattr(Path, "stat", fail_stat)
+    monkeypatch.setattr(Path, "lstat", fail_lstat)
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=("result.txt",),
+    )
+
+    result = ArtifactVerifier(tmp_path, contract, ExecutionJournal(tmp_path, ())).verify()
+
+    assert not result.ok
+    assert {issue.code for issue in result.issues} == {"artifact_read_error"}
+
+
+def test_execution_journal_fails_closed_when_lstat_raises_value_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "result.txt"
+    artifact.write_text("complete", encoding="utf-8")
+    original_lstat = Path.lstat
+
+    def fail_lstat(path: Path):
+        if path == artifact:
+            raise ValueError("test-only invalid artifact path")
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", fail_lstat)
+    journal = ExecutionJournal(tmp_path, ("result.txt",))
+
+    with pytest.raises(ExecutionJournalError, match="snapshotted"):
+        journal.snapshot_artifacts()
+
+
+def test_verifier_rejects_artifact_identity_change_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "result.txt"
+    artifact.write_text("complete", encoding="utf-8")
+    original_lstat = Path.lstat
+    artifact_lstat_calls = 0
+
+    def changing_lstat(path: Path):
+        nonlocal artifact_lstat_calls
+        result = original_lstat(path)
+        if path != artifact:
+            return result
+        artifact_lstat_calls += 1
+        if artifact_lstat_calls > 1:
+            return _StatProxy(result, st_ino=result.st_ino + 1)
+        return result
+
+    monkeypatch.setattr(Path, "lstat", changing_lstat)
     contract = TaskContract(
         instruction_file="instruction.md",
         paper_file="paper.md",
@@ -464,10 +929,10 @@ def test_verifier_turns_read_oserror_into_structured_issue(
 ) -> None:
     (tmp_path / "output.csv").write_text("a,b\n1,2\n", encoding="utf-8")
 
-    def fail_hash(path: Path) -> str:
+    def fail_read(_file_descriptor: int, _length: int) -> bytes:
         raise OSError("test-only unreadable artifact")
 
-    monkeypatch.setattr("phycode.prbench_contract.file_sha256", fail_hash)
+    monkeypatch.setattr("phycode.execution.os.read", fail_read)
     contract = TaskContract(
         instruction_file="instruction.md",
         paper_file="paper.md",

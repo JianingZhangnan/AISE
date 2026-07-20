@@ -13,7 +13,13 @@ import xlrd
 from openpyxl import load_workbook
 from pypdf import PdfReader
 
-from phycode.models import ToolCall, ToolResult, ToolRiskLevel, ToolSpec
+from phycode.models import (
+    FileReadConfig,
+    ToolCall,
+    ToolResult,
+    ToolRiskLevel,
+    ToolSpec,
+)
 from phycode.tools.base import ToolRegistry
 
 MAX_INSPECT_CHARS = 20_000
@@ -25,7 +31,7 @@ MAX_ARCHIVE_DEPTH = 2
 MAX_SPREADSHEET_CELLS = 50_000
 
 
-def _read(path: Path, limit: int | None = None, offset: int = 0) -> tuple[str, bool]:
+def _read(path: Path, limit: int | None, offset: int) -> tuple[str, bool]:
     text = path.read_text(encoding="utf-8")
     sliced = text[offset:]
     if limit is not None and len(sliced) > limit:
@@ -33,9 +39,38 @@ def _read(path: Path, limit: int | None = None, offset: int = 0) -> tuple[str, b
     return sliced, False
 
 
-def _file_read(call: ToolCall) -> ToolResult:
-    content, truncated = _read(Path(call.args["path"]), call.args.get("limit"), call.args.get("offset", 0))
-    return ToolResult(tool_call_id=call.id, status="ok", stdout=content, truncated=truncated)
+def _file_read_window(
+    args: dict[str, object],
+    config: FileReadConfig,
+) -> tuple[int, int | None]:
+    offset = args.get("offset", 0)
+    limit = args.get("limit", config.default_limit)
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        raise ValueError("offset must be a non-negative UTF-8 decoded character index")
+    if limit is not None:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive UTF-8 decoded character count")
+        if config.max_limit is not None and limit > config.max_limit:
+            raise ValueError(
+                f"limit must not exceed {config.max_limit} UTF-8 decoded characters"
+            )
+    return offset, limit
+
+
+def _file_read(call: ToolCall, config: FileReadConfig) -> ToolResult:
+    offset, limit = _file_read_window(call.args, config)
+    content, truncated = _read(Path(call.args["path"]), limit, offset)
+    stdout = (
+        f"{content}\nnext_offset={offset + len(content)}"
+        if truncated and config.emit_next_offset
+        else content
+    )
+    return ToolResult(
+        tool_call_id=call.id,
+        status="ok",
+        stdout=stdout,
+        truncated=truncated,
+    )
 
 
 def _file_list(call: ToolCall) -> ToolResult:
@@ -334,23 +369,49 @@ def _file_edit(call: ToolCall) -> ToolResult:
     return ToolResult(tool_call_id=call.id, status="ok", stdout=diff)
 
 
-def register_file_tools(registry: ToolRegistry) -> None:
+def register_file_tools(
+    registry: ToolRegistry,
+    *,
+    read_config: FileReadConfig = FileReadConfig(),
+) -> None:
+    read_description = "Read a file"
+    if read_config.emit_next_offset:
+        read_description = (
+            "Read one bounded text page. offset and limit count zero-based UTF-8 "
+            "decoded characters, not line numbers. Follow the returned next_offset "
+            "when truncated; do not overlap or repeat previous pages."
+        )
+    offset_schema: dict[str, object] = {
+        "type": "integer",
+        "minimum": 0,
+        "default": 0,
+        "description": "Zero-based UTF-8 decoded character offset.",
+    }
+    limit_schema: dict[str, object] = {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Maximum UTF-8 decoded characters to return.",
+    }
+    if read_config.default_limit is not None:
+        limit_schema["default"] = read_config.default_limit
+    if read_config.max_limit is not None:
+        limit_schema["maximum"] = read_config.max_limit
     registry.register(
         ToolSpec(
             name="file.read",
-            description="Read a file",
+            description=read_description,
             input_schema={
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
-                    "offset": {"type": "integer"},
-                    "limit": {"type": "integer"},
+                    "offset": offset_schema,
+                    "limit": limit_schema,
                 },
                 "required": ["path"],
             },
             risk_level=ToolRiskLevel.SAFE,
         ),
-        _file_read,
+        lambda call: _file_read(call, read_config),
     )
     registry.register(
         ToolSpec(

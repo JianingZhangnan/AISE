@@ -16,8 +16,15 @@ from phycode.composition import build_agent, trusted_prbench_runtime_settings
 from phycode.config import load_prbench_provider_config, validate_prbench_model_label
 from phycode.execution import ArtifactSnapshot, ExecutionJournal
 from phycode.llm import LLMClient, OpenAICompatibleChatAdapter
-from phycode.models import AgentEventType, AgentProfile, SessionMode
+from phycode.models import (
+    PRBENCH_DEFAULT_FILE_READ_CHARS,
+    PRBENCH_MAX_FILE_READ_CHARS,
+    AgentEventType,
+    AgentProfile,
+    SessionMode,
+)
 from phycode.prbench_contract import ArtifactVerifier, TaskContract
+from phycode.profiles import profile_spec
 from phycode.redaction import redact_obj, redact_text
 from phycode.visibility import (
     PRBENCH_HIDDEN_PATH_COMPONENTS,
@@ -47,6 +54,8 @@ _EXIT_CODES = {
     PRBenchRunStatus.REPEATED_NO_PROGRESS: 7,
     PRBenchRunStatus.TOOL_BUDGET_EXHAUSTED: 8,
 }
+
+_PRBENCH_PROVIDER_TIMEOUT_SECONDS = 600.0
 
 
 class PRBenchArtifactSummary(BaseModel):
@@ -278,6 +287,107 @@ def _validate_internal_directory(workspace: Path, path: Path) -> Path:
     return resolved
 
 
+def _production_tool_call_lower_bound(contract: TaskContract) -> int:
+    constrained_paths = {
+        constraint.path.replace("\\", "/").casefold()
+        for constraint in contract.constraints
+    }
+    source_artifact_writes = sum(
+        path.replace("\\", "/").casefold() not in constrained_paths
+        for path in contract.expected_files
+    )
+    return source_artifact_writes + len(contract.execution_entrypoints)
+
+
+def _discovery_tool_call_cap(contract: TaskContract, max_tool_calls: int) -> int:
+    return min(
+        10,
+        max(0, max_tool_calls - _production_tool_call_lower_bound(contract)),
+    )
+
+
+def _render_public_constraint(constraint) -> str:
+    header = (
+        json.dumps(constraint.csv_header, ensure_ascii=False)
+        if constraint.csv_header is not None
+        else "(not constrained)"
+    )
+    if constraint.csv_data_row_count is not None:
+        rows = f"exact data row count: {constraint.csv_data_row_count}"
+    elif constraint.csv_rows is not None:
+        rows = (
+            "exact rows: "
+            + json.dumps(constraint.csv_rows, ensure_ascii=False)
+        )
+    else:
+        rows = "data rows: (not constrained)"
+    return f"- {constraint.path}; exact header: {header}; {rows}"
+
+
+def build_prbench_task_brief(
+    contract: TaskContract,
+    *,
+    max_tool_calls: int | None = None,
+    max_discovery_tool_calls: int | None = None,
+) -> str:
+    total_tool_calls = (
+        max_tool_calls
+        if max_tool_calls is not None
+        else profile_spec(AgentProfile.PRBENCH).max_tool_calls
+    )
+    if (
+        isinstance(total_tool_calls, bool)
+        or not isinstance(total_tool_calls, int)
+        or total_tool_calls <= 0
+    ):
+        raise ValueError("max_tool_calls must be a positive integer")
+    derived_discovery_cap = _discovery_tool_call_cap(contract, total_tool_calls)
+    discovery_cap = (
+        derived_discovery_cap
+        if max_discovery_tool_calls is None
+        else max_discovery_tool_calls
+    )
+    if (
+        isinstance(discovery_cap, bool)
+        or not isinstance(discovery_cap, int)
+        or not 0 <= discovery_cap <= derived_discovery_cap
+    ):
+        raise ValueError("max_discovery_tool_calls exceeds the reserved public budget")
+    production_lower_bound = _production_tool_call_lower_bound(contract)
+    entrypoints = set(contract.execution_entrypoints)
+    expected = ", ".join(
+        f"{path}*" if path in entrypoints else path
+        for path in contract.expected_files
+    )
+    inputs = ", ".join(contract.input_files) or "(none)"
+    constraints = (
+        "\n".join(_render_public_constraint(item) for item in contract.constraints)
+        or "- (none)"
+    )
+    brief = (
+        "PRBench; visible files only.\n"
+        f"Total tool-call budget: {total_tool_calls}\n"
+        f"Minimum production calls: {production_lower_bound} = non-constraint artifact writes "
+        "+ entrypoint process.run\n"
+        f"Discovery call cap: {discovery_cap}\n"
+        f"Read full instruction (file.read): {contract.instruction_file}\n"
+        f"Paper (targeted search.grep): {contract.paper_file}\n"
+        f"Inputs: {inputs}\n"
+        "CSV constraints:\n"
+        f"{constraints}\n"
+        f"Artifacts (*=entrypoint): {expected}\n"
+        "file.read offset/limit: zero-based UTF-8 decoded characters, not lines; "
+        f"default/max={PRBENCH_DEFAULT_FILE_READ_CHARS}/{PRBENCH_MAX_FILE_READ_CHARS}. "
+        "If truncated follow "
+        "next_offset; Do not overlap/re-read. Do not exhaustively page through the paper; use "
+        "targeted grep. Implement via file.write/edit before discovery cap, then process.run "
+        "entrypoints. Verifier reports after each successful tool."
+    )
+    if len(brief) >= 4_000:
+        raise ValueError("PRBench task brief exceeds the public context boundary")
+    return brief
+
+
 def run_prbench(
     workspace: Path,
     contract_path: Path,
@@ -285,6 +395,7 @@ def run_prbench(
     *,
     llm: LLMClient | None = None,
     max_tool_calls: int | None = None,
+    max_context_chars: int | None = None,
     approval_wait_seconds: int = 0,
 ) -> PRBenchRunResult:
     model_name = _safe_model_name(llm)
@@ -308,6 +419,18 @@ def run_prbench(
         or not 0 <= approval_wait_seconds <= 900
     ):
         return _policy_failure(root, model_name)
+    if max_context_chars is not None and (
+        isinstance(max_context_chars, bool)
+        or not isinstance(max_context_chars, int)
+        or not 1_000 <= max_context_chars <= 64_000
+    ):
+        return _policy_failure(root, model_name)
+    if max_tool_calls is not None and (
+        isinstance(max_tool_calls, bool)
+        or not isinstance(max_tool_calls, int)
+        or max_tool_calls <= 0
+    ):
+        return _policy_failure(root, model_name)
     try:
         _ensure_no_ground_truth(root)
         _result_directory(root)
@@ -318,12 +441,10 @@ def run_prbench(
         safe_contract_path = _resolve_workspace_path(root, contract_path, require_file=True)
         safe_approvals_path = _resolve_workspace_path(root, approvals_path, require_file=True)
         contract = TaskContract.model_validate_json(safe_contract_path.read_text(encoding="utf-8"))
-        instruction_path = _resolve_workspace_path(root, contract.instruction_file, require_file=True)
-        paper_path = _resolve_workspace_path(root, contract.paper_file, require_file=True)
-        input_paths = tuple(
+        _resolve_workspace_path(root, contract.instruction_file, require_file=True)
+        _resolve_workspace_path(root, contract.paper_file, require_file=True)
+        for input_file in contract.input_files:
             _resolve_workspace_path(root, input_file, require_file=True)
-            for input_file in contract.input_files
-        )
         for expected_file in contract.expected_files:
             _resolve_workspace_path(root, expected_file, require_file=False)
         approvals = ApprovalManifest.from_json(
@@ -331,6 +452,26 @@ def run_prbench(
             root,
             approval_wait_seconds=approval_wait_seconds,
         )
+        prbench_spec = profile_spec(AgentProfile.PRBENCH)
+        effective_tool_calls = (
+            max_tool_calls
+            if max_tool_calls is not None
+            else prbench_spec.max_tool_calls
+        )
+        discovery_cap = _discovery_tool_call_cap(contract, effective_tool_calls)
+        prompt = build_prbench_task_brief(
+            contract,
+            max_tool_calls=effective_tool_calls,
+            max_discovery_tool_calls=discovery_cap,
+        )
+        effective_context_chars = (
+            max_context_chars
+            if max_context_chars is not None
+            else prbench_spec.max_context_chars
+        )
+        current_input_capacity = max(1_000, effective_context_chars // 3)
+        if len(prompt) > current_input_capacity:
+            return _policy_failure(root, model_name)
     except Exception:
         return _policy_failure(root, model_name)
 
@@ -353,6 +494,7 @@ def run_prbench(
                 api_key=provider.api_key.get_secret_value(),
                 base_url=provider.base_url,
                 model=provider.model,
+                timeout_seconds=_PRBENCH_PROVIDER_TIMEOUT_SECONDS,
             )
         except Exception:
             result = PRBenchRunResult(
@@ -364,29 +506,14 @@ def run_prbench(
             return _persist_if_safe(root, result)
 
     try:
-        instruction_path = _resolve_workspace_path(root, instruction_path, require_file=True)
-        instruction = instruction_path.read_text(encoding="utf-8")
-        paper_path = _resolve_workspace_path(root, paper_path, require_file=True)
-        paper = paper_path.read_text(encoding="utf-8")
-        for input_path in input_paths:
-            _resolve_workspace_path(root, input_path, require_file=True)
-    except Exception:
-        return _policy_failure(root, model_name)
-
-    prompt = (
-        "PRBench public task instruction:\n"
-        f"{instruction}\n\n"
-        "PRBench public paper:\n"
-        f"{paper}\n\n"
-        f"Public input files: {', '.join(contract.input_files) or '(none)'}"
-    )
-    try:
         loop = build_agent(
             SessionMode.NON_INTERACTIVE,
             llm=_SanitizedProvider(resolved_llm),
             approval_handler=approvals,
             profile=AgentProfile.PRBENCH,
-            max_tool_calls=max_tool_calls,
+            max_tool_calls=effective_tool_calls,
+            max_discovery_tool_calls=discovery_cap,
+            max_context_chars=max_context_chars,
             execution_journal=journal,
             completion_verifier=verifier.verify,
             progress_fingerprint=lambda: _progress_fingerprint(journal),
@@ -448,6 +575,12 @@ def prbench_run(
     contract: Path = typer.Option(..., help="Public task contract JSON"),
     approvals: Path = typer.Option(..., help="Exact one-time approval manifest JSON"),
     max_tool_calls: int | None = typer.Option(None, min=1, help="Tool-call budget override"),
+    max_context_chars: int | None = typer.Option(
+        None,
+        min=1_000,
+        max=64_000,
+        help="Context character budget override",
+    ),
     approval_wait_seconds: int = typer.Option(
         0,
         min=0,
@@ -460,6 +593,7 @@ def prbench_run(
         contract,
         approvals,
         max_tool_calls=max_tool_calls,
+        max_context_chars=max_context_chars,
         approval_wait_seconds=approval_wait_seconds,
     )
     for line in prbench_result_lines(result):

@@ -19,6 +19,7 @@ def build_loop(
     approval_handler=None,
     max_steps: int = 5,
     max_tool_calls: int = 40,
+    max_discovery_tool_calls: int | None = None,
 ) -> AgentLoop:
     session = Session(workspace_root=str(tmp_path), mode=SessionMode.NON_INTERACTIVE)
     session_store = SessionStore(session)
@@ -34,6 +35,7 @@ def build_loop(
         session_store=session_store,
         max_steps=max_steps,
         max_tool_calls=max_tool_calls,
+        max_discovery_tool_calls=max_discovery_tool_calls,
         approval_handler=approval_handler,
     )
 
@@ -43,6 +45,39 @@ def test_agent_returns_final_text(tmp_path: Path):
     result = loop.run("hello")
     assert result.final_text == "done"
     assert result.stopped_reason == "final"
+
+
+def test_agent_loop_preserves_original_positional_event_sink_slot(
+    tmp_path: Path,
+) -> None:
+    llm = ScriptedLLM(
+        [[{"type": "assistant_final", "payload": {"text": "done"}}]]
+    )
+    template = build_loop(tmp_path, llm)
+    observed: list[AgentEvent] = []
+
+    loop = AgentLoop(
+        llm,
+        template.context_builder,
+        template.tool_runtime,
+        template.policy_context,
+        template.trace_store,
+        template.session_store,
+        5,
+        None,
+        3,
+        3,
+        40,
+        None,
+        None,
+        False,
+        5,
+        observed.append,
+    )
+    result = loop.run("preserve positional compatibility")
+
+    assert result.stopped_reason == "final"
+    assert observed == result.events
 
 
 def test_agent_result_uses_the_recorded_safe_final_event(tmp_path: Path) -> None:
@@ -353,6 +388,106 @@ def test_tool_budget_finalization_prompt_disables_more_tool_calls(tmp_path: Path
     assert result.final_text == "answer"
     assert llm.messages[1][1] == []
     assert "Tool use is now disabled" in str(llm.messages[1][0])
+
+
+def test_discovery_budget_denies_excess_read_but_allows_following_write(
+    tmp_path: Path,
+) -> None:
+    for name in ("first.txt", "second.txt", "third.txt"):
+        (tmp_path / name).write_text(name, encoding="utf-8")
+    turns = [
+        [
+            {
+                "type": "tool_call_requested",
+                "payload": {
+                    "tool_name": "file.read",
+                    "args": {"path": name, "offset": offset},
+                },
+            }
+        ]
+        for offset, name in enumerate(("first.txt", "second.txt", "third.txt"))
+    ]
+    turns.extend(
+        [
+            [
+                {
+                    "type": "tool_call_requested",
+                    "payload": {
+                        "tool_name": "file.write",
+                        "args": {"path": "result.txt", "content": "produced"},
+                    },
+                }
+            ],
+            [{"type": "assistant_final", "payload": {"text": "done"}}],
+        ]
+    )
+
+    result = build_loop(
+        tmp_path,
+        ScriptedLLM(turns),
+        approval_handler=AUTO_APPROVE,
+        max_steps=6,
+        max_tool_calls=5,
+        max_discovery_tool_calls=2,
+    ).run("discover briefly, then produce")
+
+    assert result.stopped_reason == "final"
+    assert (tmp_path / "result.txt").read_text(encoding="utf-8") == "produced"
+    outputs = [
+        event.payload["status"]
+        for event in result.events
+        if event.type == AgentEventType.TOOL_CALL_OUTPUT
+    ]
+    assert outputs == ["ok", "ok", "policy_blocked", "ok"]
+    denied = next(
+        event
+        for event in result.events
+        if event.type == AgentEventType.POLICY_DECISION
+        and event.payload.get("rule_id") == "runtime.discovery_budget"
+    )
+    assert denied.payload["decision"] == "deny"
+    feedback = next(
+        event
+        for event in result.events
+        if event.type == AgentEventType.FEEDBACK_SIGNAL
+        and event.payload.get("cause")
+        == "file.read:runtime.discovery_budget:policy_blocked"
+    )
+    assert "file.write" in str(feedback.payload["suggested_next_step"])
+    assert "process.run" in str(feedback.payload["suggested_next_step"])
+
+
+def test_default_discovery_budget_preserves_ordinary_agent_semantics(
+    tmp_path: Path,
+) -> None:
+    for index in range(3):
+        (tmp_path / f"part-{index}.txt").write_text(str(index), encoding="utf-8")
+    turns = [
+        [
+            {
+                "type": "tool_call_requested",
+                "payload": {
+                    "tool_name": "file.read",
+                    "args": {"path": f"part-{index}.txt"},
+                },
+            }
+        ]
+        for index in range(3)
+    ]
+    turns.append([{"type": "assistant_final", "payload": {"text": "done"}}])
+
+    result = build_loop(
+        tmp_path,
+        ScriptedLLM(turns),
+        max_steps=5,
+        max_tool_calls=4,
+    ).run("ordinary reads")
+
+    assert result.stopped_reason == "final"
+    assert all(
+        event.payload.get("rule_id") != "runtime.discovery_budget"
+        for event in result.events
+    )
 
 
 @pytest.mark.parametrize(

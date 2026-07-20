@@ -2,7 +2,7 @@
 
 PhyCode 是面向 AI4SE 期末项目的 CLI 优先 coding agent harness，核心是**策略感知工具运行时（Policy-Aware Tool Runtime）**：自研 agent 主循环、可注入 mock/stub 的 LLM 抽象层、确定性治理护栏、反馈闭环、记忆/上下文管理与凭据处理。核心机制在移除真实 LLM 后仍可由确定性单元测试验证。
 
-> 状态：核心重构、确定性验证与 PRBench 官方双任务真实验收均已完成。2026-07-18 在固定 evaluator commit 上，`aaatest_helloworld` 与 `bbbtest_alphabet` 的白色 runner 均为 `completed`，官方绿色 grader 均为 `overall_score=1.0`；默认测试仍不调用真实模型。
+> 状态：核心重构、确定性验证与 PRBench 官方双任务真实验收均已完成。2026-07-18 在固定 evaluator commit 上，`aaatest_helloworld` 与 `bbbtest_alphabet` 的白色 runner 均为 `completed`，官方绿色 grader 均为 `overall_score=1.0`；默认测试仍不调用真实模型。完整公开任务 `task_white_1993` 后续共进行五次正式尝试，但没有一次同时满足成功合同，因此未跑通。
 
 ## 快速开始
 
@@ -97,7 +97,7 @@ uv run phycode prbench run `
 ```powershell
 .\integrations\prbench\run_public_smoke.ps1 `
   -EvaluatorRoot D:\path\to\PRBench-Eval-Handson `
-  -WheelPath D:\path\to\AISE\dist\phycode-0.1.2-py3-none-any.whl `
+  -WheelPath D:\path\to\AISE\dist\phycode-0.1.3-py3-none-any.whl `
   -TaskIds aaatest_helloworld,bbbtest_alphabet
 ```
 
@@ -159,6 +159,107 @@ smoke 脚本因此使用 uv 临时 exact overlay
 expected outputs 与 evaluator 报告存在，并扫描 trace、journal、result 确认不含
 key/URL。该真实 API / Docker 验收不属于默认 `uv run pytest`，也不会在 CI 中自动
 执行。
+
+## PRBench 完整公开任务（正式运行前门禁）
+
+`task_white_1993` 是一个**完整公开任务**，用于验证从公开输入到 20 个声明产物的
+端到端机制；它不是隐藏 holdout，不代表 PRBench 总榜成绩，也不等于本课程最终成绩。
+本节先给出可复现入口、人工审批和成功判定，再记录最终五次正式真实 API / official
+evaluator 结果；不能用确定性 GREEN、adapter apply 或部分评分替代正式成功。
+
+运行源必须是干净 clone，并固定在 evaluator commit
+`3e5bee4545cad2138832f06302e9c98bd81f5216`。先在功能分支
+`codex/prbench-public-test` 构建当前 wheel，再任选本机已安装的 PowerShell 入口执行
+同一个脚本；示例中的 evaluator 与 wheel 路径只使用本机绝对路径：
+
+```powershell
+uv build
+pwsh -NoProfile -File .\integrations\prbench\run_public_full.ps1 `
+  -EvaluatorRoot D:\path\to\PRBench-Eval-Handson `
+  -WheelPath D:\path\to\AISE\dist\phycode-0.1.3-py3-none-any.whl
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  .\integrations\prbench\run_public_full.ps1 `
+  -EvaluatorRoot D:\path\to\PRBench-Eval-Handson `
+  -WheelPath D:\path\to\AISE\dist\phycode-0.1.3-py3-none-any.whl
+```
+
+`run_public_full.ps1` 固定只运行 `task_white_1993`，显式传入最多 `50` 次工具调用、
+`24000` 字（文档记作 24,000）上下文和 `900` 秒审批等待。脚本只创建 reproduction
+文件的精确 write/edit 初始授权，不创建 `process.run`、CSV 或通配授权。
+
+运行期间由**主 agent 人工**从本轮 launcher 日志确认 active workspace。固定 evaluator
+内部路径明确为
+`<EvaluatorRoot>\data\tasks\task_white_1993\workspace`，动态 request 位于
+`<EvaluatorRoot>\data\tasks\task_white_1993\workspace\.phycode\prbench\approval-request.json`，
+active manifest 位于
+`<EvaluatorRoot>\data\tasks\task_white_1993\workspace\phycode-approvals.json`。仓库外的
+attempt/clone 目录只用于命名每轮新的 `EvaluatorRoot`，不是 evaluator 内部的
+`data/workspaces/*` 布局。对每个 request 必须按顺序完成以下门禁：
+
+1. **路径与文件类型**：分别对 request、script 和 manifest 执行 `lstat` 与 realpath，
+   证明三者都在 active workspace 内，且都是非链接普通文件。
+2. **解释器**：确认 `argv[0]` 是 adapter allowlist 中本轮预期的 absolute Python，不能
+   用其他解释器、相对 executable 或 PATH 搜索替代。
+3. **脚本入口**：把 `argv[1]` 相对 `cwd` 解析后，确认它是 contract `expected_files` 中预期的
+   `.py`，不能执行普通清单外脚本。
+4. **工作目录**：确认 `cwd` 必须精确等于 active workspace，不能使用其子目录、父目录
+   或其他 clone/workspace。
+5. **尾随参数**：逐个检查每个尾随 argv 中的路径参数，解析后都必须在 active workspace
+   内；任何 workspace 外路径都拒绝。
+6. **脚本内容**：完整阅读当前脚本，明确拒绝 ground truth、凭据读取或外泄、网络外泄、
+   禁用库、workspace 外访问以及其他超出公开任务的行为。
+7. **内容哈希**：独立复算 SHA-256，并与 request 的 `script_sha256` 精确比较；内容变化
+   后必须重新审核，旧批准不得复用。
+8. **原子批准**：只有前七步全部通过后，才把 request 对象原样追加到 active manifest；
+   使用临时文件、flush、fsync 与 `os.replace` 原子更新，不能手工重建或放宽对象。
+
+不得自动批准，不得改写 request，不得生成通配 grant，不得批准直接写 CSV，也不得静态预授权
+`process.run`；外部脚本不能替 agent 执行 reproduction。
+
+正式验收最多五次，每次都使用新的 fixed-commit evaluator clone 与 workspace。Docker、
+adapter、依赖或容器若在首次白色模型响应前失败，属于基础设施预响应失败，不计数；
+首次白色模型响应后，本轮审批拒绝、provider/process/artifact/budget/grader 失败都计为
+一次。首次同时取得 runner `completed` 和本轮新生成、可解析且 `grading` 为 object、
+不含 `error` 的有效 grader report 后立即停止；两者缺一都不能宣称成功，五次失败则如实
+结束。
+
+### task_white_1993 完整公开任务真实验收
+
+用户把正式尝试上限从 3 次扩展到 5 次，最后两次指定模型 `glm-5.2`。正式尝试次数为 5，
+上限已经用尽，没有第 6 次：
+
+1. 尝试 1：模型 `deepseek-v4-pro`，runner `tool_budget_exhausted`，50 次工具调用，`overall_score` 0.0。
+2. 尝试 2：模型 `deepseek-v4-pro`，runner `provider_error`，13 次工具调用，`overall_score` 0.0。
+3. 尝试 3：模型 `deepseek-v4-pro`，runner `approval_required`，42 次工具调用，20 项声明产物存在 13 项，7 项 CSV 存在 0 项，`overall_score` 0.17。
+4. 尝试 4：模型 `glm-5.2`，runner `provider_error`，11 次工具调用，20 项声明产物存在 0 项，`overall_score` 0.0，约 720 秒。
+5. 尝试 5：模型 `glm-5.2`，runner `provider_error`，11 次工具调用，20 项声明产物存在 0 项，white 约 662 秒、grader 约 700 秒，`overall_score` 0.0。
+
+最佳结果仍是未成功的尝试 3。成功标准始终是 runner `completed` 与有效 green report
+同时成立，五次均未满足，因此完整公开任务未跑通，不能声称成功。首次模型响应前的失败
+不计入正式次数，包括两次 OpenCode 安装相关失败、一次旧 exact-equality contract
+preflight 失败，以及一次手动预检后的 double-adapter clean-check 失败。
+
+正式运行期间的修复/review 关键提交为 `4e831d1`、`a0f8df9`、`c3be45e..fb42598`、
+`2011e84`、`1d30458`、`a5be873`、`1c410ab`、`f99cec8`。最终 contract spec review 为
+Critical / Important / Minor = 0 / 0 / 0；quality review 为 0 / 0 / 1，Ready，唯一 Minor
+是没有用任意未知组名做专门变异测试。artifact review 曾有两个非阻塞 Minor：缺少全局
+CSV capture 总预算，以及缺少真实 Windows junction 集成覆盖。
+
+当前凭据泄漏扫描结果如下：HEAD 的 109 个 tracked regular blobs（仅 mode 100644/100755，
+排除 gitlink）中，两组 exact key 匹配 0、读取错误 0；本地 `.superpowers/sdd` 与 `dist`
+排除 `.git`、`.venv`、`node_modules`、`_ground_truth`、`groundtruth`、`reference` 后的
+1000 个文件中，两组 exact key 匹配 0、读取错误 0，其中日志/trace/report/wheel 筛选出的
+81 个文件同样为两组 exact key 匹配 0、读取错误 0。7 个 provider/PRBench 相关环境变量均
+absent，容器数 0；上述评测产物未提交。
+
+Task 36 脱敏结果记录已完成；Task 36 whole-branch review 与最终复验已完成，最终结论为
+Ready。Task 36 的过程门禁已经完成，但五次正式尝试仍未跑通，不能改写为成功。
+
+evaluator clone、workspace、trace JSONL、execution journal、run result、grader 报告、
+模型生成脚本/CSV 及本地扫描清单都是本机忽略产物：**评测产物不提交**，也不得执行
+`git add`。代码和文档提交只留在功能分支，未经授权不合并或推送到 `main`；运行前后都
+检查 feature branch 与 `main` 洁净，以**保持主分支干净**。
 
 ## 机制演示（mock LLM，确定性）
 

@@ -6,6 +6,7 @@
     "reproduction/hello.py",
     "data/output.csv"
   ],
+  "execution_entrypoints": ["reproduction/hello.py"],
   "constraints": [
     {
       "path": "data/output.csv",

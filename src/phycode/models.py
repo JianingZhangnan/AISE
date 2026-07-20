@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -69,6 +70,42 @@ class AgentProfile(str, Enum):
     CODING = "coding"
     GAIA = "gaia"
     PRBENCH = "prbench"
+
+
+@dataclass(frozen=True)
+class FileReadConfig:
+    default_limit: int | None = None
+    max_limit: int | None = None
+    emit_next_offset: bool = False
+
+    def __post_init__(self) -> None:
+        for field, value in (
+            ("default_limit", self.default_limit),
+            ("max_limit", self.max_limit),
+        ):
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value <= 0
+            ):
+                raise ValueError(f"{field} must be a positive integer or None")
+        if (
+            self.default_limit is not None
+            and self.max_limit is not None
+            and self.default_limit > self.max_limit
+        ):
+            raise ValueError("default_limit cannot exceed max_limit")
+        if self.emit_next_offset and self.default_limit is None:
+            raise ValueError("emit_next_offset requires a finite default_limit")
+
+
+PRBENCH_DEFAULT_FILE_READ_CHARS = 1_200
+PRBENCH_MAX_FILE_READ_CHARS = PRBENCH_DEFAULT_FILE_READ_CHARS
+PRBENCH_FILE_READ_CONFIG = FileReadConfig(
+    default_limit=PRBENCH_DEFAULT_FILE_READ_CHARS,
+    max_limit=PRBENCH_MAX_FILE_READ_CHARS,
+    emit_next_offset=True,
+)
 
 
 class AgentEvent(BaseModel):

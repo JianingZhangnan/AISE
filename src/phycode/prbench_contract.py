@@ -1,13 +1,24 @@
 from __future__ import annotations
 
 import csv
+import io
 import os
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from phycode.execution import ExecutionJournal, ProcessExecutionRecord, file_sha256
+from phycode.execution import (
+    ExecutionJournal,
+    ProcessExecutionRecord,
+    UnsafeWorkspaceFileError,
+    WorkspaceFileContent,
+    WorkspaceFileReadError,
+    read_workspace_regular_file,
+)
 from phycode.visibility import normalize_public_relative_path
+
+
+MAX_CAPTURED_CSV_BYTES = 8 * 1024 * 1024
 
 
 def _path_key(path: str) -> str:
@@ -20,6 +31,7 @@ class ArtifactConstraint(BaseModel):
     path: str
     csv_header: tuple[str, ...] | None = None
     csv_rows: tuple[tuple[str, ...], ...] | None = None
+    csv_data_row_count: int | None = Field(default=None, ge=0)
 
     @field_validator("path")
     @classmethod
@@ -34,6 +46,7 @@ class TaskContract(BaseModel):
     paper_file: str
     input_files: tuple[str, ...] = ()
     expected_files: tuple[str, ...]
+    execution_entrypoints: tuple[str, ...] = ()
     constraints: tuple[ArtifactConstraint, ...] = ()
 
     @field_validator("instruction_file", "paper_file")
@@ -41,7 +54,7 @@ class TaskContract(BaseModel):
     def validate_single_path(cls, value: str) -> str:
         return normalize_public_relative_path(value)
 
-    @field_validator("input_files", "expected_files")
+    @field_validator("input_files", "expected_files", "execution_entrypoints")
     @classmethod
     def validate_path_list(cls, values: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(normalize_public_relative_path(value) for value in values)
@@ -52,6 +65,13 @@ class TaskContract(BaseModel):
         if len(set(expected_keys)) != len(expected_keys):
             raise ValueError("expected_files contains duplicate paths")
         expected_key_set = set(expected_keys)
+        entrypoint_keys = tuple(_path_key(path) for path in self.execution_entrypoints)
+        if len(set(entrypoint_keys)) != len(entrypoint_keys):
+            raise ValueError("execution_entrypoints contains duplicate paths")
+        if any(key not in expected_key_set for key in entrypoint_keys):
+            raise ValueError("execution entrypoints must belong to expected_files")
+        if any(Path(path).suffix.casefold() != ".py" for path in self.execution_entrypoints):
+            raise ValueError("execution entrypoints must be Python files")
         constraint_keys = tuple(_path_key(constraint.path) for constraint in self.constraints)
         if len(set(constraint_keys)) != len(constraint_keys):
             raise ValueError("constraints contains duplicate paths")
@@ -85,50 +105,83 @@ class ArtifactVerifier:
 
     def verify(self) -> VerificationResult:
         issues: list[VerificationIssue] = []
-        paths: dict[str, Path] = {}
+        contents: dict[str, WorkspaceFileContent] = {}
+        entrypoint_keys = {_path_key(path) for path in self.contract.execution_entrypoints}
+        captured_keys = {
+            self._key(constraint.path)
+            for constraint in self.contract.constraints
+            if self._constraint_requires_content(constraint)
+        }
         for relative_path in self.contract.expected_files:
             path = self._resolve(relative_path)
             if path is None:
                 issues.append(self._issue("invalid_artifact_path", relative_path, "Artifact path is not visible"))
                 continue
-            paths[self._key(relative_path)] = path
             try:
-                if not path.is_file():
-                    code = "script_not_executed" if path.suffix.casefold() == ".py" else "missing_artifact"
-                    issues.append(self._issue(code, relative_path, "Required artifact is missing"))
-                    continue
-                if path.stat().st_size == 0:
-                    issues.append(self._issue("empty_artifact", relative_path, "Required artifact is empty"))
-                if path.suffix.casefold() == ".py" and not self._script_has_provenance(relative_path, path):
-                    issues.append(self._issue("script_not_executed", relative_path, "Script was not executed successfully"))
-                if path.suffix.casefold() == ".csv" and not self._csv_has_provenance(relative_path, path):
-                    issues.append(
-                        self._issue(
-                            "csv_without_provenance",
-                            relative_path,
-                            "CSV has no successful execution provenance",
-                        )
-                    )
-            except (OSError, RuntimeError):
+                content = read_workspace_regular_file(
+                    self.workspace_root,
+                    path,
+                    capture_limit=(
+                        MAX_CAPTURED_CSV_BYTES
+                        if self._key(relative_path) in captured_keys
+                        else None
+                    ),
+                )
+            except UnsafeWorkspaceFileError:
+                issues.append(self._issue("invalid_artifact_path", relative_path, "Artifact path is not visible"))
+                continue
+            except WorkspaceFileReadError:
                 issues.append(self._issue("artifact_read_error", relative_path, "Artifact cannot be read safely"))
+                continue
+            if content is None:
+                issues.append(self._issue("missing_artifact", relative_path, "Required artifact is missing"))
+                continue
+            contents[self._key(relative_path)] = content
+            if content.size == 0:
+                issues.append(self._issue("empty_artifact", relative_path, "Required artifact is empty"))
+
+        for relative_path in self.contract.expected_files:
+            content = contents.get(self._key(relative_path))
+            if content is None:
+                continue
+            if self._key(relative_path) in entrypoint_keys and not self._script_has_provenance(
+                relative_path,
+                content.sha256,
+            ):
+                issues.append(
+                    self._issue(
+                        "script_not_executed",
+                        relative_path,
+                        "Entrypoint was not executed successfully",
+                    )
+                )
+            if Path(relative_path).suffix.casefold() == ".csv" and not self._csv_has_provenance(
+                relative_path,
+                content.sha256,
+                contents,
+            ):
+                issues.append(
+                    self._issue(
+                        "csv_without_provenance",
+                        relative_path,
+                        "CSV has no successful execution provenance",
+                    )
+                )
 
         for constraint in self.contract.constraints:
-            path = paths.get(self._key(constraint.path))
-            if path is None:
-                path = self._resolve(constraint.path)
-            try:
-                usable = path is not None and path.is_file() and path.stat().st_size > 0
-            except (OSError, RuntimeError):
-                usable = False
-            if not usable:
+            content = contents.get(self._key(constraint.path))
+            if (
+                content is None
+                or content.size == 0
+                or not self._constraint_requires_content(constraint)
+            ):
                 continue
-            assert path is not None
-            issues.extend(self._verify_csv_constraint(path, constraint))
+            assert content.data is not None
+            issues.extend(self._verify_csv_constraint(content.data, constraint))
 
         return VerificationResult(ok=not issues, issues=tuple(issues))
 
-    def _script_has_provenance(self, relative_path: str, path: Path) -> bool:
-        current_hash = file_sha256(path)
+    def _script_has_provenance(self, relative_path: str, current_hash: str) -> bool:
         key = self._key(relative_path)
         return any(
             record.status == "ok"
@@ -138,10 +191,14 @@ class ArtifactVerifier:
             for record in self.journal.records
         )
 
-    def _csv_has_provenance(self, relative_path: str, path: Path) -> bool:
-        current_hash = file_sha256(path)
+    def _csv_has_provenance(
+        self,
+        relative_path: str,
+        current_hash: str,
+        contents: dict[str, WorkspaceFileContent],
+    ) -> bool:
         key = self._key(relative_path)
-        expected_scripts = self._current_expected_script_hashes()
+        expected_scripts = self._current_entrypoint_hashes(contents)
         for record in self.journal.records:
             if (
                 record.status != "ok"
@@ -156,37 +213,67 @@ class ArtifactVerifier:
                 return True
         return False
 
-    def _current_expected_script_hashes(self) -> dict[str, str]:
+    def _current_entrypoint_hashes(
+        self,
+        contents: dict[str, WorkspaceFileContent],
+    ) -> dict[str, str]:
         scripts: dict[str, str] = {}
-        for relative_path in self.contract.expected_files:
-            if Path(relative_path).suffix.casefold() != ".py":
-                continue
-            path = self._resolve(relative_path)
-            if path is not None and path.is_file():
-                scripts[self._key(relative_path)] = file_sha256(path)
+        for relative_path in self.contract.execution_entrypoints:
+            content = contents.get(self._key(relative_path))
+            if content is not None:
+                scripts[self._key(relative_path)] = content.sha256
         return scripts
 
     def _verify_csv_constraint(
         self,
-        path: Path,
+        data: bytes,
         constraint: ArtifactConstraint,
     ) -> list[VerificationIssue]:
         try:
-            with path.open(newline="", encoding="utf-8") as handle:
-                rows = list(csv.reader(handle))
-        except (OSError, UnicodeError, csv.Error):
+            reader = csv.reader(io.StringIO(data.decode("utf-8"), newline=""))
+            header = next(reader, None)
+            actual_count = 0
+            rows_mismatch = False
+            for row in reader:
+                if constraint.csv_rows is not None and (
+                    actual_count >= len(constraint.csv_rows)
+                    or tuple(row) != constraint.csv_rows[actual_count]
+                ):
+                    rows_mismatch = True
+                actual_count += 1
+            if constraint.csv_rows is not None and actual_count != len(constraint.csv_rows):
+                rows_mismatch = True
+        except (UnicodeError, csv.Error):
             return [self._issue("csv_read_error", constraint.path, "CSV cannot be read")]
         issues: list[VerificationIssue] = []
-        if constraint.csv_header is not None and (not rows or tuple(rows[0]) != constraint.csv_header):
+        if constraint.csv_header is not None and (
+            header is None or tuple(header) != constraint.csv_header
+        ):
             issues.append(self._issue("csv_header_mismatch", constraint.path, "CSV header does not match"))
-        actual_rows = tuple(tuple(row) for row in rows[1:]) if rows else ()
-        if constraint.csv_rows is not None and actual_rows != constraint.csv_rows:
+        if rows_mismatch:
             issues.append(self._issue("csv_rows_mismatch", constraint.path, "CSV rows do not match"))
+        if constraint.csv_data_row_count is not None and actual_count != constraint.csv_data_row_count:
+            issues.append(
+                self._issue(
+                    "csv_row_count_mismatch",
+                    constraint.path,
+                    "CSV data row count does not match",
+                )
+            )
         return issues
+
+    @staticmethod
+    def _constraint_requires_content(constraint: ArtifactConstraint) -> bool:
+        return (
+            constraint.csv_header is not None
+            or constraint.csv_rows is not None
+            or constraint.csv_data_row_count is not None
+        )
 
     def _resolve(self, relative_path: str) -> Path | None:
         try:
-            path = (self.workspace_root / relative_path).resolve(strict=False)
+            normalized = normalize_public_relative_path(relative_path)
+            path = Path(os.path.abspath(self.workspace_root / normalized))
             path.relative_to(self.workspace_root)
             normalize_public_relative_path(path.relative_to(self.workspace_root).as_posix())
         except (OSError, RuntimeError, ValueError):

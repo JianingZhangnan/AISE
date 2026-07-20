@@ -78,7 +78,7 @@ def _configured_adapter_fixture(
         "+adapted\n",
         encoding="utf-8",
     )
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"new-wheel")
     monkeypatch.setattr(adapter_module, "EXPECTED_EVALUATOR_COMMIT", head)
     monkeypatch.setattr(adapter_module, "PATCH_PATH", patch_path)
@@ -127,14 +127,18 @@ def patched_official_evaluator(tmp_path: Path) -> Path:
         capture_output=True,
         text=True,
     )
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"dynamic-adapter-probe")
     apply_adapter(repository, wheel)
     return repository
 
 
 def _load_function(
-    source: Path, function_name: str, globals_: dict[str, object]
+    source: Path,
+    function_name: str,
+    globals_: dict[str, object],
+    *,
+    dependencies: tuple[str, ...] = (),
 ) -> Callable[..., object]:
     """Load one real function without importing the evaluator's optional stack."""
     tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
@@ -145,6 +149,12 @@ def _load_function(
         and node.name == function_name
     )
     function.decorator_list = []
+    dependency_functions = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in dependencies
+    ]
     module = ast.Module(
         body=[
             ast.ImportFrom(
@@ -152,6 +162,7 @@ def _load_function(
                 names=[ast.alias(name="annotations")],
                 level=0,
             ),
+            *dependency_functions,
             function,
         ],
         type_ignores=[],
@@ -180,15 +191,199 @@ def _load_launcher_output_helpers(
         "os": os_module,
         "stat": stat,
     }
+    read_verified_utf8 = _load_function(
+        launcher_path,
+        "_read_verified_utf8",
+        helper_globals,
+    )
+    helper_globals["_read_verified_utf8"] = read_verified_utf8
+    validate_phycode_contract = _load_function(
+        launcher_path,
+        "_validate_phycode_contract",
+        helper_globals,
+    )
+    helper_globals["_validate_phycode_contract"] = validate_phycode_contract
     return {
         "_load_verified_json": _load_function(
             launcher_path, "_load_verified_json", helper_globals
         ),
         "_path_is_within": path_is_within,
+        "_read_verified_utf8": read_verified_utf8,
         "_remove_stale_output": _load_function(
             launcher_path, "_remove_stale_output", helper_globals
         ),
+        "_validate_phycode_contract": validate_phycode_contract,
     }
+
+
+def _load_pinned_public_task_contract_metadata(
+    pinned_evaluator: Path, task_id: str
+) -> dict[str, object]:
+    """Parse the narrow public task.yaml subset from a pinned evaluator fixture."""
+
+    task_yaml = pinned_evaluator / "data" / "tasks" / task_id / "task.yaml"
+
+    def scalar(value: str) -> str:
+        value = value.strip()
+        return cast(str, json.loads(value)) if value.startswith('"') else value
+
+    task_config: dict[str, object] = {
+        "input_files": [],
+        "paper": {},
+        "expected_outputs": {},
+    }
+    section: str | None = None
+    output_group: str | None = None
+    for raw_line in task_yaml.read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if indent == 0:
+            section = None
+            output_group = None
+            if stripped == "paper:":
+                section = "paper"
+            elif stripped == "input_files:":
+                section = "input_files"
+            elif stripped == "expected_outputs:":
+                section = "expected_outputs"
+            elif stripped.startswith("instruction_file:"):
+                task_config["instruction_file"] = scalar(stripped.split(":", 1)[1])
+            continue
+        if section == "paper" and indent == 2 and stripped.startswith("paper_file:"):
+            paper = cast(dict[str, object], task_config["paper"])
+            paper["paper_file"] = scalar(stripped.split(":", 1)[1])
+        elif section == "input_files" and indent == 2 and stripped.startswith("- "):
+            inputs = cast(list[str], task_config["input_files"])
+            inputs.append(scalar(stripped[2:]))
+        elif section == "expected_outputs" and indent == 2 and stripped.endswith(":"):
+            output_group = stripped[:-1]
+            outputs = cast(dict[str, object], task_config["expected_outputs"])
+            outputs[output_group] = []
+        elif (
+            section == "expected_outputs"
+            and output_group is not None
+            and indent == 4
+            and stripped.startswith("- ")
+        ):
+            outputs = cast(dict[str, list[str]], task_config["expected_outputs"])
+            outputs[output_group].append(scalar(stripped[2:]))
+
+    assert isinstance(task_config.get("instruction_file"), str)
+    assert isinstance(cast(dict[str, object], task_config["paper"]).get("paper_file"), str)
+    expected_outputs = task_config["expected_outputs"]
+    assert isinstance(expected_outputs, dict) and expected_outputs
+    assert all(
+        isinstance(group, str)
+        and isinstance(paths, list)
+        and all(isinstance(path, str) for path in paths)
+        for group, paths in expected_outputs.items()
+    )
+    return task_config
+
+
+def test_public_task_metadata_helper_locks_supported_pinned_yaml_subset(
+    tmp_path: Path,
+) -> None:
+    task_yaml = tmp_path / "data" / "tasks" / "public-task" / "task.yaml"
+    task_yaml.parent.mkdir(parents=True)
+    task_yaml.write_text(
+        "paper:\n"
+        '  paper_file: "paper.md"\n'
+        'instruction_file: "instruction.md"\n'
+        "input_files:\n"
+        '  - "input.csv"\n'
+        "expected_outputs:\n"
+        "  analysis:\n"
+        '    - "reproduction/ANALYSIS.md"\n'
+        "  code:\n"
+        "    - reproduction/run.py\n",
+        encoding="utf-8",
+    )
+
+    assert _load_pinned_public_task_contract_metadata(tmp_path, "public-task") == {
+        "instruction_file": "instruction.md",
+        "paper": {"paper_file": "paper.md"},
+        "input_files": ["input.csv"],
+        "expected_outputs": {
+            "analysis": ["reproduction/ANALYSIS.md"],
+            "code": ["reproduction/run.py"],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "task_yaml_text",
+    [
+        "paper:\n"
+        '  paper_file: "paper.md"\n'
+        "expected_outputs:\n"
+        "  data:\n"
+        '    - "result.csv"\n',
+        'instruction_file: "instruction.md"\n'
+        "expected_outputs:\n"
+        "  data:\n"
+        '    - "result.csv"\n',
+        "paper:\n"
+        '  paper_file: "paper.md"\n'
+        'instruction_file: "instruction.md"\n',
+    ],
+    ids=("instruction-file", "paper-file", "expected-outputs"),
+)
+def test_public_task_metadata_helper_requires_contract_fields(
+    tmp_path: Path, task_yaml_text: str
+) -> None:
+    task_yaml = tmp_path / "data" / "tasks" / "public-task" / "task.yaml"
+    task_yaml.parent.mkdir(parents=True)
+    task_yaml.write_text(task_yaml_text, encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        _load_pinned_public_task_contract_metadata(tmp_path, "public-task")
+
+
+def _text_open_calls_missing_utf8(source: Path) -> list[int]:
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    missing_utf8: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name) and node.func.id == "open":
+            mode_index = 1
+        elif isinstance(node.func, ast.Attribute) and node.func.attr == "open":
+            mode_index = (
+                1
+                if isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "io"
+                else 0
+            )
+        else:
+            continue
+        mode_node = node.args[mode_index] if len(node.args) > mode_index else None
+        mode_node = next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "mode"),
+            mode_node,
+        )
+        if mode_node is None:
+            mode = "r"
+        elif isinstance(mode_node, ast.Constant) and isinstance(mode_node.value, str):
+            mode = mode_node.value
+        else:
+            # A static scan cannot prove whether a dynamic mode is text or binary.
+            continue
+        if "b" in mode:
+            continue
+        encoding_node = next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "encoding"),
+            None,
+        )
+        if not (
+            isinstance(encoding_node, ast.Constant)
+            and encoding_node.value == "utf-8"
+        ):
+            missing_utf8.append(node.lineno)
+    return missing_utf8
 
 
 def _load_agent_env(source: Path) -> types.ModuleType:
@@ -231,6 +426,47 @@ def _load_class(
     loaded = namespace[class_name]
     assert isinstance(loaded, type)
     return loaded
+
+
+def _parameter_default(
+    source: Path,
+    function_name: str,
+    parameter_name: str,
+    *,
+    class_name: str | None = None,
+) -> ast.expr:
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    scope: list[ast.stmt] = tree.body
+    if class_name is not None:
+        class_node = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == class_name
+        )
+        scope = class_node.body
+    function = next(
+        node
+        for node in scope
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == function_name
+    )
+    positional = [*function.args.posonlyargs, *function.args.args]
+    first_default = len(positional) - len(function.args.defaults)
+    positional_defaults = {
+        argument.arg: default
+        for argument, default in zip(
+            positional[first_default:], function.args.defaults, strict=True
+        )
+    }
+    keyword_defaults = {
+        argument.arg: default
+        for argument, default in zip(
+            function.args.kwonlyargs, function.args.kw_defaults, strict=True
+        )
+        if default is not None
+    }
+    default = {**positional_defaults, **keyword_defaults}[parameter_name]
+    return default
 
 
 def test_adapter_rejects_wrong_evaluator_commit(tmp_path: Path) -> None:
@@ -284,7 +520,7 @@ def test_adapter_rejects_tracked_changes_at_expected_commit(
 ) -> None:
     head = _commit_file(tmp_path, "README.md", "base\n")
     (tmp_path / "README.md").write_text("locally changed\n", encoding="utf-8")
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"wheel")
     monkeypatch.setattr(adapter_module, "EXPECTED_EVALUATOR_COMMIT", head)
 
@@ -419,7 +655,7 @@ def test_adapter_checks_applies_and_copies_wheel(
         "+adapted\n",
         encoding="utf-8",
     )
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"wheel-bytes")
     monkeypatch.setattr(adapter_module, "EXPECTED_EVALUATOR_COMMIT", head)
     monkeypatch.setattr(adapter_module, "PATCH_PATH", patch_path)
@@ -439,7 +675,7 @@ def test_adapter_subprocess_errors_are_sanitized(
     secret = "sensitive-provider-value"
     invalid_patch = tmp_path / "invalid.patch"
     invalid_patch.write_text(secret, encoding="utf-8")
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"wheel")
     monkeypatch.setattr(adapter_module, "EXPECTED_EVALUATOR_COMMIT", head)
     monkeypatch.setattr(adapter_module, "PATCH_PATH", invalid_patch)
@@ -468,7 +704,7 @@ def test_adapter_rolls_back_when_wheel_staging_fails(
         "+adapted\n",
         encoding="utf-8",
     )
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"wheel")
     monkeypatch.setattr(adapter_module, "EXPECTED_EVALUATOR_COMMIT", head)
     monkeypatch.setattr(adapter_module, "PATCH_PATH", patch_path)
@@ -503,7 +739,7 @@ def test_adapter_reverses_patch_when_atomic_wheel_publish_fails(
         "+adapted\n",
         encoding="utf-8",
     )
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"wheel")
     monkeypatch.setattr(adapter_module, "EXPECTED_EVALUATOR_COMMIT", head)
     monkeypatch.setattr(adapter_module, "PATCH_PATH", patch_path)
@@ -555,6 +791,249 @@ def test_patch_changes_only_required_runtime_files() -> None:
     }
 
 
+def test_official_green_agent_text_open_calls_use_utf8(
+    patched_official_evaluator: Path,
+) -> None:
+    source = patched_official_evaluator / "src/green_agent/agent.py"
+    missing_utf8 = _text_open_calls_missing_utf8(source)
+
+    assert missing_utf8 == [], (
+        "green evaluator text open calls missing encoding='utf-8' at lines "
+        f"{missing_utf8}"
+    )
+
+
+def test_official_green_agent_read_file_safe_round_trips_utf8(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+) -> None:
+    source = patched_official_evaluator / "src/green_agent/agent.py"
+    read_file_safe = _load_function(source, "read_file_safe", {"os": os})
+    expected = "replacement: \ufffd; Chinese: 中文; non-GBK: 🧪"
+    target = tmp_path / "unicode.txt"
+    target.write_text(expected, encoding="utf-8")
+
+    assert read_file_safe(str(target)) == expected
+
+
+def test_official_white_agent_text_open_calls_use_utf8(
+    patched_official_evaluator: Path,
+) -> None:
+    source = patched_official_evaluator / "src/white_agent/agent.py"
+    missing_utf8 = _text_open_calls_missing_utf8(source)
+
+    assert missing_utf8 == [], (
+        "white evaluator text open calls missing encoding='utf-8' at lines "
+        f"{missing_utf8}"
+    )
+
+
+def test_official_white_instruction_writer_round_trips_utf8(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+) -> None:
+    source = patched_official_evaluator / "src/white_agent/agent.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    executor = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "ClaudeCodeWhiteAgentExecutor"
+    )
+    execute = next(
+        node
+        for node in executor.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "execute"
+    )
+    instruction_writer = next(
+        node
+        for node in ast.walk(execute)
+        if isinstance(node, ast.With)
+        and isinstance(node.items[0].context_expr, ast.Call)
+        and isinstance(node.items[0].context_expr.func, ast.Name)
+        and node.items[0].context_expr.func.id == "open"
+        and isinstance(node.items[0].context_expr.args[0], ast.Name)
+        and node.items[0].context_expr.args[0].id == "instruction_path"
+    )
+    writer = ast.FunctionDef(
+        name="write_instruction",
+        args=ast.arguments(
+            posonlyargs=[],
+            args=[ast.arg(arg="instruction_path"), ast.arg(arg="user_input")],
+            kwonlyargs=[],
+            kw_defaults=[],
+            defaults=[],
+        ),
+        body=[instruction_writer],
+        decorator_list=[],
+    )
+    module = ast.Module(body=[writer], type_ignores=[])
+    ast.fix_missing_locations(module)
+
+    def windows_text_open(
+        path: str | os.PathLike[str],
+        mode: str = "r",
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        kwargs.setdefault("encoding", "gbk")
+        return open(path, mode, *args, **kwargs)  # type: ignore[call-overload]
+
+    namespace: dict[str, object] = {"open": windows_text_open}
+    exec(compile(module, str(source), "exec"), namespace)
+    write_instruction = namespace["write_instruction"]
+    assert callable(write_instruction)
+    expected = "minus: \u2212; replacement: \ufffd; Chinese: 中文; emoji: 🧪"
+    target = tmp_path / "instruction.md"
+
+    write_instruction(target, expected)
+
+    assert target.read_text(encoding="utf-8") == expected
+
+
+def test_official_launcher_text_open_calls_use_utf8(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+) -> None:
+    probe = tmp_path / "open_probe.py"
+    probe.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "import io",
+                'open("builtin.txt", "r")',
+                'Path("path.txt").open("w")',
+                'io.open("io.txt", mode="a")',
+                'open("binary.bin", "wb")',
+                'mode = "r"',
+                'open("dynamic.txt", mode)',
+                'open("encoded.txt", "w", encoding="utf-8")',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert _text_open_calls_missing_utf8(probe) == [3, 4, 5]
+
+    source = patched_official_evaluator / "src/launcher.py"
+    missing_utf8 = _text_open_calls_missing_utf8(source)
+
+    assert missing_utf8 == [], (
+        "launcher text open calls missing encoding='utf-8' at lines "
+        f"{missing_utf8}"
+    )
+
+
+def test_official_launcher_verified_json_round_trips_utf8_without_platform_default(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+) -> None:
+    def windows_text_open(
+        path: str | os.PathLike[str],
+        mode: str = "r",
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        kwargs.setdefault("encoding", "gbk")
+        return open(path, mode, *args, **kwargs)  # type: ignore[call-overload]
+
+    launcher = patched_official_evaluator / "src/launcher.py"
+    helpers = _load_launcher_output_helpers(
+        launcher,
+        os,
+        open_function=windows_text_open,
+    )
+    load_verified_json = helpers["_load_verified_json"]
+    expected = {"summary": "Chinese: 中文; non-GBK: 🧪"}
+    output = tmp_path / "result.json"
+    output.write_text(
+        json.dumps(expected, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    valid, payload = load_verified_json(str(tmp_path), str(output))  # type: ignore[operator]
+
+    assert valid is True
+    assert payload == expected
+
+
+@pytest.mark.parametrize("replacement_kind", ["symlink", "regular"])
+def test_official_launcher_verified_json_rejects_lstat_to_open_replacement(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+    replacement_kind: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    output = workspace / "result.json"
+    output.write_text('{"status": "trusted"}', encoding="utf-8")
+    untrusted = tmp_path / "untrusted.json"
+    untrusted.write_text('{"status": "untrusted"}', encoding="utf-8")
+    replacement = workspace / "replacement.json"
+    replacement.write_text('{"status": "untrusted"}', encoding="utf-8")
+    untrusted_reads: list[str] = []
+
+    class RaceOsProxy:
+        path = os.path
+
+        def __init__(self) -> None:
+            self.swapped = False
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(os, name)
+
+        def swap(self, path: str | os.PathLike[str]) -> None:
+            if self.swapped or Path(path) != output:
+                return
+            self.swapped = True
+            if replacement_kind == "regular":
+                output.unlink()
+                replacement.replace(output)
+
+        def open(self, path: str | os.PathLike[str], flags: int) -> int:
+            self.swap(path)
+            if replacement_kind == "symlink":
+                nofollow = getattr(os, "O_NOFOLLOW", 0)
+                if nofollow and flags & nofollow:
+                    raise OSError("synthetic O_NOFOLLOW rejection")
+                return os.open(untrusted, flags)
+            return os.open(path, flags)
+
+        def fdopen(self, descriptor: int, *args: object, **kwargs: object) -> object:
+            untrusted_reads.append("fdopen")
+            return os.fdopen(descriptor, *args, **kwargs)  # type: ignore[call-overload]
+
+    race_os = RaceOsProxy()
+
+    def race_text_open(
+        path: str | os.PathLike[str],
+        mode: str = "r",
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        race_os.swap(path)
+        untrusted_reads.append("open")
+        if replacement_kind == "symlink":
+            return open(untrusted, mode, *args, **kwargs)  # type: ignore[call-overload]
+        return open(path, mode, *args, **kwargs)  # type: ignore[call-overload]
+
+    launcher = patched_official_evaluator / "src/launcher.py"
+    helpers = _load_launcher_output_helpers(
+        launcher,
+        race_os,
+        open_function=race_text_open,
+    )
+    load_verified_json = helpers["_load_verified_json"]
+
+    valid, payload = load_verified_json(  # type: ignore[operator]
+        str(workspace), str(output)
+    )
+
+    assert valid is False
+    assert payload is None
+    assert untrusted_reads == []
+
+
 def test_official_phycode_setup_defers_green_credentials_until_grading(
     patched_official_evaluator: Path,
 ) -> None:
@@ -600,6 +1079,7 @@ def test_official_phycode_setup_defers_green_credentials_until_grading(
         patched_official_evaluator / "src/launcher.py",
         "setup_docker_environment",
         {
+            "_copy_phycode_controls": lambda *_args: None,
             "DockerEnvironment": FakeDockerEnvironment,
             "PROJECT_ROOT": str(patched_official_evaluator),
             "logger": types.SimpleNamespace(info=lambda *_: None),
@@ -609,7 +1089,9 @@ def test_official_phycode_setup_defers_green_credentials_until_grading(
     )
     config = {"docker": {}}
 
-    setup(config, "task", "workspace", "phycode", "opencode")  # type: ignore[operator]
+    setup(  # type: ignore[operator]
+        config, "task", "workspace", "phycode", "opencode", b"{}", None
+    )
 
     assert calls == []
     assert instances[-1].env_vars == {}  # type: ignore[attr-defined]
@@ -698,6 +1180,7 @@ def test_official_setup_cleans_only_its_started_container_and_preserves_error(
         patched_official_evaluator / "src/launcher.py",
         "setup_docker_environment",
         {
+            "_copy_phycode_controls": lambda *_args: None,
             "DockerEnvironment": FakeDockerEnvironment,
             "PROJECT_ROOT": str(patched_official_evaluator),
             "logger": logging.getLogger("test.patched.launcher-setup"),
@@ -714,6 +1197,8 @@ def test_official_setup_cleans_only_its_started_container_and_preserves_error(
             "workspace",
             "phycode",
             "opencode",
+            b"{}",
+            None,
         )
 
     if failure_mode == "post_start_exception":
@@ -737,6 +1222,18 @@ def test_official_launcher_does_not_double_remove_after_setup_self_cleanup(
     task_root = tmp_path / "tasks/public-task"
     task_root.mkdir(parents=True)
     (task_root / "task.yaml").write_text("public task", encoding="utf-8")
+    contract = tmp_path / "contract.json"
+    contract.write_text(
+        json.dumps(
+            {
+                "instruction_file": "instruction.md",
+                "paper_file": "paper.md",
+                "input_files": [],
+                "expected_files": [],
+            }
+        ),
+        encoding="utf-8",
+    )
     owned_remove_calls: list[bool] = []
     outer_remove_calls: list[str | None] = []
     setup_error = RuntimeError("setup failed after owned cleanup")
@@ -784,10 +1281,12 @@ def test_official_launcher_does_not_double_remove_after_setup_self_cleanup(
             "stat": stat,
             "yaml": types.SimpleNamespace(
                 safe_load=lambda _handle: {
+                    "instruction_file": "instruction.md",
                     "docker": {},
                     "paper": {
                         "title": "Public task",
                         "author": "Public author",
+                        "paper_file": "paper.md",
                     },
                 }
             ),
@@ -804,6 +1303,7 @@ def test_official_launcher_does_not_double_remove_after_setup_self_cleanup(
                     white_port=9002,
                     white_agent_type="phycode",
                     green_agent_type="opencode",
+                    phycode_contract=str(contract),
                     archive=False,
                 ),
             )
@@ -1157,6 +1657,7 @@ def test_official_setup_preserves_original_error_when_real_stop_hits_base_except
         patched_official_evaluator / "src/launcher.py",
         "setup_docker_environment",
         {
+            "_copy_phycode_controls": lambda *_args: None,
             "DockerEnvironment": FakeDockerEnvironment,
             "PROJECT_ROOT": str(patched_official_evaluator),
             "logger": logger,
@@ -1167,7 +1668,15 @@ def test_official_setup_preserves_original_error_when_real_stop_hits_base_except
     caplog.set_level(logging.INFO, logger="test.patched.real-stop-setup")
 
     with pytest.raises(RuntimeError) as raised:
-        setup({"docker": {}}, "task", "workspace", "phycode", "opencode")
+        setup(
+            {"docker": {}},
+            "task",
+            "workspace",
+            "phycode",
+            "opencode",
+            b"{}",
+            None,
+        )
 
     assert raised.value is original_error
     assert events == [("stop", 10), ("remove", True)]
@@ -1199,6 +1708,8 @@ def test_official_launch_cli_exposes_and_bounds_approval_wait(
 
     assert help_result.returncode == 0
     assert "--approval-wait-seconds" in help_result.stdout
+    assert "--phycode-max-tool-calls" in help_result.stdout
+    assert "--phycode-max-context-chars" in help_result.stdout
 
     invalid_result = subprocess.run(
         [sys.executable, str(main), "launch", "--approval-wait-seconds", "901"],
@@ -1211,6 +1722,167 @@ def test_official_launch_cli_exposes_and_bounds_approval_wait(
 
     assert invalid_result.returncode != 0
     assert "900" in invalid_result.stderr
+
+    for option, value, boundary in (
+        ("--phycode-max-tool-calls", "0", "1"),
+        ("--phycode-max-tool-calls", "101", "100"),
+        ("--phycode-max-context-chars", "999", "1000"),
+        ("--phycode-max-context-chars", "64001", "64000"),
+    ):
+        invalid_result = subprocess.run(
+            [sys.executable, str(main), "launch", option, value],
+            cwd=patched_official_evaluator,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=cli_env,
+        )
+
+        assert invalid_result.returncode != 0
+        assert boundary in invalid_result.stderr
+
+
+def test_official_phycode_defaults_stay_consistent_and_reach_command(
+    patched_official_evaluator: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    main_path = patched_official_evaluator / "main.py"
+    launcher_path = patched_official_evaluator / "src/launcher.py"
+    white_path = patched_official_evaluator / "src/white_agent/agent.py"
+    expected_defaults = {
+        "max_tool_calls": 40,
+        "max_context_chars": 12_000,
+    }
+
+    for parameter_name, expected in (
+        ("phycode_max_tool_calls", expected_defaults["max_tool_calls"]),
+        ("phycode_max_context_chars", expected_defaults["max_context_chars"]),
+    ):
+        option = _parameter_default(main_path, "launch", parameter_name)
+        assert isinstance(option, ast.Call)
+        assert isinstance(option.func, ast.Attribute)
+        assert isinstance(option.func.value, ast.Name)
+        assert (option.func.value.id, option.func.attr) == ("typer", "Option")
+        assert ast.literal_eval(option.args[0]) == expected
+        assert ast.literal_eval(
+            _parameter_default(
+                launcher_path,
+                "launch_evaluation",
+                parameter_name,
+            )
+        ) == expected
+
+    assert ast.literal_eval(
+        _parameter_default(white_path, "start_white_agent", "max_tool_calls")
+    ) == expected_defaults["max_tool_calls"]
+    assert ast.literal_eval(
+        _parameter_default(white_path, "start_white_agent", "max_context_chars")
+    ) == expected_defaults["max_context_chars"]
+
+    assert ast.literal_eval(
+        _parameter_default(
+            white_path,
+            "__init__",
+            "max_tool_calls",
+            class_name="ClaudeCodeWhiteAgentExecutor",
+        )
+    ) == expected_defaults["max_tool_calls"]
+    assert ast.literal_eval(
+        _parameter_default(
+            white_path,
+            "__init__",
+            "max_context_chars",
+            class_name="ClaudeCodeWhiteAgentExecutor",
+        )
+    ) == expected_defaults["max_context_chars"]
+
+    agent_env_module = types.ModuleType("src.my_util.agent_env")
+    agent_env_module.build_docker_exec_env_flags = (  # type: ignore[attr-defined]
+        lambda _agent_type: ["-e", "HOME=/home/agent"]
+    )
+    agent_env_module.resolve_env = lambda _agent_type: {}  # type: ignore[attr-defined]
+
+    def run_with_cleanup(
+        action: Callable[[], object],
+        provider_env: dict[str, str],
+        process_env: dict[str, str],
+    ) -> object:
+        try:
+            return action()
+        finally:
+            provider_env.clear()
+            process_env.clear()
+
+    agent_env_module.run_with_phycode_cleanup = run_with_cleanup  # type: ignore[attr-defined]
+    src_module = types.ModuleType("src")
+    src_module.__path__ = []  # type: ignore[attr-defined]
+    util_module = types.ModuleType("src.my_util")
+    util_module.__path__ = []  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "src", src_module)
+    monkeypatch.setitem(sys.modules, "src.my_util", util_module)
+    monkeypatch.setitem(sys.modules, "src.my_util.agent_env", agent_env_module)
+
+    commands: list[list[str]] = []
+
+    def fake_popen(command: list[str], **_kwargs: object) -> types.SimpleNamespace:
+        commands.append(command)
+        return types.SimpleNamespace(pid=1234)
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    class FakeRunningTask:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+    class FakeContext:
+        context_id = None
+
+        def get_user_input(self) -> str:
+            return "perform the public task"
+
+    class FakeEventQueue:
+        async def enqueue_event(self, _event: object) -> None:
+            pass
+
+    executor_class = _load_class(
+        white_path,
+        "ClaudeCodeWhiteAgentExecutor",
+        {
+            "AgentExecutor": object,
+            "RunningTask": FakeRunningTask,
+            "json": json,
+            "logger": types.SimpleNamespace(
+                info=lambda *_: None,
+                error=lambda *_: None,
+            ),
+            "new_agent_text_message": lambda *args, **kwargs: (args, kwargs),
+            "os": os,
+            "uuid": types.SimpleNamespace(
+                uuid4=lambda: types.SimpleNamespace(hex="12345678abcdef")
+            ),
+        },
+    )
+    executor = executor_class(
+        workspace_base=str(tmp_path),
+        docker_container_id="container-id",
+        agent_type="phycode",
+        provider_env={"PHYCODE_API_KEY": "synthetic-value"},
+    )
+
+    assert executor.max_tool_calls == 40  # type: ignore[attr-defined]
+    assert executor.max_context_chars == 12_000  # type: ignore[attr-defined]
+    asyncio.run(
+        executor.execute(FakeContext(), FakeEventQueue())  # type: ignore[attr-defined]
+    )
+
+    assert len(commands) == 1
+    assert commands[0][-1].endswith(
+        "--approval-wait-seconds 0 "
+        "--max-tool-calls 40 "
+        "--max-context-chars 12000"
+    )
+    assert "synthetic-value" not in str(commands[0])
 
 
 @pytest.mark.parametrize("approval_wait_seconds", [-1, 901])
@@ -1228,6 +1900,1094 @@ def test_official_launcher_rejects_invalid_approval_wait_before_container_setup(
         asyncio.run(
             launch_evaluation(approval_wait_seconds=approval_wait_seconds)  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.parametrize(
+    ("limits", "message"),
+    [
+        ({"phycode_max_tool_calls": 0}, "tool calls"),
+        ({"phycode_max_tool_calls": 101}, "tool calls"),
+        ({"phycode_max_context_chars": 999}, "context chars"),
+        ({"phycode_max_context_chars": 64_001}, "context chars"),
+    ],
+)
+def test_official_launcher_rejects_invalid_phycode_limits_before_container_setup(
+    patched_official_evaluator: Path,
+    limits: dict[str, int],
+    message: str,
+) -> None:
+    launch_evaluation = _load_function(
+        patched_official_evaluator / "src/launcher.py",
+        "launch_evaluation",
+        {},
+    )
+
+    with pytest.raises(ValueError, match=message):
+        asyncio.run(launch_evaluation(**limits))  # type: ignore[arg-type]
+
+
+def test_official_validator_accepts_every_tracked_public_contract(
+    patched_official_evaluator: Path,
+) -> None:
+    validate_contract = cast(
+        Callable[[dict[str, object], str | None, bool], bytes],
+        _load_launcher_output_helpers(
+            patched_official_evaluator / "src/launcher.py", os
+        )["_validate_phycode_contract"],
+    )
+    contract_paths = sorted(Path("integrations/prbench/public_contracts").glob("*.json"))
+
+    assert contract_paths
+    for contract_path in contract_paths:
+        task_yaml = (
+            patched_official_evaluator
+            / "data"
+            / "tasks"
+            / contract_path.stem
+            / "task.yaml"
+        )
+        assert task_yaml.is_file(), contract_path.stem
+        task_config = _load_pinned_public_task_contract_metadata(
+            patched_official_evaluator, contract_path.stem
+        )
+
+        snapshot = validate_contract(task_config, str(contract_path.resolve()), False)
+
+        assert snapshot == contract_path.read_bytes(), contract_path.stem
+
+
+@pytest.mark.parametrize("fold_case", [False, True], ids=("posix-host", "windows-host"))
+def test_official_validator_uses_case_sensitive_workspace_keys_on_every_host(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fold_case: bool,
+) -> None:
+    monkeypatch.setattr(
+        os.path,
+        "normcase",
+        (lambda path: path.casefold()) if fold_case else (lambda path: path),
+    )
+    validate_contract = cast(
+        Callable[[dict[str, object], str | None, bool], bytes],
+        _load_launcher_output_helpers(
+            patched_official_evaluator / "src/launcher.py",
+            os,
+        )["_validate_phycode_contract"],
+    )
+    task_config = {
+        "instruction_file": "instruction.md",
+        "paper": {"paper_file": "paper.md"},
+        "input_files": [],
+        "expected_outputs": {"data": ["data/Result.csv"]},
+    }
+    contract = tmp_path / "contract.json"
+    contract.write_text(
+        json.dumps(
+            {
+                "instruction_file": "instruction.md",
+                "paper_file": "paper.md",
+                "input_files": [],
+                "expected_files": ["data/result.csv"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="Explicit PhyCode contract is invalid"):
+        validate_contract(task_config, str(contract), False)
+
+
+def test_task_white_1993_missing_analysis_is_rejected_before_provider_or_docker(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+) -> None:
+    task_id = "task_white_1993"
+    task_config = _load_pinned_public_task_contract_metadata(
+        patched_official_evaluator, task_id
+    )
+    contract_payload = json.loads(
+        Path(f"integrations/prbench/public_contracts/{task_id}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert isinstance(contract_payload, dict)
+    expected_files = contract_payload["expected_files"]
+    assert isinstance(expected_files, list)
+    expected_files.remove("reproduction/ANALYSIS.md")
+    contract = tmp_path / "contract.json"
+    contract.write_text(json.dumps(contract_payload), encoding="utf-8")
+    side_effects: list[str] = []
+
+    class ProviderReached(RuntimeError):
+        pass
+
+    def resolve_env(_agent_type: str) -> dict[str, str]:
+        side_effects.append("resolve-env")
+        raise ProviderReached
+
+    def setup_docker_environment(*_args: object, **_kwargs: object) -> object:
+        side_effects.append("docker-setup")
+        raise AssertionError("contract validation must run before Docker setup")
+
+    launch_evaluation = _load_function(
+        patched_official_evaluator / "src/launcher.py",
+        "launch_evaluation",
+        {
+            "DATA_DIR": str(patched_official_evaluator / "data" / "tasks"),
+            "json": json,
+            "logger": types.SimpleNamespace(error=lambda *_: None, info=lambda *_: None),
+            "logging": types.SimpleNamespace(
+                INFO=20,
+                basicConfig=lambda **_kwargs: None,
+                FileHandler=lambda *_args: object(),
+                StreamHandler=lambda *_args: object(),
+            ),
+            "open": open,
+            "os": os,
+            "resolve_env": resolve_env,
+            "setup_docker_environment": setup_docker_environment,
+            "stat": stat,
+            "yaml": types.SimpleNamespace(safe_load=lambda _handle: task_config),
+        },
+        dependencies=(
+            "_path_is_within",
+            "_read_verified_utf8",
+            "_validate_phycode_contract",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Explicit PhyCode contract is invalid"):
+        asyncio.run(
+            launch_evaluation(  # type: ignore[arg-type]
+                task_id=task_id,
+                green_port=9001,
+                white_port=9002,
+                white_agent_type="phycode",
+                green_agent_type="opencode",
+                phycode_contract=str(contract),
+            )
+        )
+
+    assert side_effects == []
+
+
+def test_official_launcher_validates_explicit_expected_file_superset_before_provider(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+) -> None:
+    side_effects: list[str] = []
+    task_root = tmp_path / "tasks/public-task"
+    task_root.mkdir(parents=True)
+    (task_root / "task.yaml").write_text("public task", encoding="utf-8")
+    task_config = {
+        "instruction_file": "instruction.md",
+        "paper": {"paper_file": "paper.md"},
+        "input_files": [],
+        "expected_outputs": {
+            "analysis": ["analysis.md"],
+            "code": ["reproduce.py"],
+            "data": ["result.csv"],
+            "report": ["report.md"],
+        },
+    }
+
+    class ProviderReached(RuntimeError):
+        pass
+
+    def resolve_env(_agent_type: str) -> dict[str, str]:
+        side_effects.append("resolve-env")
+        raise ProviderReached
+
+    def setup_docker_environment(*_args: object, **_kwargs: object) -> object:
+        side_effects.append("docker-setup")
+        raise AssertionError("contract validation must run before Docker setup")
+
+    launcher = patched_official_evaluator / "src/launcher.py"
+    launch_evaluation = _load_function(
+        launcher,
+        "launch_evaluation",
+        {
+            "DATA_DIR": str(tmp_path / "tasks"),
+            "json": json,
+            "logger": types.SimpleNamespace(error=lambda *_: None, info=lambda *_: None),
+            "logging": types.SimpleNamespace(
+                INFO=20,
+                basicConfig=lambda **_kwargs: None,
+                FileHandler=lambda *_args: object(),
+                StreamHandler=lambda *_args: object(),
+            ),
+            "open": open,
+            "os": os,
+            "resolve_env": resolve_env,
+            "setup_docker_environment": setup_docker_environment,
+            "stat": stat,
+            "yaml": types.SimpleNamespace(safe_load=lambda _handle: task_config),
+        },
+        dependencies=(
+            "_path_is_within",
+            "_read_verified_utf8",
+            "_validate_phycode_contract",
+        ),
+    )
+    contract = tmp_path / "contract.json"
+    base_contract: dict[str, object] = {
+        "instruction_file": "instruction.md",
+        "paper_file": "paper.md",
+        "input_files": [],
+        "expected_files": [
+            "analysis.md",
+            "reproduce.py",
+            "extras/entry.py",
+            "result.csv",
+            "extras/report.csv",
+            "report.md",
+        ],
+        "execution_entrypoints": ["extras/entry.py"],
+        "constraints": [
+            {"path": "extras/report.csv", "csv_header": ["value"]}
+        ],
+    }
+
+    contract.write_text(json.dumps(base_contract), encoding="utf-8")
+    with pytest.raises(ProviderReached):
+        asyncio.run(
+            launch_evaluation(  # type: ignore[arg-type]
+                task_id="public-task",
+                green_port=9001,
+                white_port=9002,
+                white_agent_type="phycode",
+                green_agent_type="opencode",
+                phycode_contract=str(contract),
+            )
+        )
+    assert side_effects == ["resolve-env"]
+
+    declared_expected = ["analysis.md", "reproduce.py", "result.csv", "report.md"]
+    invalid_expected_files = {
+        "missing declared group": declared_expected[:-1],
+        "reordered declared groups": [
+            "reproduce.py",
+            "analysis.md",
+            "result.csv",
+            "report.md",
+        ],
+        "duplicate": [*declared_expected, "report.md"],
+        "empty": [*declared_expected, ""],
+        "dot": [*declared_expected, "."],
+        "dot-dot": [*declared_expected, ".."],
+        "traversal": [*declared_expected, "extra/../escape.txt"],
+        "posix absolute": [*declared_expected, "/absolute.txt"],
+        "windows absolute": [*declared_expected, "C:\\absolute.txt"],
+        "hidden fixture": [*declared_expected, "_ground_truth/data.csv"],
+        "credential": [*declared_expected, ".env"],
+        "non-string": [*declared_expected, 7],
+    }
+    for label, expected_files in invalid_expected_files.items():
+        side_effects.clear()
+        invalid_contract = {
+            **base_contract,
+            "expected_files": expected_files,
+            "execution_entrypoints": [],
+            "constraints": [],
+        }
+        contract.write_text(json.dumps(invalid_contract), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="PhyCode contract"):
+            asyncio.run(
+                launch_evaluation(  # type: ignore[arg-type]
+                    task_id="public-task",
+                    green_port=9001,
+                    white_port=9002,
+                    white_agent_type="phycode",
+                    green_agent_type="opencode",
+                    phycode_contract=str(contract),
+                )
+            )
+
+        assert side_effects == [], label
+
+
+def test_official_launcher_does_not_derive_approvals_from_safe_contract_superset(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+) -> None:
+    task_root = tmp_path / "tasks/public-task"
+    task_root.mkdir(parents=True)
+    (task_root / "task.yaml").write_text("public task", encoding="utf-8")
+    task_config = {
+        "instruction_file": "instruction.md",
+        "paper": {
+            "title": "Public task",
+            "author": "Public author",
+            "paper_file": "paper.md",
+        },
+        "input_files": [],
+        "expected_outputs": {
+            "code": ["reproduce.py"],
+            "data": ["result.csv"],
+        },
+    }
+    contract = tmp_path / "contract.json"
+    contract.write_text(
+        json.dumps(
+            {
+                "instruction_file": "instruction.md",
+                "paper_file": "paper.md",
+                "input_files": [],
+                "expected_files": [
+                    "reproduce.py",
+                    "extras/entry.py",
+                    "result.csv",
+                    "extras/report.csv",
+                ],
+                "execution_entrypoints": ["extras/entry.py"],
+                "constraints": [
+                    {"path": "extras/report.csv", "csv_header": ["value"]}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    side_effects: list[str] = []
+    approval_snapshots: list[bytes] = []
+
+    class ReachedDockerSetup(RuntimeError):
+        pass
+
+    def resolve_env(agent_type: str) -> dict[str, str]:
+        assert agent_type == "phycode"
+        side_effects.append("resolve-env")
+        return {}
+
+    def setup_docker_environment(*_args: object, **kwargs: object) -> object:
+        side_effects.append("docker-setup")
+        approval_snapshot = kwargs["phycode_approvals_snapshot"]
+        assert isinstance(approval_snapshot, bytes)
+        approval_snapshots.append(approval_snapshot)
+        raise ReachedDockerSetup
+
+    launch_evaluation = _load_function(
+        patched_official_evaluator / "src/launcher.py",
+        "launch_evaluation",
+        {
+            "DATA_DIR": str(tmp_path / "tasks"),
+            "_archive_trace": lambda *_args: None,
+            "_archive_workspace": lambda *_args: "archive-destination",
+            "_copy_input_files": lambda *_args: None,
+            "_copy_paper_images": lambda *_args: None,
+            "_copy_paper_markdown": lambda *_args: None,
+            "_export_traces_for_type": lambda *_args: None,
+            "_kill_process": lambda *_args: None,
+            "_path_is_within": lambda *_args: True,
+            "_remove_container": lambda *_args: None,
+            "_remove_stale_output": lambda *_args: None,
+            "find_free_port_pair": lambda: (9001, 9002),
+            "json": json,
+            "logger": types.SimpleNamespace(
+                error=lambda *_: None,
+                info=lambda *_: None,
+            ),
+            "logging": types.SimpleNamespace(
+                INFO=20,
+                basicConfig=lambda **_kwargs: None,
+                FileHandler=lambda *_args: object(),
+                StreamHandler=lambda *_args: object(),
+            ),
+            "open": open,
+            "os": os,
+            "resolve_env": resolve_env,
+            "setup_docker_environment": setup_docker_environment,
+            "stat": stat,
+            "yaml": types.SimpleNamespace(safe_load=lambda _handle: task_config),
+        },
+        dependencies=(
+            "_path_is_within",
+            "_read_verified_utf8",
+            "_validate_phycode_contract",
+            "_validate_phycode_approvals",
+        ),
+    )
+
+    with pytest.raises(ReachedDockerSetup):
+        asyncio.run(
+            launch_evaluation(  # type: ignore[arg-type]
+                task_id="public-task",
+                green_port=9001,
+                white_port=9002,
+                white_agent_type="phycode",
+                green_agent_type="opencode",
+                phycode_contract=str(contract),
+                archive=False,
+            )
+        )
+
+    assert side_effects == ["resolve-env", "docker-setup"]
+    assert approval_snapshots == [b'{\n  "grants": []\n}\n']
+
+
+@pytest.mark.parametrize(
+    "contract_case",
+    [
+        "malformed",
+        "non_object",
+        "schema",
+        "filename",
+        "input_files",
+        "expected_files",
+    ],
+)
+def test_official_launcher_rejects_untrusted_phycode_contract_before_agent_side_effects(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+    contract_case: str,
+) -> None:
+    side_effects: list[str] = []
+    task_root = tmp_path / "tasks/public-task"
+    task_root.mkdir(parents=True)
+    (task_root / "task.yaml").write_text("public task", encoding="utf-8")
+    task_config = {
+        "instruction_file": "instruction.md",
+        "paper": {
+            "title": "Public task",
+            "author": "Public author",
+            "paper_file": "paper.md",
+        },
+        "input_files": ["input.csv"],
+        "expected_outputs": {
+            "code": ["reproduce.py"],
+            "data": ["result.csv"],
+        },
+    }
+    contract_payload: dict[str, object] | list[object] = {
+        "instruction_file": "instruction.md",
+        "paper_file": "paper.md",
+        "input_files": ["input.csv"],
+        "expected_files": ["reproduce.py", "result.csv"],
+    }
+    if contract_case == "non_object":
+        contract_payload = []
+    elif contract_case == "schema":
+        assert isinstance(contract_payload, dict)
+        contract_payload["unexpected"] = True
+    elif contract_case == "filename":
+        assert isinstance(contract_payload, dict)
+        contract_payload["instruction_file"] = "../instruction.md"
+    elif contract_case == "input_files":
+        assert isinstance(contract_payload, dict)
+        contract_payload["input_files"] = []
+    elif contract_case == "expected_files":
+        assert isinstance(contract_payload, dict)
+        contract_payload["expected_files"] = ["reproduce.py"]
+
+    contract = tmp_path / "contract.json"
+    contract.write_text(
+        "{" if contract_case == "malformed" else json.dumps(contract_payload),
+        encoding="utf-8",
+    )
+
+    def resolve_env(_agent_type: str) -> dict[str, str]:
+        side_effects.append("resolve-env")
+        return {}
+
+    def setup_docker_environment(*_args: object, **_kwargs: object) -> object:
+        side_effects.append("docker-setup")
+        raise RuntimeError("agent side effect reached")
+
+    launch_evaluation = _load_function(
+        patched_official_evaluator / "src/launcher.py",
+        "launch_evaluation",
+        {
+            "DATA_DIR": str(tmp_path / "tasks"),
+            "_copy_input_files": lambda *_args: None,
+            "_copy_paper_images": lambda *_args: None,
+            "_copy_paper_markdown": lambda *_args: None,
+            "_copy_phycode_controls": lambda *_args: None,
+            "_archive_trace": lambda *_args: None,
+            "_archive_workspace": lambda *_args: "archive-destination",
+            "_export_traces_for_type": lambda *_args: None,
+            "_kill_process": lambda *_args: None,
+            "_path_is_within": lambda *_args: True,
+            "_remove_container": lambda *_args: None,
+            "_remove_stale_output": lambda *_args: None,
+            "find_free_port_pair": lambda: (9001, 9002),
+            "json": json,
+            "logger": types.SimpleNamespace(
+                error=lambda *_: None,
+                info=lambda *_: None,
+            ),
+            "logging": types.SimpleNamespace(
+                INFO=20,
+                basicConfig=lambda **_kwargs: None,
+                FileHandler=lambda *_args: object(),
+                StreamHandler=lambda *_args: object(),
+            ),
+            "open": open,
+            "os": os,
+            "stat": stat,
+            "resolve_env": resolve_env,
+            "setup_docker_environment": setup_docker_environment,
+            "yaml": types.SimpleNamespace(safe_load=lambda _handle: task_config),
+        },
+        dependencies=(
+            "_path_is_within",
+            "_read_verified_utf8",
+            "_validate_phycode_contract",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="PhyCode contract"):
+        asyncio.run(
+            launch_evaluation(  # type: ignore[arg-type]
+                task_id="public-task",
+                white_agent_type="phycode",
+                green_agent_type="opencode",
+                phycode_contract=str(contract),
+            )
+        )
+
+    assert side_effects == []
+
+
+def test_official_phycode_control_writes_fail_closed_on_target_or_workspace_swap(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+) -> None:
+    launcher = patched_official_evaluator / "src/launcher.py"
+    task_config = {
+        "instruction_file": "instruction.md",
+        "paper": {"paper_file": "paper.md"},
+    }
+    contract_snapshot = b'{"contract": "trusted"}'
+    approval_snapshot = b'{"grants": []}'
+    sentinel_bytes = b"outside-sentinel"
+    race_results: list[tuple[str, bool, bytes, bool, bool, bool, bool, bool]] = []
+
+    for race_kind in ("approval-target", "workspace-parent", "contract-close"):
+        case_dir = tmp_path / race_kind
+        task_dir = case_dir / "task"
+        workspace = task_dir / "workspace"
+        outside = case_dir / "outside"
+        alternate_workspace = case_dir / "alternate-workspace"
+        workspace.mkdir(parents=True)
+        outside.mkdir()
+        alternate_workspace.mkdir()
+        (task_dir / "instruction.md").write_text(
+            "public instruction", encoding="utf-8"
+        )
+        (workspace / "paper.md").write_text("public paper", encoding="utf-8")
+        approvals = case_dir / "approvals.json"
+        approvals.write_bytes(b'{"grants": []}')
+        sentinel = outside / "sentinel.json"
+        sentinel.write_bytes(sentinel_bytes)
+        approvals_dst = workspace / "phycode-approvals.json"
+        contract_dst = workspace / "task_contract.json"
+        opened_descriptors: set[int] = set()
+        closed_descriptors: set[int] = set()
+        control_unlink_calls = 0
+
+        class RaceOsProxy:
+            path = os.path
+            supports_dir_fd: set[object] = set()
+
+            def __init__(self) -> None:
+                self.workspace_swapped = False
+                self.contract_descriptor: int | None = None
+                self.close_failed = False
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(os, name)
+
+            def lstat(self, path: str | os.PathLike[str]) -> os.stat_result:
+                if self.workspace_swapped and Path(path) == workspace:
+                    return os.lstat(alternate_workspace)
+                return os.lstat(path)
+
+            def open(
+                self,
+                path: str | os.PathLike[str],
+                flags: int,
+                mode: int = 0o777,
+                **kwargs: object,
+            ) -> int:
+                target = Path(path)
+                is_control_create = bool(flags & os.O_CREAT) and target in {
+                    contract_dst,
+                    approvals_dst,
+                }
+                if is_control_create and (
+                    (race_kind == "approval-target" and target == approvals_dst)
+                    or (race_kind == "workspace-parent" and target == contract_dst)
+                ):
+                    descriptor = (
+                        os.open(path, flags, mode, **kwargs)  # type: ignore[call-overload]
+                        if race_kind == "workspace-parent"
+                        else os.open(sentinel, os.O_WRONLY)
+                    )
+                    opened_descriptors.add(descriptor)
+                    if race_kind == "workspace-parent":
+                        self.workspace_swapped = True
+                    return descriptor
+                descriptor = os.open(path, flags, mode, **kwargs)  # type: ignore[call-overload]
+                if is_control_create and race_kind == "contract-close":
+                    opened_descriptors.add(descriptor)
+                    if target == contract_dst:
+                        self.contract_descriptor = descriptor
+                return descriptor
+
+            def close(self, descriptor: int) -> None:
+                closed_descriptors.add(descriptor)
+                os.close(descriptor)
+                if (
+                    race_kind == "contract-close"
+                    and descriptor == self.contract_descriptor
+                    and not self.close_failed
+                ):
+                    self.close_failed = True
+                    raise OSError("synthetic close failure")
+
+            def unlink(
+                self, path: str | os.PathLike[str], **kwargs: object
+            ) -> None:
+                nonlocal control_unlink_calls
+                if race_kind == "approval-target" and Path(path) == contract_dst:
+                    displaced = outside / "displaced-contract.json"
+                    os.replace(contract_dst, displaced)
+                    os.link(sentinel, contract_dst)
+                control_unlink_calls += 1
+                os.unlink(path, **kwargs)  # type: ignore[call-overload]
+
+        race_os = RaceOsProxy()
+
+        copy_controls = _load_function(
+            launcher,
+            "_copy_phycode_controls",
+            {
+                "os": race_os,
+                "shutil": shutil,
+                "stat": stat,
+            },
+            dependencies=(
+                "_path_is_within",
+                "_read_verified_utf8",
+                "_is_reparse_point",
+                "_phycode_workspace_identity",
+                "_verify_phycode_control",
+                "_preflight_phycode_controls",
+                "_write_phycode_control",
+            ),
+        )
+
+        raised = False
+        try:
+            copy_controls(  # type: ignore[operator]
+                task_config,
+                str(task_dir),
+                str(workspace),
+                contract_snapshot,
+                approval_snapshot,
+            )
+        except (OSError, RuntimeError):
+            raised = True
+        raced_target_cleaned = not (
+            contract_dst if race_kind == "workspace-parent" else approvals_dst
+        ).exists()
+        contract_is_snapshot = (
+            contract_dst.is_file()
+            and contract_dst.read_bytes() == contract_snapshot
+        )
+        retry_succeeded = True
+        if race_kind in {"approval-target", "contract-close"}:
+            retry_copy = _load_function(
+                launcher,
+                "_copy_phycode_controls",
+                {"os": os, "shutil": shutil, "stat": stat},
+                dependencies=(
+                    "_path_is_within",
+                    "_read_verified_utf8",
+                    "_is_reparse_point",
+                    "_phycode_workspace_identity",
+                    "_verify_phycode_control",
+                    "_preflight_phycode_controls",
+                    "_write_phycode_control",
+                ),
+            )
+            try:
+                retry_copy(  # type: ignore[operator]
+                    task_config,
+                    str(task_dir),
+                    str(workspace),
+                    contract_snapshot,
+                    approval_snapshot,
+                )
+            except (OSError, RuntimeError):
+                retry_succeeded = False
+        race_results.append(
+            (
+                race_kind,
+                raised,
+                sentinel.read_bytes(),
+                bool(opened_descriptors)
+                and opened_descriptors <= closed_descriptors,
+                raced_target_cleaned,
+                contract_is_snapshot,
+                retry_succeeded,
+                control_unlink_calls == 0,
+            )
+        )
+
+    expected_race_results = [
+        ("approval-target", True, sentinel_bytes, True, True, True, True, True),
+        ("workspace-parent", True, sentinel_bytes, True, False, False, True, True),
+        ("contract-close", True, sentinel_bytes, True, True, True, True, True),
+    ]
+
+    preexisting_results: list[
+        tuple[str, bool, bytes | None, bytes | None]
+    ] = []
+    for scenario in (
+        "exact-contract",
+        "exact-pair",
+        "mismatch-contract",
+        "mismatch-approval",
+    ):
+        case_dir = tmp_path / f"preexisting-{scenario}"
+        task_dir = case_dir / "task"
+        workspace = task_dir / "workspace"
+        workspace.mkdir(parents=True)
+        (task_dir / "instruction.md").write_text("instruction", encoding="utf-8")
+        (workspace / "paper.md").write_text("paper", encoding="utf-8")
+        contract_dst = workspace / "task_contract.json"
+        approvals_dst = workspace / "phycode-approvals.json"
+        if scenario in {"exact-contract", "exact-pair"}:
+            contract_dst.write_bytes(contract_snapshot)
+        elif scenario == "mismatch-contract":
+            contract_dst.write_bytes(b"mismatched-contract")
+        if scenario == "exact-pair":
+            approvals_dst.write_bytes(approval_snapshot)
+        elif scenario == "mismatch-approval":
+            approvals_dst.write_bytes(b"mismatched-approval")
+        copy_controls = _load_function(
+            launcher,
+            "_copy_phycode_controls",
+            {"os": os, "shutil": shutil, "stat": stat},
+            dependencies=(
+                "_path_is_within",
+                "_read_verified_utf8",
+                "_is_reparse_point",
+                "_phycode_workspace_identity",
+                "_verify_phycode_control",
+                "_preflight_phycode_controls",
+                "_write_phycode_control",
+            ),
+        )
+
+        raised = False
+        try:
+            copy_controls(  # type: ignore[operator]
+                task_config,
+                str(task_dir),
+                str(workspace),
+                contract_snapshot,
+                approval_snapshot,
+            )
+        except (OSError, RuntimeError):
+            raised = True
+
+        preexisting_results.append(
+            (
+                scenario,
+                raised,
+                contract_dst.read_bytes() if contract_dst.is_file() else None,
+                approvals_dst.read_bytes() if approvals_dst.is_file() else None,
+            )
+        )
+
+    postwrite_results: list[tuple[str, bool, bool, bytes, bool]] = []
+    for race_kind in ("target-after-write", "workspace-after-write"):
+        case_dir = tmp_path / race_kind
+        workspace = case_dir / "workspace"
+        alternate_workspace = case_dir / "alternate-workspace"
+        outside = case_dir / "outside"
+        workspace.mkdir(parents=True)
+        alternate_workspace.mkdir()
+        outside.mkdir()
+        target = workspace / "task_contract.json"
+        sentinel = outside / "sentinel.json"
+        sentinel.write_bytes(sentinel_bytes)
+        opened_descriptors: set[int] = set()
+        closed_descriptors: set[int] = set()
+
+        class PostWriteRaceOsProxy:
+            path = os.path
+            supports_dir_fd: set[object] = set()
+
+            def __init__(self) -> None:
+                self.control_descriptor: int | None = None
+                self.swapped = False
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(os, name)
+
+            def lstat(self, path: str | os.PathLike[str]) -> os.stat_result:
+                if self.swapped and Path(path) == workspace:
+                    return os.lstat(alternate_workspace)
+                if self.swapped and Path(path) == target:
+                    return os.lstat(sentinel)
+                return os.lstat(path)
+
+            def open(
+                self,
+                path: str | os.PathLike[str],
+                flags: int,
+                mode: int = 0o777,
+                **kwargs: object,
+            ) -> int:
+                descriptor = os.open(path, flags, mode, **kwargs)  # type: ignore[call-overload]
+                if Path(path) == target and flags & os.O_CREAT:
+                    self.control_descriptor = descriptor
+                    opened_descriptors.add(descriptor)
+                return descriptor
+
+            def write(self, descriptor: int, payload: object) -> int:
+                written = os.write(descriptor, payload)  # type: ignore[arg-type]
+                if descriptor == self.control_descriptor:
+                    self.swapped = True
+                return written
+
+            def close(self, descriptor: int) -> None:
+                closed_descriptors.add(descriptor)
+                os.close(descriptor)
+
+        race_os = PostWriteRaceOsProxy()
+        writer = _load_function(
+            launcher,
+            "_write_phycode_control",
+            {"os": race_os, "stat": stat},
+            dependencies=(
+                "_path_is_within",
+                "_is_reparse_point",
+                "_phycode_workspace_identity",
+                "_verify_phycode_control",
+            ),
+        )
+        raised = False
+        publication_token: object | None = None
+        try:
+            publication_token = writer(
+                str(workspace), target.name, b"trusted-payload"
+            )
+        except (OSError, RuntimeError):
+            raised = True
+        postwrite_results.append(
+            (
+                race_kind,
+                raised,
+                publication_token is None,
+                sentinel.read_bytes(),
+                bool(opened_descriptors)
+                and opened_descriptors <= closed_descriptors,
+            )
+        )
+
+    assert postwrite_results == [
+        ("target-after-write", True, True, sentinel_bytes, True),
+        ("workspace-after-write", True, True, sentinel_bytes, True),
+    ]
+    assert race_results == expected_race_results
+    assert preexisting_results == [
+        ("exact-contract", False, contract_snapshot, approval_snapshot),
+        ("exact-pair", False, contract_snapshot, approval_snapshot),
+        ("mismatch-contract", True, b"mismatched-contract", None),
+        ("mismatch-approval", True, None, b"mismatched-approval"),
+    ]
+
+
+def test_official_launcher_copies_prevalidated_control_snapshots_after_source_swap(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+) -> None:
+    task_dir = tmp_path / "tasks" / "public-task"
+    task_dir.mkdir(parents=True)
+    (task_dir / "task.yaml").write_text("public task", encoding="utf-8")
+    (task_dir / "instruction.md").write_text("public instruction", encoding="utf-8")
+    (task_dir / "paper.md").write_text("public paper", encoding="utf-8")
+    contract = tmp_path / "public-contract.json"
+    contract_bytes = json.dumps(
+        {
+            "instruction_file": "instruction.md",
+            "paper_file": "paper.md",
+            "expected_files": ["result.csv"],
+            "constraints": [
+                {
+                    "path": "result.csv",
+                    "csv_header": ["结果"],
+                    "csv_data_row_count": 1,
+                }
+            ],
+        },
+        ensure_ascii=False,
+        indent=2,
+    ).encode("utf-8")
+    contract.write_bytes(contract_bytes)
+    approvals = tmp_path / "approvals.json"
+    approval_bytes = b'{"grants": []}'
+    approvals.write_bytes(approval_bytes)
+    swapped_contract_bytes = b'{"unexpected": true}'
+    swapped_approval_bytes = b'{"grants": [{"unexpected": true}]}'
+    source_open_counts = {contract: 0, approvals: 0}
+    setup_snapshots: list[tuple[bytes, bytes]] = []
+
+    class ContractOsProxy:
+        path = os.path
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(os, name)
+
+        def open(
+            self,
+            path: str | os.PathLike[str],
+            flags: int,
+            mode: int = 0o777,
+            **kwargs: object,
+        ) -> int:
+            source = Path(path)
+            if source in source_open_counts:
+                source_open_counts[source] += 1
+            return os.open(path, flags, mode, **kwargs)  # type: ignore[call-overload]
+
+    contract_os = ContractOsProxy()
+
+    def tracking_open(
+        path: str | os.PathLike[str],
+        mode: str = "r",
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        return open(path, mode, *args, **kwargs)  # type: ignore[call-overload]
+
+    launcher = patched_official_evaluator / "src/launcher.py"
+    copy_controls = _load_function(
+        launcher,
+        "_copy_phycode_controls",
+        {
+            "os": contract_os,
+            "shutil": shutil,
+            "stat": stat,
+        },
+        dependencies=(
+            "_path_is_within",
+            "_read_verified_utf8",
+            "_is_reparse_point",
+            "_phycode_workspace_identity",
+            "_verify_phycode_control",
+            "_preflight_phycode_controls",
+            "_write_phycode_control",
+        ),
+    )
+    task_config = {
+        "instruction_file": "instruction.md",
+        "paper": {
+            "title": "Public task",
+            "author": "Public author",
+            "paper_file": "paper.md",
+        },
+        "expected_outputs": {"data": ["result.csv"]},
+    }
+
+    def resolve_env(agent_type: str) -> dict[str, str]:
+        if agent_type == "phycode":
+            contract.write_bytes(swapped_contract_bytes)
+            approvals.write_bytes(swapped_approval_bytes)
+        return {}
+
+    class StopAfterControls(RuntimeError):
+        pass
+
+    def setup_docker_environment(
+        received_task_config: dict[str, object],
+        received_task_dir: str,
+        workspace_dir: str,
+        **kwargs: object,
+    ) -> object:
+        contract_snapshot = kwargs["phycode_contract_snapshot"]
+        approval_snapshot = kwargs["phycode_approvals_snapshot"]
+        assert isinstance(contract_snapshot, bytes)
+        assert isinstance(approval_snapshot, bytes)
+        setup_snapshots.append((contract_snapshot, approval_snapshot))
+        copy_controls(  # type: ignore[operator]
+            received_task_config,
+            received_task_dir,
+            workspace_dir,
+            contract_snapshot,
+            approval_snapshot,
+        )
+        raise StopAfterControls
+
+    launch_evaluation = _load_function(
+        launcher,
+        "launch_evaluation",
+        {
+            "DATA_DIR": str(tmp_path / "tasks"),
+            "_archive_trace": lambda *_args: None,
+            "_archive_workspace": lambda *_args: "archive-destination",
+            "_copy_input_files": lambda *_args: None,
+            "_copy_paper_images": lambda *_args: None,
+            "_copy_paper_markdown": lambda _config, _task, workspace: (
+                Path(workspace) / "paper.md"
+            ).write_text("public paper", encoding="utf-8"),
+            "_copy_phycode_controls": copy_controls,
+            "_export_traces_for_type": lambda *_args: None,
+            "_kill_process": lambda *_args: None,
+            "_path_is_within": lambda *_args: True,
+            "_remove_container": lambda *_args: None,
+            "_remove_stale_output": lambda *_args: None,
+            "find_free_port_pair": lambda: (9001, 9002),
+            "json": json,
+            "logger": types.SimpleNamespace(
+                error=lambda *_: None,
+                info=lambda *_: None,
+            ),
+            "logging": types.SimpleNamespace(
+                INFO=20,
+                basicConfig=lambda **_kwargs: None,
+                FileHandler=lambda *_args: object(),
+                StreamHandler=lambda *_args: object(),
+            ),
+            "open": tracking_open,
+            "os": contract_os,
+            "resolve_env": resolve_env,
+            "setup_docker_environment": setup_docker_environment,
+            "stat": stat,
+            "yaml": types.SimpleNamespace(safe_load=lambda _handle: task_config),
+        },
+        dependencies=(
+            "_path_is_within",
+            "_read_verified_utf8",
+            "_validate_phycode_contract",
+            "_validate_phycode_approvals",
+        ),
+    )
+
+    with pytest.raises(StopAfterControls):
+        asyncio.run(
+            launch_evaluation(  # type: ignore[arg-type]
+                task_id="public-task",
+                white_agent_type="phycode",
+                green_agent_type="opencode",
+                phycode_contract=str(contract),
+                phycode_approvals=str(approvals),
+                archive=False,
+            )
+        )
+
+    workspace = task_dir / "workspace"
+    assert contract.read_bytes() == swapped_contract_bytes
+    assert approvals.read_bytes() == swapped_approval_bytes
+    assert (workspace / "task_contract.json").read_bytes() == contract_bytes
+    assert (workspace / "phycode-approvals.json").read_bytes() == approval_bytes
+    assert setup_snapshots == [(contract_bytes, approval_bytes)]
+    assert source_open_counts == {contract: 1, approvals: 1}
 
 
 def test_official_main_and_white_runner_pass_approval_wait_only_to_phycode(
@@ -1264,11 +3024,15 @@ def test_official_main_and_white_runner_pass_approval_wait_only_to_phycode(
         phycode_contract="contract.json",
         phycode_approvals="approvals.json",
         approval_wait_seconds=900,
+        phycode_max_tool_calls=50,
+        phycode_max_context_chars=24_000,
         no_archive=True,
         results_subdir=None,
     )
 
     assert launch_calls[0]["approval_wait_seconds"] == 900
+    assert launch_calls[0]["phycode_max_tool_calls"] == 50
+    assert launch_calls[0]["phycode_max_context_chars"] == 24_000
 
     agent_env_module = types.ModuleType("src.my_util.agent_env")
     agent_env_module.build_docker_exec_env_flags = (  # type: ignore[attr-defined]
@@ -1337,6 +3101,8 @@ def test_official_main_and_white_runner_pass_approval_wait_only_to_phycode(
             docker_container_id="container-id",
             agent_type=agent_type,
             approval_wait_seconds=900,
+            max_tool_calls=50,
+            max_context_chars=24_000,
             _provider_env={"PHYCODE_API_KEY": "synthetic-value"},
             _tasks={},
         )
@@ -1345,8 +3111,12 @@ def test_official_main_and_white_runner_pass_approval_wait_only_to_phycode(
         )
 
     assert "--approval-wait-seconds 900" in commands[0][-1]
+    assert "--max-tool-calls 50" in commands[0][-1]
+    assert "--max-context-chars 24000" in commands[0][-1]
     assert "synthetic-value" not in str(commands[0])
     assert "--approval-wait-seconds" not in str(commands[1])
+    assert "--max-tool-calls" not in str(commands[1])
+    assert "--max-context-chars" not in str(commands[1])
 
 
 @pytest.mark.parametrize(
@@ -1617,6 +3387,18 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
     task_root = tmp_path / "tasks/public-task"
     task_root.mkdir(parents=True)
     (task_root / "task.yaml").write_text("public task", encoding="utf-8")
+    contract = tmp_path / "contract.json"
+    contract.write_text(
+        json.dumps(
+            {
+                "instruction_file": "instruction.md",
+                "paper_file": "paper.md",
+                "input_files": [],
+                "expected_files": [],
+            }
+        ),
+        encoding="utf-8",
+    )
     report_path = task_root / "workspace/eval_logs/eval_report.json"
     run_result_path = task_root / "workspace/.phycode/prbench/run_result.json"
     if outcome == "stale_report":
@@ -1626,6 +3408,7 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
         run_result_path.parent.mkdir(parents=True)
         run_result_path.write_text('{"status": "completed"}', encoding="utf-8")
     cleanup_events: list[str] = []
+    process_calls: list[dict[str, object]] = []
     ready_values = {
         "green_not_ready": [False],
         "white_not_ready": [True, False],
@@ -1633,6 +3416,10 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
 
     class FakeProcess:
         pid = 4321
+
+    def fake_process(**kwargs: object) -> FakeProcess:
+        process_calls.append(kwargs)
+        return FakeProcess()
 
     class FakeDockerEnvironment:
         container_id = "container-id"
@@ -1713,7 +3500,12 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
                 return types.SimpleNamespace(st_mode=stat.S_IFLNK | 0o777)
             return original_lstat(path)
 
-    def guarded_open(path: str | os.PathLike[str], mode: str = "r") -> object:
+    def guarded_open(
+        path: str | os.PathLike[str],
+        mode: str = "r",
+        *args: object,
+        **kwargs: object,
+    ) -> object:
         unsafe_path = (
             os.fspath(path) == str(report_path)
             and outcome in {"report_symlink", "report_outside"}
@@ -1723,7 +3515,7 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
         )
         if unsafe_path:
             raise AssertionError("untrusted report must not be opened")
-        return original_open(path, mode)
+        return original_open(path, mode, *args, **kwargs)  # type: ignore[call-overload]
 
     launcher_path = patched_official_evaluator / "src/launcher.py"
     report_os = ReportOsProxy()
@@ -1761,9 +3553,7 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
                 FileHandler=lambda *_args: object(),
                 StreamHandler=lambda *_args: object(),
             ),
-            "multiprocessing": types.SimpleNamespace(
-                Process=lambda **_kwargs: FakeProcess()
-            ),
+            "multiprocessing": types.SimpleNamespace(Process=fake_process),
             "my_a2a": FakeA2A(),
             "open": guarded_open,
             "os": report_os,
@@ -1776,6 +3566,7 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
             "time": types.SimpleNamespace(time=lambda: 1.0),
             "yaml": types.SimpleNamespace(
                 safe_load=lambda _handle: {
+                    "instruction_file": "instruction.md",
                     "paper": {
                         "title": "Public task",
                         "author": "Public author",
@@ -1795,6 +3586,9 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
                 white_port=9002,
                 white_agent_type="phycode",
                 green_agent_type="opencode",
+                phycode_contract=str(contract),
+                phycode_max_tool_calls=50,
+                phycode_max_context_chars=24_000,
             ),
         )
     )
@@ -1803,6 +3597,8 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
     assert "remove" in cleanup_events
     assert "archive" in cleanup_events
     assert cleanup_events.count("kill") == 2
+    if outcome != "green_not_ready":
+        assert process_calls[1]["args"][-2:] == (50, 24_000)  # type: ignore[index]
 
 
 @pytest.mark.parametrize(
@@ -2011,7 +3807,7 @@ def test_public_smoke_stops_after_first_evaluator_failure_with_fake_uv(
         fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
     evaluator = tmp_path / "evaluator"
     evaluator.mkdir()
-    wheel = tmp_path / "phycode-0.1.2-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
     wheel.write_bytes(b"fake wheel")
     wrapper = tmp_path / "invoke-smoke.ps1"
     wrapper.write_text(
@@ -2990,7 +4786,7 @@ def test_patch_uses_pinned_uv_without_pip_bootstrap() -> None:
     )
 
     assert (
-        "uv pip install --system /tmp/phycode-0.1.2-py3-none-any.whl" in added
+        "uv pip install --system /tmp/phycode-0.1.3-py3-none-any.whl" in added
     )
     assert '"/tmp/phycode.whl"' not in added
     assert "python -m pip install" not in added
@@ -3152,8 +4948,82 @@ def test_public_contracts_contain_only_instruction_declared_constraints(
     assert contract.paper_file == "paper.md"
     assert contract.input_files == ()
     assert contract.expected_files == expected_files
+    assert contract.execution_entrypoints == (expected_files[0],)
     assert len(contract.constraints) == 1
     assert contract.constraints[0].csv_header == header
     assert contract.constraints[0].csv_rows == rows
     assert "metadata" not in raw.casefold()
     assert "ground_truth" not in raw.casefold()
+
+
+def test_full_public_contract_uses_only_instruction_declared_artifacts() -> None:
+    path = Path("integrations/prbench/public_contracts/task_white_1993.json")
+    raw = path.read_text(encoding="utf-8")
+    contract = TaskContract.model_validate_json(raw)
+
+    assert contract.instruction_file == "instruction.md"
+    assert contract.paper_file == "white1993.md"
+    assert contract.input_files == ()
+    assert contract.expected_files == (
+        "reproduction/ANALYSIS.md",
+        "reproduction/operators.py",
+        "reproduction/block.py",
+        "reproduction/superblock.py",
+        "reproduction/dmrg_infinite.py",
+        "reproduction/dmrg_finite.py",
+        "reproduction/fig2_compute.py",
+        "reproduction/fig3_compute.py",
+        "reproduction/fig4_compute.py",
+        "reproduction/fig5_compute.py",
+        "reproduction/fig6_compute.py",
+        "reproduction/fig7_compute.py",
+        "reproduction/fig8_compute.py",
+        "data/fig2.csv",
+        "data/fig3.csv",
+        "data/fig4.csv",
+        "data/fig5.csv",
+        "data/fig6.csv",
+        "data/fig7.csv",
+        "data/fig8.csv",
+    )
+    assert contract.execution_entrypoints == tuple(
+        f"reproduction/fig{figure}_compute.py" for figure in range(2, 9)
+    )
+    assert {
+        item.path: (item.csv_header, item.csv_data_row_count)
+        for item in contract.constraints
+    } == {
+        "data/fig2.csv": (
+            (
+                "alpha",
+                "Open, S=1/2",
+                "Open, S=1",
+                "Periodic, S=1/2",
+                "Periodic, S=1",
+            ),
+            50,
+        ),
+        "data/fig3.csv": (("m", "Open BCs", "Periodic BCs"), 24),
+        "data/fig4.csv": (("m", "Open BCs", "Periodic BCs"), 24),
+        "data/fig5.csv": (("L", "1/L", "Gap S=1/2", "Gap S=1"), 15),
+        "data/fig6.csv": (
+            ("i", "Panel (a)", "Panel (b)", "Panel (c)"),
+            60,
+        ),
+        "data/fig7.csv": (("i", "Bond Strength", "Local Sz"), 60),
+        "data/fig8.csv": (
+            (
+                "alpha",
+                "1 Target",
+                "2 Targets",
+                "3 Targets",
+                "4 Targets",
+                "5 Targets",
+            ),
+            50,
+        ),
+    }
+    assert all(item.csv_rows is None for item in contract.constraints)
+    assert "metadata" not in raw.casefold()
+    assert "ground_truth" not in raw.casefold()
+    assert "reference" not in raw.casefold()

@@ -1,0 +1,86 @@
+{
+  "instruction_file": "instruction.md",
+  "paper_file": "white1993.md",
+  "input_files": [],
+  "expected_files": [
+    "reproduction/ANALYSIS.md",
+    "reproduction/operators.py",
+    "reproduction/block.py",
+    "reproduction/superblock.py",
+    "reproduction/dmrg_infinite.py",
+    "reproduction/dmrg_finite.py",
+    "reproduction/fig2_compute.py",
+    "reproduction/fig3_compute.py",
+    "reproduction/fig4_compute.py",
+    "reproduction/fig5_compute.py",
+    "reproduction/fig6_compute.py",
+    "reproduction/fig7_compute.py",
+    "reproduction/fig8_compute.py",
+    "data/fig2.csv",
+    "data/fig3.csv",
+    "data/fig4.csv",
+    "data/fig5.csv",
+    "data/fig6.csv",
+    "data/fig7.csv",
+    "data/fig8.csv"
+  ],
+  "execution_entrypoints": [
+    "reproduction/fig2_compute.py",
+    "reproduction/fig3_compute.py",
+    "reproduction/fig4_compute.py",
+    "reproduction/fig5_compute.py",
+    "reproduction/fig6_compute.py",
+    "reproduction/fig7_compute.py",
+    "reproduction/fig8_compute.py"
+  ],
+  "constraints": [
+    {
+      "path": "data/fig2.csv",
+      "csv_header": [
+        "alpha",
+        "Open, S=1/2",
+        "Open, S=1",
+        "Periodic, S=1/2",
+        "Periodic, S=1"
+      ],
+      "csv_data_row_count": 50
+    },
+    {
+      "path": "data/fig3.csv",
+      "csv_header": ["m", "Open BCs", "Periodic BCs"],
+      "csv_data_row_count": 24
+    },
+    {
+      "path": "data/fig4.csv",
+      "csv_header": ["m", "Open BCs", "Periodic BCs"],
+      "csv_data_row_count": 24
+    },
+    {
+      "path": "data/fig5.csv",
+      "csv_header": ["L", "1/L", "Gap S=1/2", "Gap S=1"],
+      "csv_data_row_count": 15
+    },
+    {
+      "path": "data/fig6.csv",
+      "csv_header": ["i", "Panel (a)", "Panel (b)", "Panel (c)"],
+      "csv_data_row_count": 60
+    },
+    {
+      "path": "data/fig7.csv",
+      "csv_header": ["i", "Bond Strength", "Local Sz"],
+      "csv_data_row_count": 60
+    },
+    {
+      "path": "data/fig8.csv",
+      "csv_header": [
+        "alpha",
+        "1 Target",
+        "2 Targets",
+        "3 Targets",
+        "4 Targets",
+        "5 Targets"
+      ],
+      "csv_data_row_count": 50
+    }
+  ]
+}

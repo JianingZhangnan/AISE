@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from phycode.context import CODING_SYSTEM_PROMPT, GAIA_SYSTEM_PROMPT
-from phycode.models import AgentProfile
+from phycode.models import AgentProfile, FileReadConfig, PRBENCH_FILE_READ_CONFIG
 from phycode.visibility import PRBENCH_HIDDEN_PATH_COMPONENTS
 
 PRBENCH_SYSTEM_PROMPT = """You are PhyCode reproducing a public PRBench task.
@@ -12,7 +12,10 @@ Do not write or edit expected CSV files or other data outputs directly. Create o
 reproduction script so that the script generates every expected data output, then call process.run
 to execute that script. process.run may wait for a human-reviewed, hash-bound approval; request the
 exact execution and wait for the policy result instead of bypassing it.
-Inspect required artifacts before finishing; final is accepted only after artifact verification."""
+Respect the task brief's discovery quota and switch directly to artifact implementation before it
+is exhausted. The deterministic verifier reports after every successful tool action, so do not
+spend an extra inspect call solely to trigger completion.
+final is accepted only after artifact verification."""
 
 _CODING_TOOL_NAMES = frozenset(
     {
@@ -73,6 +76,7 @@ class ProfileSpec:
     max_context_chars: int
     max_tool_calls: int
     hidden_path_components: frozenset[str] = frozenset()
+    file_read_config: FileReadConfig = FileReadConfig()
 
 
 _PROFILE_SPECS = {
@@ -97,6 +101,7 @@ _PROFILE_SPECS = {
         max_context_chars=12_000,
         max_tool_calls=40,
         hidden_path_components=PRBENCH_HIDDEN_PATH_COMPONENTS,
+        file_read_config=PRBENCH_FILE_READ_CONFIG,
     ),
 }
 

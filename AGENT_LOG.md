@@ -561,3 +561,141 @@
   22 个供应商模型候选跨过八行窗口后 Esc 保留输入，再用唯一前缀补全并选择
   `deepseek-v4-pro`，真实响应精确返回 `PHYCODE_FINAL_OK`，`/exit` 正常结束。最终
   worktree、解包构建物与 Git 历史的真实 URL/key 扫描仍全部为 0，临时配置目录已删除。
+
+## 2026-07-19 Task 32–35：PRBench 完整公开任务正式运行前门禁
+
+- 主 agent 将单个**完整公开任务** `task_white_1993` 拆成 Task 32–35，并把每个实现与
+  review 交给新鲜 subagent；所有默认测试使用 mock/stub 或 fake uv，不调用真实 API、
+  official evaluator 或 Docker，也不读取 metadata、ground truth、reference 或凭据。
+- Task 32 subagent 按 `test-driven-development` 先得到 contract 对
+  `execution_entrypoints` 为 extra field、普通 Python provenance 边界缺失的 RED，再实现
+  显式入口与 CSV 数据行数，聚焦 GREEN 为 5 passed。实现 commit `564659d`。独立审查
+  提出 2 项 Important：普通 expected Python provenance 与 row-count 缺少有判别力的
+  负例；subagent 用受控 mutation 取得 2 failed，再增加三项测试，修复 commit
+  `959eb44`。完整 `bfae0be..959eb44` 复审 clean，0 / 0 / 0。
+- Task 33 subagent 的 RED 证明旧 runner 内联长正文且 `build_agent` / `run_prbench` 不接受
+  显式上下文预算；最小 GREEN 改为 compact public path brief 并贯通预算，commit
+  `69dadc1`。独立审查提出 2 项 Important，要求简报被截断时 fail closed 并增强 CLI /
+  runner 边界判别；修复先取得自然 RED 与四组 mutation RED，再提交 `7fe73aa`。完整
+  `959eb44..7fe73aa` 复审 clean，0 / 0 / 0。
+- Task 34 subagent 分别以 contract、adapter 参数链和 `run_public_full.ps1` 文档/AST/
+  fake-uv 测试取得 RED，再最小实现 20 个 artifact、7 个 entrypoint、50 / 24000 / 900
+  入口，commit `4cde23b`。独立审查提出 2 Important / 2 Minor；修复增加双 PowerShell
+  AST、结构化 exact argv/cwd/env 观察、完整 contract 与默认参数链测试，commit
+  `e51a82c`。完整 `7fe73aa..e51a82c` 复审 clean，0 / 0 / 0。
+- Task 34 全仓门禁暴露一项不属于其范围的旧测试回归：该测试仍要求 Task 33 已删除的
+  runner-side read。新的回归 subagent 先复现自然 RED，再用不读取正文且 provider 前
+  安全验证一次的新合同替换旧假设；commit `0d4582b`。独立审查要求锁定验证时序，受控
+  mutation 把验证移到 provider 后得到预期 RED，修复 commit `7547db2`。最终 692 项
+  exit 0，`e51a82c..7547db2` 复审 clean，0 / 0 / 0。
+- Task 35 新鲜实现 subagent `task35_implementer` 使用 `executing-plans`、
+  `using-git-worktrees`、`test-driven-development` 与 `verification-before-completion`。
+  基线 HEAD 为 `7547db2`，worktree 与索引洁净；基线全仓 692 项中 604 passed、88
+  skipped。先加入简报指定的文档合同，聚焦运行得到 1 failed / 26 deselected：README
+  尚无 `task_white_1993`，证明 RED 来自目标文档缺口。最小中文文档补齐后，同一完整
+  文档文件测试为 27 passed；新增一项合同后全仓收集数从 692 增至 693，最终回归为
+  605 passed、88 个既有 skip，Pyright 为 0 errors / 0 warnings。
+- Task 35 发布门禁使用 `uv build` 生成 0.1.2 wheel/sdist；fresh fixed source 精确位于
+  `3e5bee4545cad2138832f06302e9c98bd81f5216`，adapter probe 为 100 passed / 2 个既有
+  skip。实际 wheel 应用到另一 fresh clone 后，help 暴露审批、工具次数与上下文三个
+  option，patch 后状态精确为六个 adapter 文件与本地 `.phycode-adapter/`；原 source
+  保持洁净。`pwsh` 与 Windows PowerShell AST 均通过，wheel 解包为 41 个文件且 console
+  entry point、凭据文件和运行产物边界通过；`git diff --check`、tracked 凭据文件名、
+  高置信凭据内容与新增 evaluator/runtime artifact 扫描均通过。
+- 两个门禁探针曾因检查器假设得到非产品失败：首次手工 help 检查继承终端样式/宽度，
+  改用测试同款 200 列无色环境后通过；首次 wheel 探针误写 `phycode.cli:main`，对照
+  `pyproject.toml` 与实际 `entry_points.txt` 后按真实 `phycode.cli:app` 重跑通过。过宽
+  artifact 路径扫描还命中 BASE 已有的 tracked `.superpowers/sdd/task-2-report.md`，改为
+  检查 `7547db2` 后新增路径后为 0；没有删除或改写历史文件。
+- 主 checkout 的 tracked worktree 与 index clean，但有用户/环境提供的未跟踪
+  `AGENTS.md`；本任务
+  没有修改、暂存或清理它。Task 35 提交信息为
+  `docs(prbench): document full public evaluation gate`，最终 hash 由提交后的本地忽略
+  报告记录为 `71656cf630ee1f7e87b1805b53e502596818b707`。
+- Task 35 独立 review 对主实现给出 **Changes requested**，0 Critical / 3 Important /
+  0 Minor：README 使用了固定 evaluator 不存在的 `data/workspaces` 请求路径，动态审批
+  缺少 expected Python、精确 cwd、尾随 argv 与完整拒绝项，新增测试又因跨全文查找而
+  无法发现。修复 subagent 先只增强测试，把断言限制到完整公开任务 H2 section；自然
+  RED 为 1 failed / 26 deselected，同一 failure 同时列出正确
+  `<EvaluatorRoot>\data\tasks\task_white_1993\workspace` 路径和 27 项审批条件缺失，并把
+  旧 `data/workspaces/task_white_1993_*` 列为 forbidden 命中。随后最小修正文档为 launcher
+  日志确认的 active workspace 与严格八步人工门禁；聚焦测试初步为 1 passed。
+- 受控文本 mutation 随后只把正确 workspace 句临时改回旧
+  `data/workspaces/task_white_1993_*`，不修改测试；聚焦运行得到 1 failed / 26
+  deselected，failure 为 `missing=[]` 且 forbidden 精确包含旧路径。立即用反向补丁恢复
+  README 后，聚焦测试重新为 1 passed / 26 deselected。完整文档为 27 passed；全仓
+  `uv run pytest -q` 达到 100% exit 0，收集数保持 693；Pyright 为 0 errors / 0
+  warnings。`git diff --check`、tracked 凭据文件名/高置信凭据模式、新增
+  evaluator/runtime artifact 扫描均通过；feature worktree 只有五个预期文件，主
+  checkout 仍是 tracked worktree 与 index clean、未跟踪 `AGENTS.md`。修复提交信息为
+  `docs(prbench): harden full-run approval guide`，commit 为
+  `0c0b5b0f6e322e1c6a8e0f57d23716f24a1ec23f`。本条在修复完成时没有预写复审结论；
+  随后 Task 35 修复后独立复审完成，核对 BASE
+  `7547db2a9ed8db98cb6b86d6ea95c186e30192d7` 至 HEAD
+  `0c0b5b0f6e322e1c6a8e0f57d23716f24a1ec23f`，Review clean，Critical / Important / Minor
+  为 0 / 0 / 0，规格与文档/测试质量均通过。
+- 正式运行只属于主 agent：初始上限 3 次，后由用户扩展到最多五次；首次白色响应前的基础设施失败不计数，每个动态
+  request 必须人工核验 exact argv/cwd/hash 后原样原子批准；只有 runner `completed` 与
+  有效 grader report 同时成立才算成功。所有评测产物不提交，功能分支不经授权不进入
+  `main`，保持主分支干净。
+
+## 2026-07-19 Task 36：task_white_1993 完整公开任务真实验收
+
+- 初次 Task 36 subagent 使用 `executing-plans` 与 `test-driven-development`，提交三次尝试
+  的脱敏记录 `b303d52cf1e7cf2811d42c0aab917f056bc92922`。用户随后扩展上限，本次最终补记继续使用
+  `test-driven-development`，严格只消费主 agent 提供的脱敏事实；没有打开或遍历 provider
+  文件、`.superpowers/sdd` 正式运行目录、任何 evaluator 报告/trace/workspace、凭据、
+  groundtruth 或 reference。先修改 `tests/test_docs_process.py`，再运行
+  `uv run pytest tests/test_docs_process.py -k "full_public" -v`，得到预期 2 failed / 29
+  deselected：README 仍写“最多三次”，且四份文档缺少最终五次事实。随后才最小修改
+  `README.md`、`PLAN.md`、`SPEC_PROCESS.md` 与本日志。
+- 固定 evaluator commit 为 `3e5bee4545cad2138832f06302e9c98bd81f5216`。用户把正式尝试上限从 3 次扩展到 5 次，
+  最后两次指定模型 `glm-5.2`；正式尝试次数为 5，上限已经用尽，
+  没有第 6 次。
+- 尝试 1：模型 `deepseek-v4-pro`，runner `tool_budget_exhausted`，50 次工具调用，`overall_score` 0.0。
+- 尝试 2：模型 `deepseek-v4-pro`，runner `provider_error`，13 次工具调用，`overall_score` 0.0。
+- 尝试 3：模型 `deepseek-v4-pro`，runner `approval_required`，42 次工具调用，20 项声明产物存在 13 项，7 项 CSV 存在 0 项，`overall_score` 0.17。
+- 尝试 4：模型 `glm-5.2`，runner `provider_error`，11 次工具调用，20 项声明产物存在 0 项，`overall_score` 0.0，约 720 秒。
+- 尝试 5：模型 `glm-5.2`，runner `provider_error`，11 次工具调用，20 项声明产物存在 0 项，white 约 662 秒、grader 约 700 秒，`overall_score` 0.0。
+- 最终终态：`provider_error`。最佳结果仍是未成功的尝试 3；成功标准始终是 runner
+  `completed` 与有效 green report 同时成立，五次均未满足，因此完整公开任务未跑通，
+  不记录为成功，也不把 0.17 写成 holdout 或课程总体成绩。
+- 首次模型响应前的基础设施/预检失败不计次数：两次 OpenCode 安装相关失败、一次旧
+  exact-equality contract preflight 失败，以及一次手动预检后的 double-adapter
+  clean-check 失败。
+- 正式运行期间修复/review 关键 commits：`4e831d1`、`a0f8df9`、`c3be45e..fb42598`、
+  `2011e84`、`1d30458`、`a5be873`、`1c410ab`、`f99cec8`。最终 contract spec review 为
+  Critical / Important / Minor = 0 / 0 / 0；quality review 为 0 / 0 / 1，Ready，唯一 Minor
+  是没有用任意未知组名做专门变异测试。artifact review 曾有两个非阻塞 Minor：缺少全局
+  CSV capture 总预算，以及缺少真实 Windows junction 集成覆盖。
+- 当前凭据泄漏扫描：HEAD 的 109 个 tracked regular blobs（仅 mode 100644/100755，排除
+  gitlink）中，两组 exact key 匹配 0、读取错误 0；本地 `.superpowers/sdd` 与 `dist` 排除
+  `.git`、`.venv`、`node_modules`、`_ground_truth`、`groundtruth`、`reference` 后的 1000 个
+  文件中，两组 exact key 匹配 0、读取错误 0，其中日志/trace/report/wheel 筛选出的 81 个
+  文件同样为两组 exact key 匹配 0、读取错误 0。7 个 provider/PRBench 相关环境变量均
+  absent，容器数 0。全部本地测试产物保持 ignored；评测产物未提交。
+- 2026-07-20 最终补记 GREEN：聚焦文档合同 2 passed / 29 deselected，完整文档测试 31
+  passed；最终文件状态下全仓 656 passed / 110 skipped，Pyright 0 errors / 0 warnings，
+  `git diff --check` 通过。提交范围只有四份过程文档与 `tests/test_docs_process.py`。
+- Task 36 脱敏结果记录已完成。
+- Task 36B whole-branch review 与最终复验完成。文档 subagent 继续使用
+  `test-driven-development`，只消费主 agent 提供的脱敏事实；先把
+  `tests/test_docs_process.py` 切换为完成合同，聚焦运行得到预期 2 failed，再更新四份文档。
+  whole-branch review 范围为
+  `588aa08ab56f929b4ac61895227574306a16ee13..50f1089f47eda141b8715bf937ecd318c49d2a48`，
+  共 35 commits / 30 files，结论为 Critical / Important / Minor = 0 / 0 / 3，Ready。
+- 三项 Minor 如实保留：每个 CSV 的 capture 上限均为 8 MiB，但没有全局 capture 总预算；
+  没有真实 Windows junction/reparse 集成覆盖，现有覆盖为 synthetic；没有任意未知
+  output-group 名的专门变异测试，但实现对动态 values 的处理正确。
+- 最终复验在清除 evaluator/provider 环境变量后运行：离线 pytest exit 0、766 collected；
+  Pyright 0 errors / 0 warnings / 0 informations；fresh、固定到 evaluator commit
+  `3e5bee4545cad2138832f06302e9c98bd81f5216` 的 clean adapter 为
+  128 collected / 126 passed / 2 skipped；`uv build` 成功；`pwsh` 与 Windows PowerShell AST
+  均通过；`git diff --check` 通过；worktree clean。
+- 最终仓库与安全复核：HEAD 的 109 个 tracked regular blobs 中 credential filenames 0、
+  高置信 secret 0，35 commits 历史相同项 0；branch diff 运行产物路径 0；7 个
+  evaluator/provider 环境变量均 absent；`dist`、`.pytest_cache`、`.venv` 与授权 source
+  均 ignored。
+- Task 36 whole-branch review 与最终复验已完成，Task 36 整体可以按过程门禁完成；但
+  五次正式尝试仍未跑通，runner `completed` 与有效 green report 的成功合同未满足，绝不改写
+  为成功。本次文档提交不 push。

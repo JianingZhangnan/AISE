@@ -1,4 +1,5 @@
 from click import unstyle
+import pytest
 from typer.testing import CliRunner
 
 from phycode.cli import app
@@ -46,6 +47,7 @@ def test_prbench_run_help_exposes_required_paths():
     assert "--workspace" in help_text
     assert "--contract" in help_text
     assert "--approvals" in help_text
+    assert "--max-context-chars" in help_text
     # Rich shortens long option labels to fit its fixed help-table width.
     assert "--approval-wait-sec" in help_text
 
@@ -118,6 +120,116 @@ def test_prbench_approval_wait_option_is_forwarded_to_runner(tmp_path, monkeypat
 
     assert result.exit_code == expected.exit_code
     assert captured == 7
+
+
+@pytest.mark.parametrize("max_context_chars", ["999", "64001"])
+def test_prbench_context_option_is_bounded_before_runner_call(
+    tmp_path, monkeypatch, max_context_chars
+):
+    import phycode.prbench_eval as prbench_eval
+
+    called = False
+
+    def record_call(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("runner must not be called for an invalid context budget")
+
+    monkeypatch.setattr(prbench_eval, "run_prbench", record_call)
+
+    result = runner.invoke(
+        prbench_eval.prbench_app,
+        [
+            "run",
+            "--workspace",
+            str(tmp_path),
+            "--contract",
+            str(tmp_path / "contract.json"),
+            "--approvals",
+            str(tmp_path / "approvals.json"),
+            "--max-context-chars",
+            max_context_chars,
+        ],
+    )
+    error_text = unstyle(result.stderr)
+
+    assert result.exit_code == 2
+    assert not called
+    assert "max-context-chars" in error_text
+    assert "1000<=x<=64000" in error_text
+
+
+@pytest.mark.parametrize("max_context_chars", [1_000, 24_000, 64_000])
+def test_prbench_context_option_is_forwarded_to_runner(
+    tmp_path, monkeypatch, max_context_chars
+):
+    import phycode.prbench_eval as prbench_eval
+
+    captured = None
+    expected = PRBenchRunResult(
+        status=PRBenchRunStatus.COMPLETED,
+        model="safe-model",
+        tool_calls=0,
+    )
+
+    def record_call(*args, **kwargs):
+        nonlocal captured
+        captured = kwargs.get("max_context_chars")
+        return expected
+
+    monkeypatch.setattr(prbench_eval, "run_prbench", record_call)
+
+    result = runner.invoke(
+        prbench_eval.prbench_app,
+        [
+            "run",
+            "--workspace",
+            str(tmp_path),
+            "--contract",
+            str(tmp_path / "contract.json"),
+            "--approvals",
+            str(tmp_path / "approvals.json"),
+            "--max-context-chars",
+            str(max_context_chars),
+        ],
+    )
+
+    assert result.exit_code == expected.exit_code
+    assert captured == max_context_chars
+
+
+def test_prbench_context_option_defaults_to_none(tmp_path, monkeypatch):
+    import phycode.prbench_eval as prbench_eval
+
+    captured = {}
+    expected = PRBenchRunResult(
+        status=PRBenchRunStatus.COMPLETED,
+        model="safe-model",
+        tool_calls=0,
+    )
+
+    def record_call(*args, **kwargs):
+        captured.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(prbench_eval, "run_prbench", record_call)
+
+    result = runner.invoke(
+        prbench_eval.prbench_app,
+        [
+            "run",
+            "--workspace",
+            str(tmp_path),
+            "--contract",
+            str(tmp_path / "contract.json"),
+            "--approvals",
+            str(tmp_path / "approvals.json"),
+        ],
+    )
+
+    assert result.exit_code == expected.exit_code
+    assert "max_context_chars" in captured
+    assert captured["max_context_chars"] is None
 
 
 def test_main_cli_mounts_the_single_prbench_eval_app():
