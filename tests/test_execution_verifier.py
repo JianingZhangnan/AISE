@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -17,6 +18,68 @@ from phycode.profiles import profile_spec
 from phycode.tools import ToolRegistry, ToolRuntime
 from phycode.tools.process_tools import register_process_tools
 from phycode.visibility import is_credential_path
+
+
+class _StatProxy:
+    def __init__(self, base: os.stat_result, **overrides: int) -> None:
+        self._base = base
+        self._overrides = overrides
+
+    def __getattr__(self, name: str):
+        if name in self._overrides:
+            return self._overrides[name]
+        return getattr(self._base, name)
+
+
+def _mark_reparse_point(
+    monkeypatch: pytest.MonkeyPatch,
+    path: Path,
+    *,
+    stat_source: Path | None = None,
+) -> None:
+    original_lstat = Path.lstat
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+    def marked_lstat(candidate: Path):
+        if candidate == path:
+            source = stat_source if stat_source is not None else candidate
+            base = original_lstat(source)
+            attributes = getattr(base, "st_file_attributes", 0) | reparse_flag
+            return _StatProxy(base, st_file_attributes=attributes)
+        return original_lstat(candidate)
+
+    monkeypatch.setattr(Path, "lstat", marked_lstat)
+
+
+def _prepare_internal_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative_path: str,
+    *,
+    parent_link: bool,
+) -> Path:
+    expected = tmp_path / relative_path
+    target_parent = tmp_path / "internal-target"
+    target_parent.mkdir()
+    target = target_parent / expected.name
+    target.write_text("complete\n", encoding="utf-8")
+
+    if parent_link:
+        expected_parent = expected.parent
+        try:
+            expected_parent.symlink_to(target_parent, target_is_directory=True)
+        except OSError:
+            expected_parent.mkdir()
+            expected.write_text("complete\n", encoding="utf-8")
+            _mark_reparse_point(monkeypatch, expected_parent)
+    else:
+        expected.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            expected.symlink_to(target)
+        except OSError:
+            expected.write_text("complete\n", encoding="utf-8")
+            _mark_reparse_point(monkeypatch, expected)
+    return expected
 
 
 def _contract() -> TaskContract:
@@ -521,6 +584,86 @@ def test_contract_rejects_windows_absolute_path_forms(path: str) -> None:
         )
 
 
+@pytest.mark.parametrize("parent_link", [False, True], ids=["file-link", "parent-link"])
+def test_verifier_rejects_internal_reparse_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_link: bool,
+) -> None:
+    _prepare_internal_link(tmp_path, monkeypatch, "linked/result.txt", parent_link=parent_link)
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=("linked/result.txt",),
+    )
+
+    result = ArtifactVerifier(tmp_path, contract, ExecutionJournal(tmp_path, ())).verify()
+
+    assert not result.ok
+    assert {issue.code for issue in result.issues} == {"invalid_artifact_path"}
+
+
+@pytest.mark.parametrize("parent_link", [False, True], ids=["file-link", "parent-link"])
+def test_execution_journal_rejects_internal_reparse_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_link: bool,
+) -> None:
+    _prepare_internal_link(tmp_path, monkeypatch, "linked/result.txt", parent_link=parent_link)
+    journal = ExecutionJournal(tmp_path, ("linked/result.txt",))
+
+    with pytest.raises(ExecutionJournalError, match="regular file"):
+        journal.snapshot_artifacts()
+
+
+@pytest.mark.parametrize("parent_link", [False, True], ids=["file-link", "parent-link"])
+def test_execution_journal_rejects_internal_reparse_script(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_link: bool,
+) -> None:
+    _prepare_internal_link(tmp_path, monkeypatch, "linked/run.py", parent_link=parent_link)
+    journal = ExecutionJournal(tmp_path, ())
+
+    with pytest.raises(ExecutionJournalError, match="regular file"):
+        journal.snapshot_script((sys.executable, "linked/run.py"), tmp_path)
+
+
+def test_verifier_rejects_dangling_reparse_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "result.txt"
+    try:
+        artifact.symlink_to(tmp_path / "missing-target.txt")
+    except OSError:
+        _mark_reparse_point(monkeypatch, artifact, stat_source=tmp_path)
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=("result.txt",),
+    )
+
+    result = ArtifactVerifier(tmp_path, contract, ExecutionJournal(tmp_path, ())).verify()
+
+    assert not result.ok
+    assert {issue.code for issue in result.issues} == {"invalid_artifact_path"}
+
+
+def test_missing_regular_artifact_remains_missing(tmp_path: Path) -> None:
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=("missing/result.txt",),
+    )
+    journal = ExecutionJournal(tmp_path, ("missing/result.txt",))
+
+    result = ArtifactVerifier(tmp_path, contract, journal).verify()
+
+    assert {issue.code for issue in result.issues} == {"missing_artifact"}
+    assert journal.snapshot_artifacts()[0].exists is False
+
+
 @pytest.mark.parametrize("hidden_target", ["_ground_truth/secret.csv", "private/.env"])
 def test_verifier_rejects_symlink_alias_to_hidden_path(tmp_path: Path, hidden_target: str) -> None:
     target = tmp_path / hidden_target
@@ -544,7 +687,7 @@ def test_verifier_rejects_symlink_alias_to_hidden_path(tmp_path: Path, hidden_ta
 
 
 @pytest.mark.parametrize("hidden_target", ["_ground_truth/secret.csv", "private/.env"])
-def test_verifier_rechecks_deterministically_resolved_hidden_alias(
+def test_verifier_rejects_synthetic_hidden_reparse_alias(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     hidden_target: str,
@@ -559,14 +702,7 @@ def test_verifier_rechecks_deterministically_resolved_hidden_alias(
         expected_files=("public.csv",),
     )
     journal = ExecutionJournal(tmp_path, ())
-    original_resolve = Path.resolve
-
-    def resolve_alias(path: Path, *args, **kwargs) -> Path:
-        if path == alias:
-            return target
-        return original_resolve(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "resolve", resolve_alias)
+    _mark_reparse_point(monkeypatch, alias, stat_source=target)
 
     result = ArtifactVerifier(tmp_path, contract, journal).verify()
 
@@ -574,27 +710,72 @@ def test_verifier_rechecks_deterministically_resolved_hidden_alias(
     assert {issue.code for issue in result.issues} == {"invalid_artifact_path"}
 
 
-def test_verifier_turns_stat_oserror_into_structured_issue(
+def test_verifier_turns_lstat_oserror_into_structured_issue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     artifact = tmp_path / "result.txt"
     artifact.write_text("complete", encoding="utf-8")
-    original_is_file = Path.is_file
-    original_stat = Path.stat
+    original_lstat = Path.lstat
 
-    def is_file(path: Path) -> bool:
-        if path == artifact:
-            return True
-        return original_is_file(path)
-
-    def fail_stat(path: Path, *args, **kwargs):
+    def fail_lstat(path: Path):
         if path == artifact:
             raise OSError("test-only inaccessible artifact")
-        return original_stat(path, *args, **kwargs)
+        return original_lstat(path)
 
-    monkeypatch.setattr(Path, "is_file", is_file)
-    monkeypatch.setattr(Path, "stat", fail_stat)
+    monkeypatch.setattr(Path, "lstat", fail_lstat)
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=("result.txt",),
+    )
+
+    result = ArtifactVerifier(tmp_path, contract, ExecutionJournal(tmp_path, ())).verify()
+
+    assert not result.ok
+    assert {issue.code for issue in result.issues} == {"artifact_read_error"}
+
+
+def test_execution_journal_fails_closed_when_lstat_raises_value_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "result.txt"
+    artifact.write_text("complete", encoding="utf-8")
+    original_lstat = Path.lstat
+
+    def fail_lstat(path: Path):
+        if path == artifact:
+            raise ValueError("test-only invalid artifact path")
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", fail_lstat)
+    journal = ExecutionJournal(tmp_path, ("result.txt",))
+
+    with pytest.raises(ExecutionJournalError, match="snapshotted"):
+        journal.snapshot_artifacts()
+
+
+def test_verifier_rejects_artifact_identity_change_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "result.txt"
+    artifact.write_text("complete", encoding="utf-8")
+    original_lstat = Path.lstat
+    artifact_lstat_calls = 0
+
+    def changing_lstat(path: Path):
+        nonlocal artifact_lstat_calls
+        result = original_lstat(path)
+        if path != artifact:
+            return result
+        artifact_lstat_calls += 1
+        if artifact_lstat_calls > 1:
+            return _StatProxy(result, st_ino=result.st_ino + 1)
+        return result
+
+    monkeypatch.setattr(Path, "lstat", changing_lstat)
     contract = TaskContract(
         instruction_file="instruction.md",
         paper_file="paper.md",
@@ -613,10 +794,10 @@ def test_verifier_turns_read_oserror_into_structured_issue(
 ) -> None:
     (tmp_path / "output.csv").write_text("a,b\n1,2\n", encoding="utf-8")
 
-    def fail_hash(path: Path) -> str:
+    def fail_read(_file_descriptor: int, _length: int) -> bytes:
         raise OSError("test-only unreadable artifact")
 
-    monkeypatch.setattr("phycode.prbench_contract.file_sha256", fail_hash)
+    monkeypatch.setattr("phycode.execution.os.read", fail_read)
     contract = TaskContract(
         instruction_file="instruction.md",
         paper_file="paper.md",

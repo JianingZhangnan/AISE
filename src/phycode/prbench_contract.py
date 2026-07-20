@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import csv
+import io
 import os
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from phycode.execution import ExecutionJournal, ProcessExecutionRecord, file_sha256
+from phycode.execution import (
+    ExecutionJournal,
+    ProcessExecutionRecord,
+    UnsafeWorkspaceFileError,
+    WorkspaceFileContent,
+    WorkspaceFileReadError,
+    read_workspace_regular_file,
+)
 from phycode.visibility import normalize_public_relative_path
 
 
@@ -94,56 +102,65 @@ class ArtifactVerifier:
 
     def verify(self) -> VerificationResult:
         issues: list[VerificationIssue] = []
-        paths: dict[str, Path] = {}
+        contents: dict[str, WorkspaceFileContent] = {}
         entrypoint_keys = {_path_key(path) for path in self.contract.execution_entrypoints}
         for relative_path in self.contract.expected_files:
             path = self._resolve(relative_path)
             if path is None:
                 issues.append(self._issue("invalid_artifact_path", relative_path, "Artifact path is not visible"))
                 continue
-            paths[self._key(relative_path)] = path
             try:
-                if not path.is_file():
-                    issues.append(self._issue("missing_artifact", relative_path, "Required artifact is missing"))
-                    continue
-                if path.stat().st_size == 0:
-                    issues.append(self._issue("empty_artifact", relative_path, "Required artifact is empty"))
-                if self._key(relative_path) in entrypoint_keys and not self._script_has_provenance(relative_path, path):
-                    issues.append(
-                        self._issue(
-                            "script_not_executed",
-                            relative_path,
-                            "Entrypoint was not executed successfully",
-                        )
-                    )
-                if path.suffix.casefold() == ".csv" and not self._csv_has_provenance(relative_path, path):
-                    issues.append(
-                        self._issue(
-                            "csv_without_provenance",
-                            relative_path,
-                            "CSV has no successful execution provenance",
-                        )
-                    )
-            except (OSError, RuntimeError):
+                content = read_workspace_regular_file(self.workspace_root, path)
+            except UnsafeWorkspaceFileError:
+                issues.append(self._issue("invalid_artifact_path", relative_path, "Artifact path is not visible"))
+                continue
+            except WorkspaceFileReadError:
                 issues.append(self._issue("artifact_read_error", relative_path, "Artifact cannot be read safely"))
+                continue
+            if content is None:
+                issues.append(self._issue("missing_artifact", relative_path, "Required artifact is missing"))
+                continue
+            contents[self._key(relative_path)] = content
+            if content.size == 0:
+                issues.append(self._issue("empty_artifact", relative_path, "Required artifact is empty"))
+
+        for relative_path in self.contract.expected_files:
+            content = contents.get(self._key(relative_path))
+            if content is None:
+                continue
+            if self._key(relative_path) in entrypoint_keys and not self._script_has_provenance(
+                relative_path,
+                content.sha256,
+            ):
+                issues.append(
+                    self._issue(
+                        "script_not_executed",
+                        relative_path,
+                        "Entrypoint was not executed successfully",
+                    )
+                )
+            if Path(relative_path).suffix.casefold() == ".csv" and not self._csv_has_provenance(
+                relative_path,
+                content.sha256,
+                contents,
+            ):
+                issues.append(
+                    self._issue(
+                        "csv_without_provenance",
+                        relative_path,
+                        "CSV has no successful execution provenance",
+                    )
+                )
 
         for constraint in self.contract.constraints:
-            path = paths.get(self._key(constraint.path))
-            if path is None:
-                path = self._resolve(constraint.path)
-            try:
-                usable = path is not None and path.is_file() and path.stat().st_size > 0
-            except (OSError, RuntimeError):
-                usable = False
-            if not usable:
+            content = contents.get(self._key(constraint.path))
+            if content is None or content.size == 0:
                 continue
-            assert path is not None
-            issues.extend(self._verify_csv_constraint(path, constraint))
+            issues.extend(self._verify_csv_constraint(content.data, constraint))
 
         return VerificationResult(ok=not issues, issues=tuple(issues))
 
-    def _script_has_provenance(self, relative_path: str, path: Path) -> bool:
-        current_hash = file_sha256(path)
+    def _script_has_provenance(self, relative_path: str, current_hash: str) -> bool:
         key = self._key(relative_path)
         return any(
             record.status == "ok"
@@ -153,10 +170,14 @@ class ArtifactVerifier:
             for record in self.journal.records
         )
 
-    def _csv_has_provenance(self, relative_path: str, path: Path) -> bool:
-        current_hash = file_sha256(path)
+    def _csv_has_provenance(
+        self,
+        relative_path: str,
+        current_hash: str,
+        contents: dict[str, WorkspaceFileContent],
+    ) -> bool:
         key = self._key(relative_path)
-        expected_scripts = self._current_entrypoint_hashes()
+        expected_scripts = self._current_entrypoint_hashes(contents)
         for record in self.journal.records:
             if (
                 record.status != "ok"
@@ -171,23 +192,25 @@ class ArtifactVerifier:
                 return True
         return False
 
-    def _current_entrypoint_hashes(self) -> dict[str, str]:
+    def _current_entrypoint_hashes(
+        self,
+        contents: dict[str, WorkspaceFileContent],
+    ) -> dict[str, str]:
         scripts: dict[str, str] = {}
         for relative_path in self.contract.execution_entrypoints:
-            path = self._resolve(relative_path)
-            if path is not None and path.is_file():
-                scripts[self._key(relative_path)] = file_sha256(path)
+            content = contents.get(self._key(relative_path))
+            if content is not None:
+                scripts[self._key(relative_path)] = content.sha256
         return scripts
 
     def _verify_csv_constraint(
         self,
-        path: Path,
+        data: bytes,
         constraint: ArtifactConstraint,
     ) -> list[VerificationIssue]:
         try:
-            with path.open(newline="", encoding="utf-8") as handle:
-                rows = list(csv.reader(handle))
-        except (OSError, UnicodeError, csv.Error):
+            rows = list(csv.reader(io.StringIO(data.decode("utf-8"), newline="")))
+        except (UnicodeError, csv.Error):
             return [self._issue("csv_read_error", constraint.path, "CSV cannot be read")]
         issues: list[VerificationIssue] = []
         if constraint.csv_header is not None and (not rows or tuple(rows[0]) != constraint.csv_header):
@@ -207,7 +230,8 @@ class ArtifactVerifier:
 
     def _resolve(self, relative_path: str) -> Path | None:
         try:
-            path = (self.workspace_root / relative_path).resolve(strict=False)
+            normalized = normalize_public_relative_path(relative_path)
+            path = Path(os.path.abspath(self.workspace_root / normalized))
             path.relative_to(self.workspace_root)
             normalize_public_relative_path(path.relative_to(self.workspace_root).as_posix())
         except (OSError, RuntimeError, ValueError):

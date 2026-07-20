@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,6 +21,114 @@ from phycode.visibility import (
 
 class ExecutionJournalError(RuntimeError):
     """Raised when process provenance cannot be captured safely."""
+
+
+class UnsafeWorkspaceFileError(RuntimeError):
+    """Raised when a workspace file is not a direct regular file."""
+
+
+class WorkspaceFileReadError(RuntimeError):
+    """Raised when a workspace file cannot be read with a stable identity."""
+
+
+@dataclass(frozen=True)
+class WorkspaceFileContent:
+    data: bytes
+    size: int
+    sha256: str
+
+
+def _is_reparse_point(file_stat: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(file_stat, "st_file_attributes", 0) & reparse_flag)
+
+
+def _file_identity(file_stat: os.stat_result) -> tuple[int, int, int]:
+    return file_stat.st_dev, file_stat.st_ino, stat.S_IFMT(file_stat.st_mode)
+
+
+def _file_version(file_stat: os.stat_result) -> tuple[int, int]:
+    return file_stat.st_size, file_stat.st_mtime_ns
+
+
+def _inspect_regular_file(
+    workspace_root: Path,
+    path: Path,
+) -> tuple[tuple[int, int, int], ...] | None:
+    try:
+        relative = path.relative_to(workspace_root)
+    except ValueError as exc:
+        raise UnsafeWorkspaceFileError("workspace file escapes the workspace") from exc
+    if not relative.parts:
+        raise UnsafeWorkspaceFileError("workspace file is not a regular file")
+
+    identities: list[tuple[int, int, int]] = []
+    current = workspace_root
+    for index, component in enumerate(relative.parts):
+        current /= component
+        try:
+            file_stat = current.lstat()
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            raise WorkspaceFileReadError("workspace file cannot be inspected") from exc
+        if stat.S_ISLNK(file_stat.st_mode) or _is_reparse_point(file_stat):
+            raise UnsafeWorkspaceFileError("workspace file contains a link or reparse point")
+        is_final = index == len(relative.parts) - 1
+        expected_type = stat.S_ISREG if is_final else stat.S_ISDIR
+        if not expected_type(file_stat.st_mode):
+            raise UnsafeWorkspaceFileError("workspace file is not a regular file")
+        identities.append(_file_identity(file_stat))
+    return tuple(identities)
+
+
+def read_workspace_regular_file(
+    workspace_root: Path,
+    path: Path,
+) -> WorkspaceFileContent | None:
+    """Read a non-link regular file while binding checks to the opened identity."""
+    initial_identities = _inspect_regular_file(workspace_root, path)
+    if initial_identities is None:
+        return None
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, flags)
+        opened_before = os.fstat(descriptor)
+        if not stat.S_ISREG(opened_before.st_mode):
+            raise UnsafeWorkspaceFileError("workspace file is not a regular file")
+        if _file_identity(opened_before) != initial_identities[-1]:
+            raise WorkspaceFileReadError("workspace file identity changed before reading")
+
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        opened_after = os.fstat(descriptor)
+    except UnsafeWorkspaceFileError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise WorkspaceFileReadError("workspace file cannot be read") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+    if (
+        _file_identity(opened_after) != _file_identity(opened_before)
+        or _file_version(opened_after) != _file_version(opened_before)
+    ):
+        raise WorkspaceFileReadError("workspace file changed while being read")
+    final_identities = _inspect_regular_file(workspace_root, path)
+    if final_identities is None or final_identities != initial_identities:
+        raise WorkspaceFileReadError("workspace file identity changed while being read")
+
+    data = b"".join(chunks)
+    return WorkspaceFileContent(
+        data=data,
+        size=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+    )
 
 
 class ArtifactSnapshot(BaseModel):
@@ -71,11 +181,17 @@ class ExecutionJournal:
     def snapshot_script(self, argv: tuple[str, ...], cwd: Path) -> tuple[str | None, str | None]:
         if len(argv) < 2 or not argv[1].casefold().endswith(".py"):
             return None, None
-        script = self._resolve_workspace_path(argv[1], base=cwd)
+        script = self._lexical_workspace_path(argv[1], base=cwd)
         relative_path = script.relative_to(self.workspace_root).as_posix()
-        if not script.is_file():
+        try:
+            content = read_workspace_regular_file(self.workspace_root, script)
+        except UnsafeWorkspaceFileError as exc:
+            raise ExecutionJournalError("tracked script is not a regular file") from exc
+        except WorkspaceFileReadError as exc:
+            raise ExecutionJournalError("tracked script cannot be snapshotted") from exc
+        if content is None:
             return relative_path, None
-        return relative_path, file_sha256(script)
+        return relative_path, content.sha256
 
     def record_process(
         self,
@@ -127,29 +243,44 @@ class ExecutionJournal:
                 normalized_path = normalize_public_relative_path(artifact_path)
             except VisibilityViolation as exc:
                 raise ExecutionJournalError("tracked artifact path must be workspace-relative") from exc
-            resolved = self._resolve_workspace_path(normalized_path)
-            relative_path = resolved.relative_to(self.workspace_root).as_posix()
-            key = os.path.normcase(relative_path)
+            key = os.path.normcase(normalized_path)
             if key not in seen:
-                normalized.append(relative_path)
+                normalized.append(normalized_path)
                 seen.add(key)
         return tuple(normalized)
 
     def _snapshot(self, relative_path: str) -> ArtifactSnapshot:
-        path = self._resolve_workspace_path(relative_path)
-        if not path.exists():
-            return ArtifactSnapshot(path=relative_path, exists=False)
-        if not path.is_file():
-            raise ExecutionJournalError("tracked artifact is not a regular file")
+        path = self._lexical_workspace_path(relative_path)
         try:
-            return ArtifactSnapshot(
-                path=relative_path,
-                exists=True,
-                size=path.stat().st_size,
-                sha256=file_sha256(path),
-            )
-        except OSError as exc:
+            content = read_workspace_regular_file(self.workspace_root, path)
+        except UnsafeWorkspaceFileError as exc:
+            raise ExecutionJournalError("tracked artifact is not a regular file") from exc
+        except WorkspaceFileReadError as exc:
             raise ExecutionJournalError("tracked artifact cannot be snapshotted") from exc
+        if content is None:
+            return ArtifactSnapshot(path=relative_path, exists=False)
+        return ArtifactSnapshot(
+            path=relative_path,
+            exists=True,
+            size=content.size,
+            sha256=content.sha256,
+        )
+
+    def _lexical_workspace_path(self, path: str | Path, *, base: Path | None = None) -> Path:
+        raw = str(path)
+        if not raw or "\x00" in raw or is_sensitive_path(raw, PRBENCH_HIDDEN_PATH_COMPONENTS):
+            raise ExecutionJournalError("unsafe journal path")
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            candidate = (base if base is not None else self.workspace_root) / candidate
+        try:
+            lexical = Path(os.path.abspath(candidate))
+            relative_path = lexical.relative_to(self.workspace_root).as_posix()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ExecutionJournalError("journal path escapes the workspace") from exc
+        if is_sensitive_path(relative_path, PRBENCH_HIDDEN_PATH_COMPONENTS):
+            raise ExecutionJournalError("unsafe journal path")
+        return lexical
 
     def _resolve_workspace_path(self, path: str | Path, *, base: Path | None = None) -> Path:
         raw = str(path)
