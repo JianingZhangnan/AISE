@@ -118,8 +118,8 @@ class AgentLoop:
         progress_fingerprint: Callable[[], str] | None = None,
         verify_after_successful_tool: bool = False,
         max_repeated_calls: int = 5,
-        max_discovery_tool_calls: int | None = None,
         event_sink: EventSink | None = None,
+        max_discovery_tool_calls: int | None = None,
     ) -> None:
         if max_discovery_tool_calls is not None and (
             isinstance(max_discovery_tool_calls, bool)

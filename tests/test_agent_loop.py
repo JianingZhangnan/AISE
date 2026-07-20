@@ -47,6 +47,39 @@ def test_agent_returns_final_text(tmp_path: Path):
     assert result.stopped_reason == "final"
 
 
+def test_agent_loop_preserves_original_positional_event_sink_slot(
+    tmp_path: Path,
+) -> None:
+    llm = ScriptedLLM(
+        [[{"type": "assistant_final", "payload": {"text": "done"}}]]
+    )
+    template = build_loop(tmp_path, llm)
+    observed: list[AgentEvent] = []
+
+    loop = AgentLoop(
+        llm,
+        template.context_builder,
+        template.tool_runtime,
+        template.policy_context,
+        template.trace_store,
+        template.session_store,
+        5,
+        None,
+        3,
+        3,
+        40,
+        None,
+        None,
+        False,
+        5,
+        observed.append,
+    )
+    result = loop.run("preserve positional compatibility")
+
+    assert result.stopped_reason == "final"
+    assert observed == result.events
+
+
 def test_agent_result_uses_the_recorded_safe_final_event(tmp_path: Path) -> None:
     secret = "cafebabe"
     llm = ScriptedLLM(
