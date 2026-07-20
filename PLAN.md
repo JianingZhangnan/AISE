@@ -545,7 +545,7 @@ git commit -m "feat: add core event models and redaction"
 
 ---
 
-### Task 3: 配置和凭据存储
+### Task 3: 配置和凭据存储 - ✅ 完成于 2026-07-08 - commit: `d8dc44f`
 
 **文件：**
 - 创建：`src/phycode/config.py`
@@ -804,7 +804,7 @@ git commit -m "feat: add config and credential foundations"
 
 ---
 
-### Task 4: 工作区策略和防护栏
+### Task 4: 工作区策略和防护栏 - ✅ 完成于 2026-07-08 - commit: `d44f58d`
 
 **文件：**
 - 创建：`src/phycode/policy.py`
@@ -981,7 +981,7 @@ git commit -m "feat: add deterministic policy engine"
 
 ---
 
-### Task 5: 工具注册表和文件/搜索工具
+### Task 5: 工具注册表和文件/搜索工具 - ✅ 完成于 2026-07-08 - commit: `97b4db2`
 
 **文件：**
 - 创建：`src/phycode/tools/__init__.py`
@@ -1226,7 +1226,7 @@ git commit -m "feat: add tool registry and file tools"
 
 ---
 
-### Task 6: Shell、测试、工作区和反馈工具
+### Task 6: Shell、测试、工作区和反馈工具 - ✅ 完成于 2026-07-08 - commit: `e3f549d`
 
 **文件：**
 - 创建：`src/phycode/tools/shell_tools.py`
@@ -1442,7 +1442,7 @@ git commit -m "feat: add shell tools and feedback classification"
 
 ---
 
-### Task 7: Trace、记忆、会话和上下文构建器
+### Task 7: Trace、记忆、会话和上下文构建器 - ✅ 完成于 2026-07-08 - commit: `4f00ea5`
 
 **文件：**
 - 创建：`src/phycode/trace.py`
@@ -1608,7 +1608,7 @@ git commit -m "feat: add trace memory and context stores"
 
 ---
 
-### Task 8: LLM 适配器和事件规范化
+### Task 8: LLM 适配器和事件规范化 - ✅ 完成于 2026-07-08 - commit: `5f3121b`
 
 **文件：**
 - 创建：`src/phycode/llm.py`
@@ -1818,7 +1818,7 @@ git commit -m "feat: add mock llm adapters"
 
 ---
 
-### Task 9: Agent 循环和停止控制器
+### Task 9: Agent 循环和停止控制器 - ✅ 完成于 2026-07-08 - commit: `5f0465d`
 
 **文件：**
 - 创建：`src/phycode/agent.py`

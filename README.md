@@ -4,6 +4,30 @@ PhyCode 是面向 AI4SE 期末项目的 CLI 优先 coding agent harness，核心
 
 > 状态：核心重构、确定性验证与 PRBench 官方双任务真实验收均已完成。2026-07-18 在固定 evaluator commit 上，`aaatest_helloworld` 与 `bbbtest_alphabet` 的白色 runner 均为 `completed`，官方绿色 grader 均为 `overall_score=1.0`；默认测试仍不调用真实模型。完整公开任务 `task_white_1993` 后续共进行五次正式尝试，但没有一次同时满足成功合同，因此未跑通。
 
+## 安装
+
+最终用户通过 PyPI 安装（无需克隆仓库）：
+
+```bash
+uvx phycode version          # 免安装直接运行（推荐先试这个）
+# 或安装到当前环境
+pip install phycode
+phycode version
+```
+
+也可以从 GitHub Releases 获取构建产物：每个版本（<https://github.com/JianingZhangnan/AISE/releases>）都附带 wheel、sdist 及其 SHA256 校验值，下载后 `pip install ./phycode-<version>-py3-none-any.whl`。
+
+从源码获取并以开发模式运行：
+
+```bash
+git clone https://github.com/JianingZhangnan/AISE.git
+cd AISE
+uv sync --dev
+uv run phycode version
+```
+
+安装后请按「指向真实供应商」一节在目标机器上安全配置你自己的 base URL 与 API key（key 存入操作系统钥匙串，不落明文文件）；不配置 key 时所有命令仍可在离线 EchoLLM 模式下确定性运行。
+
 ## 快速开始
 
 ```bash
@@ -324,3 +348,59 @@ uv run phycode keys clear openai-compatible
 ## 分发
 
 主要分发形态为 PyPI 包（`uv publish` 发布，用户 `uvx phycode` 或 `pip install phycode` 安装）。
+
+```bash
+uv build       # 生成 dist/phycode-<version>-py3-none-any.whl 与对应 sdist
+uv publish     # 发布到 PyPI
+```
+
+正式发布由 GitHub Actions 完成：推送 `v*` tag 触发 `.github/workflows/release.yml`，在 CI 中跑完整测试、`uv build` 后通过 **PyPI Trusted Publishing（OIDC）**执行 `uv publish`——仓库与本机都不保存任何长期 PyPI token。每个版本同时创建 GitHub Release，附 wheel/sdist 与 SHA256。`.gitlab-ci.yml` 的 `build-package` job 在 GitLab（NJU Git 镜像）侧产出同样的构建产物。
+
+## 目录结构
+
+```text
+AISE/
+├── src/phycode/            # harness 内核：agent 主循环、策略引擎、反馈分类、
+│   │                       #   trace/记忆/上下文、凭据、LLM 适配层、CLI
+│   └── tools/              # 内置工具执行器（file/shell/search/web/process/state 等）
+├── tests/                  # mock/stub LLM 驱动的确定性测试（不依赖网络与真实 key）
+├── integrations/prbench/   # PRBench 官方 evaluator 适配器与运行脚本
+├── docs/superpowers/       # brainstorming / 计划阶段的过程文档
+├── course_resource/        # 课程作业要求原文
+├── SPEC.md                 # 设计规约（含领域与机制设计、凭据威胁模型）
+├── PLAN.md                 # 实现计划（逐 task 完成标记与 commit hash）
+├── SPEC_PROCESS.md         # 规约过程记录（brainstorming 迭代、冷启动验证、评审修订）
+├── AGENT_LOG.md            # 按时间顺序的 agent 过程日志
+├── REFLECTION.md           # 学生个人反思报告
+├── .github/workflows/      # GitHub Actions：unit-test（push/PR）与 release（tag）
+├── .gitlab-ci.yml          # GitLab CI：unit-test 与 build-package job
+└── pyproject.toml          # uv/hatchling 打包配置（PyPI 包 phycode）
+```
+
+## 已知限制
+
+- **平台**：Windows 与 Linux 经过实际验证（CI 在 Ubuntu 运行全量测试，Windows 为主要开发平台，终端渲染兼容 GBK 控制台）；macOS 未实测。需要 Python >= 3.11。
+- **凭据存储**：依赖操作系统钥匙串（Windows Credential Manager / macOS Keychain / Linux Secret Service）。无钥匙串后端的 headless Linux 上 `keys set` 不可用，`run`/`chat` 会按"未配置凭据"回退到离线 EchoLLM；带主密码的加密文件后备尚未实现（见 SPEC 未决事项）。
+- **供应商协议**：真实模型交互仅支持 OpenAI-compatible Chat Completions 且需支持 `tools`/`tool_calls`；不兼容该协议的供应商不在支持范围内。
+- **PRBench / GAIA 评测**：属于可选集成，不在默认测试内。PRBench 官方评测额外要求 Docker daemon 与 PowerShell（`pwsh` 或 Windows PowerShell）；GAIA 数据集需自行在 Hugging Face 接受条款后下载。
+- **形态**：纯 CLI，无 WebUI 与线上部署；trace JSONL 的结构化格式为未来可视化预留。
+
+## 第三方依赖与许可证
+
+本项目自身以 **MIT 许可证**发布（见根目录 `LICENSE`）。运行时直接依赖的第三方库及其许可证（以各包发行版元数据为准）：
+
+| 依赖 | 用途 | 许可证 |
+| --- | --- | --- |
+| typer | CLI 框架 | MIT |
+| rich | 终端渲染 | MIT |
+| pydantic | 数据模型与校验 | MIT |
+| keyring | 操作系统钥匙串访问 | MIT |
+| httpx | HTTP 客户端 | BSD-3-Clause |
+| openai | OpenAI-compatible Chat Completions 传输客户端（仅单次补全 API，非 agent runner） | Apache-2.0 |
+| prompt-toolkit | 交互式斜杠命令补全 | BSD-3-Clause |
+| ddgs | web.search 工具 | MIT |
+| Pillow | image.inspect 工具 | HPND |
+| pypdf | file.inspect 的 PDF 支持 | BSD-3-Clause |
+| openpyxl / xlrd | file.inspect 的表格支持 | MIT / BSD |
+
+可选 `gaia` extra：faster-whisper（MIT）、pyarrow（Apache-2.0）。开发依赖：pytest / pytest-cov（MIT）。构建与工具链：uv（Apache-2.0 OR MIT）、hatchling（MIT）、pyright（MIT）。`.local/superpowers` 为指向上游 [obra/superpowers](https://github.com/obra/superpowers) 的 git submodule，PRBench evaluator 仅通过 adapter patch 引用上游仓库，两者许可证以各自上游为准；本仓库不包含其源码副本。
