@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from phycode.context import CODING_SYSTEM_PROMPT, GAIA_SYSTEM_PROMPT
-from phycode.models import AgentProfile
+from phycode.models import AgentProfile, FileReadConfig, PRBENCH_FILE_READ_CONFIG
 from phycode.visibility import PRBENCH_HIDDEN_PATH_COMPONENTS
 
 PRBENCH_SYSTEM_PROMPT = """You are PhyCode reproducing a public PRBench task.
@@ -76,6 +76,7 @@ class ProfileSpec:
     max_context_chars: int
     max_tool_calls: int
     hidden_path_components: frozenset[str] = frozenset()
+    file_read_config: FileReadConfig = FileReadConfig()
 
 
 _PROFILE_SPECS = {
@@ -100,6 +101,7 @@ _PROFILE_SPECS = {
         max_context_chars=12_000,
         max_tool_calls=40,
         hidden_path_components=PRBENCH_HIDDEN_PATH_COMPONENTS,
+        file_read_config=PRBENCH_FILE_READ_CONFIG,
     ),
 }
 

@@ -13,7 +13,7 @@ from phycode.context import ContextBuilder, MemoryStore, SessionStore
 from phycode.credentials import CredentialStore
 from phycode.execution import ExecutionJournal
 from phycode.llm import EchoLLM, LLMClient, OpenAICompatibleChatAdapter
-from phycode.models import AgentProfile, Session, SessionMode, ToolCall
+from phycode.models import AgentProfile, FileReadConfig, Session, SessionMode, ToolCall
 from phycode.policy import PolicyContext
 from phycode.profiles import profile_spec
 from phycode.tools import ToolRegistry, ToolRuntime
@@ -45,6 +45,7 @@ def build_default_registry(
     visibility: PathVisibilityPolicy | None = None,
     execution_journal: ExecutionJournal | None = None,
     process_execution_guard: Callable[[ToolCall], bool] | None = None,
+    file_read_config: FileReadConfig = FileReadConfig(),
 ) -> ToolRegistry:
     """Compose the built-in registry without consulting project config when dependencies are explicit."""
     registry = ToolRegistry()
@@ -61,7 +62,7 @@ def build_default_registry(
         if test_command is not None
         else fallback_config.test.command if fallback_config is not None else "uv run pytest"
     )
-    register_file_tools(registry)
+    register_file_tools(registry, read_config=file_read_config)
     register_calculator_tools(registry)
     register_search_tools(registry, workspace_root=root, visibility=visibility)
     register_process_tools(
@@ -173,6 +174,7 @@ def build_agent(
         visibility=policy_context.visibility,
         execution_journal=execution_journal,
         process_execution_guard=process_execution_guard,
+        file_read_config=spec.file_read_config,
     )
     registry = registry_subset(registry, spec.tool_names)
     return AgentLoop(

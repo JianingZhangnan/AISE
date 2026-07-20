@@ -6,12 +6,40 @@ import pytest
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 
-from phycode.models import PolicyAction, ToolCall
+from phycode.composition import build_agent, trusted_prbench_runtime_settings
+from phycode.llm import ScriptedLLM
+from phycode.models import AgentProfile, PolicyAction, SessionMode, ToolCall
 from phycode.policy import PolicyContext
+from phycode.profiles import profile_spec
 from phycode.tools.base import ToolRegistry, ToolRuntime
 from phycode.tools.file_tools import register_file_tools
 
 EXPECTED_FILE_READ_CHARS = 1_200
+
+
+def _profile_file_registry(profile: AgentProfile) -> ToolRegistry:
+    registry = ToolRegistry()
+    register_file_tools(
+        registry,
+        read_config=profile_spec(profile).file_read_config,
+    )
+    return registry
+
+
+def _composed_profile_runtime(
+    tmp_path: Path,
+    profile: AgentProfile,
+) -> tuple[ToolRuntime, PolicyContext]:
+    loop = build_agent(
+        SessionMode.NON_INTERACTIVE,
+        llm=ScriptedLLM([]),
+        profile=profile,
+        runtime_settings=trusted_prbench_runtime_settings(
+            tmp_path,
+            tmp_path / ".phycode" / "test-traces",
+        ),
+    )
+    return loop.tool_runtime, loop.policy_context
 
 
 def test_file_read_reads_workspace_file(tmp_path: Path):
@@ -42,9 +70,10 @@ def test_file_read_default_pages_utf8_text_with_recoverable_next_offset(
 ) -> None:
     content = "起点🙂" + "甲乙丙丁" * 700 + "终点🚀"
     (tmp_path / "long.txt").write_text(content, encoding="utf-8")
-    registry = ToolRegistry()
-    register_file_tools(registry)
-    runtime = ToolRuntime(registry)
+    runtime, policy_context = _composed_profile_runtime(
+        tmp_path,
+        AgentProfile.PRBENCH,
+    )
     restored: list[str] = []
     offset = 0
     page_count = 0
@@ -56,7 +85,7 @@ def test_file_read_default_pages_utf8_text_with_recoverable_next_offset(
                 tool_name="file.read",
                 args={"path": "long.txt", "offset": offset},
             ),
-            PolicyContext(tmp_path, [], True),
+            policy_context,
         )
         assert result.tool_result.status == "ok"
         if not result.tool_result.truncated:
@@ -66,7 +95,7 @@ def test_file_read_default_pages_utf8_text_with_recoverable_next_offset(
         assert separator == "\n"
         assert marker.startswith("next_offset=")
         next_offset = int(marker.removeprefix("next_offset="))
-        assert 0 < len(page) <= EXPECTED_FILE_READ_CHARS
+        assert len(page) == EXPECTED_FILE_READ_CHARS
         assert next_offset == offset + len(page)
         assert len(result.tool_result.stdout) < 1_500
         restored.append(page)
@@ -77,8 +106,7 @@ def test_file_read_default_pages_utf8_text_with_recoverable_next_offset(
 
 
 def test_file_read_schema_documents_character_paging_contract() -> None:
-    registry = ToolRegistry()
-    register_file_tools(registry)
+    registry = _profile_file_registry(AgentProfile.PRBENCH)
     spec = registry.spec_for("file.read")
 
     assert spec is not None
@@ -114,8 +142,7 @@ def test_file_read_rejects_invalid_or_unbounded_windows(
     args: dict[str, object],
 ) -> None:
     (tmp_path / "evidence.txt").write_text("public evidence", encoding="utf-8")
-    registry = ToolRegistry()
-    register_file_tools(registry)
+    registry = _profile_file_registry(AgentProfile.PRBENCH)
 
     result = ToolRuntime(registry).run(
         ToolCall(tool_name="file.read", args={"path": "evidence.txt", **args}),
@@ -123,6 +150,47 @@ def test_file_read_rejects_invalid_or_unbounded_windows(
     )
 
     assert result.tool_result.status in {"invalid_tool_args", "tool_error"}
+
+
+@pytest.mark.parametrize("profile", [AgentProfile.CODING, AgentProfile.GAIA])
+def test_file_read_profile_default_preserves_complete_legacy_output(
+    tmp_path: Path,
+    profile: AgentProfile,
+) -> None:
+    content = "legacy-start\n" + "x" * 2_500 + "\nlegacy-end"
+    (tmp_path / "long.txt").write_text(content, encoding="utf-8")
+    runtime, policy_context = _composed_profile_runtime(tmp_path, profile)
+
+    result = runtime.run(
+        ToolCall(tool_name="file.read", args={"path": "long.txt"}),
+        policy_context,
+    )
+
+    assert result.tool_result.status == "ok"
+    assert result.tool_result.stdout == content
+    assert result.tool_result.truncated is False
+
+
+@pytest.mark.parametrize("profile", [AgentProfile.CODING, AgentProfile.GAIA])
+def test_file_read_profile_accepts_legacy_explicit_limit_above_prbench_window(
+    tmp_path: Path,
+    profile: AgentProfile,
+) -> None:
+    content = "y" * 3_000
+    (tmp_path / "long.txt").write_text(content, encoding="utf-8")
+    runtime, policy_context = _composed_profile_runtime(tmp_path, profile)
+
+    result = runtime.run(
+        ToolCall(
+            tool_name="file.read",
+            args={"path": "long.txt", "limit": 2_400},
+        ),
+        policy_context,
+    )
+
+    assert result.tool_result.status == "ok"
+    assert result.tool_result.stdout == content[:2_400]
+    assert result.tool_result.truncated is True
 
 
 def test_file_edit_requires_approval_then_writes_diff(tmp_path: Path):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -69,6 +70,21 @@ class AgentProfile(str, Enum):
     CODING = "coding"
     GAIA = "gaia"
     PRBENCH = "prbench"
+
+
+@dataclass(frozen=True)
+class FileReadConfig:
+    default_limit: int | None = None
+    max_limit: int | None = None
+    emit_next_offset: bool = False
+
+
+PRBENCH_FILE_READ_CHARS = 1_200
+PRBENCH_FILE_READ_CONFIG = FileReadConfig(
+    default_limit=PRBENCH_FILE_READ_CHARS,
+    max_limit=PRBENCH_FILE_READ_CHARS,
+    emit_next_offset=True,
+)
 
 
 class AgentEvent(BaseModel):
