@@ -216,8 +216,12 @@ def _load_launcher_output_helpers(
     }
 
 
-def _load_public_task_contract_metadata(task_yaml: Path) -> dict[str, object]:
-    """Read only the public task fields consumed by the contract validator."""
+def _load_pinned_public_task_contract_metadata(
+    pinned_evaluator: Path, task_id: str
+) -> dict[str, object]:
+    """Parse the narrow public task.yaml subset from a pinned evaluator fixture."""
+
+    task_yaml = pinned_evaluator / "data" / "tasks" / task_id / "task.yaml"
 
     def scalar(value: str) -> str:
         value = value.strip()
@@ -269,7 +273,74 @@ def _load_public_task_contract_metadata(task_yaml: Path) -> dict[str, object]:
 
     assert isinstance(task_config.get("instruction_file"), str)
     assert isinstance(cast(dict[str, object], task_config["paper"]).get("paper_file"), str)
+    expected_outputs = task_config["expected_outputs"]
+    assert isinstance(expected_outputs, dict) and expected_outputs
+    assert all(
+        isinstance(group, str)
+        and isinstance(paths, list)
+        and all(isinstance(path, str) for path in paths)
+        for group, paths in expected_outputs.items()
+    )
     return task_config
+
+
+def test_public_task_metadata_helper_locks_supported_pinned_yaml_subset(
+    tmp_path: Path,
+) -> None:
+    task_yaml = tmp_path / "data" / "tasks" / "public-task" / "task.yaml"
+    task_yaml.parent.mkdir(parents=True)
+    task_yaml.write_text(
+        "paper:\n"
+        '  paper_file: "paper.md"\n'
+        'instruction_file: "instruction.md"\n'
+        "input_files:\n"
+        '  - "input.csv"\n'
+        "expected_outputs:\n"
+        "  analysis:\n"
+        '    - "reproduction/ANALYSIS.md"\n'
+        "  code:\n"
+        "    - reproduction/run.py\n",
+        encoding="utf-8",
+    )
+
+    assert _load_pinned_public_task_contract_metadata(tmp_path, "public-task") == {
+        "instruction_file": "instruction.md",
+        "paper": {"paper_file": "paper.md"},
+        "input_files": ["input.csv"],
+        "expected_outputs": {
+            "analysis": ["reproduction/ANALYSIS.md"],
+            "code": ["reproduction/run.py"],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "task_yaml_text",
+    [
+        "paper:\n"
+        '  paper_file: "paper.md"\n'
+        "expected_outputs:\n"
+        "  data:\n"
+        '    - "result.csv"\n',
+        'instruction_file: "instruction.md"\n'
+        "expected_outputs:\n"
+        "  data:\n"
+        '    - "result.csv"\n',
+        "paper:\n"
+        '  paper_file: "paper.md"\n'
+        'instruction_file: "instruction.md"\n',
+    ],
+    ids=("instruction-file", "paper-file", "expected-outputs"),
+)
+def test_public_task_metadata_helper_requires_contract_fields(
+    tmp_path: Path, task_yaml_text: str
+) -> None:
+    task_yaml = tmp_path / "data" / "tasks" / "public-task" / "task.yaml"
+    task_yaml.parent.mkdir(parents=True)
+    task_yaml.write_text(task_yaml_text, encoding="utf-8")
+
+    with pytest.raises(AssertionError):
+        _load_pinned_public_task_contract_metadata(tmp_path, "public-task")
 
 
 def _text_open_calls_missing_utf8(source: Path) -> list[int]:
@@ -1876,11 +1947,129 @@ def test_official_validator_accepts_every_tracked_public_contract(
             / "task.yaml"
         )
         assert task_yaml.is_file(), contract_path.stem
-        task_config = _load_public_task_contract_metadata(task_yaml)
+        task_config = _load_pinned_public_task_contract_metadata(
+            patched_official_evaluator, contract_path.stem
+        )
 
         snapshot = validate_contract(task_config, str(contract_path.resolve()), False)
 
         assert snapshot == contract_path.read_bytes(), contract_path.stem
+
+
+@pytest.mark.parametrize("fold_case", [False, True], ids=("posix-host", "windows-host"))
+def test_official_validator_uses_case_sensitive_workspace_keys_on_every_host(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fold_case: bool,
+) -> None:
+    monkeypatch.setattr(
+        os.path,
+        "normcase",
+        (lambda path: path.casefold()) if fold_case else (lambda path: path),
+    )
+    validate_contract = cast(
+        Callable[[dict[str, object], str | None, bool], bytes],
+        _load_launcher_output_helpers(
+            patched_official_evaluator / "src/launcher.py",
+            os,
+        )["_validate_phycode_contract"],
+    )
+    task_config = {
+        "instruction_file": "instruction.md",
+        "paper": {"paper_file": "paper.md"},
+        "input_files": [],
+        "expected_outputs": {"data": ["data/Result.csv"]},
+    }
+    contract = tmp_path / "contract.json"
+    contract.write_text(
+        json.dumps(
+            {
+                "instruction_file": "instruction.md",
+                "paper_file": "paper.md",
+                "input_files": [],
+                "expected_files": ["data/result.csv"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="Explicit PhyCode contract is invalid"):
+        validate_contract(task_config, str(contract), False)
+
+
+def test_task_white_1993_missing_analysis_is_rejected_before_provider_or_docker(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+) -> None:
+    task_id = "task_white_1993"
+    task_config = _load_pinned_public_task_contract_metadata(
+        patched_official_evaluator, task_id
+    )
+    contract_payload = json.loads(
+        Path(f"integrations/prbench/public_contracts/{task_id}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert isinstance(contract_payload, dict)
+    expected_files = contract_payload["expected_files"]
+    assert isinstance(expected_files, list)
+    expected_files.remove("reproduction/ANALYSIS.md")
+    contract = tmp_path / "contract.json"
+    contract.write_text(json.dumps(contract_payload), encoding="utf-8")
+    side_effects: list[str] = []
+
+    class ProviderReached(RuntimeError):
+        pass
+
+    def resolve_env(_agent_type: str) -> dict[str, str]:
+        side_effects.append("resolve-env")
+        raise ProviderReached
+
+    def setup_docker_environment(*_args: object, **_kwargs: object) -> object:
+        side_effects.append("docker-setup")
+        raise AssertionError("contract validation must run before Docker setup")
+
+    launch_evaluation = _load_function(
+        patched_official_evaluator / "src/launcher.py",
+        "launch_evaluation",
+        {
+            "DATA_DIR": str(patched_official_evaluator / "data" / "tasks"),
+            "json": json,
+            "logger": types.SimpleNamespace(error=lambda *_: None, info=lambda *_: None),
+            "logging": types.SimpleNamespace(
+                INFO=20,
+                basicConfig=lambda **_kwargs: None,
+                FileHandler=lambda *_args: object(),
+                StreamHandler=lambda *_args: object(),
+            ),
+            "open": open,
+            "os": os,
+            "resolve_env": resolve_env,
+            "setup_docker_environment": setup_docker_environment,
+            "stat": stat,
+            "yaml": types.SimpleNamespace(safe_load=lambda _handle: task_config),
+        },
+        dependencies=(
+            "_path_is_within",
+            "_read_verified_utf8",
+            "_validate_phycode_contract",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="Explicit PhyCode contract is invalid"):
+        asyncio.run(
+            launch_evaluation(  # type: ignore[arg-type]
+                task_id=task_id,
+                green_port=9001,
+                white_port=9002,
+                white_agent_type="phycode",
+                green_agent_type="opencode",
+                phycode_contract=str(contract),
+            )
+        )
+
+    assert side_effects == []
 
 
 def test_official_launcher_validates_explicit_expected_file_superset_before_provider(
@@ -1896,8 +2085,10 @@ def test_official_launcher_validates_explicit_expected_file_superset_before_prov
         "paper": {"paper_file": "paper.md"},
         "input_files": [],
         "expected_outputs": {
+            "analysis": ["analysis.md"],
             "code": ["reproduce.py"],
             "data": ["result.csv"],
+            "report": ["report.md"],
         },
     }
 
@@ -1945,10 +2136,12 @@ def test_official_launcher_validates_explicit_expected_file_superset_before_prov
         "paper_file": "paper.md",
         "input_files": [],
         "expected_files": [
+            "analysis.md",
             "reproduce.py",
             "extras/entry.py",
             "result.csv",
             "extras/report.csv",
+            "report.md",
         ],
         "execution_entrypoints": ["extras/entry.py"],
         "constraints": [
@@ -1970,19 +2163,25 @@ def test_official_launcher_validates_explicit_expected_file_superset_before_prov
         )
     assert side_effects == ["resolve-env"]
 
+    declared_expected = ["analysis.md", "reproduce.py", "result.csv", "report.md"]
     invalid_expected_files = {
-        "missing declared": ["reproduce.py", "extras/report.csv"],
-        "reordered declared": ["result.csv", "reproduce.py"],
-        "duplicate": ["reproduce.py", "result.csv", "result.csv"],
-        "empty": ["reproduce.py", "result.csv", ""],
-        "dot": ["reproduce.py", "result.csv", "."],
-        "dot-dot": ["reproduce.py", "result.csv", ".."],
-        "traversal": ["reproduce.py", "result.csv", "extra/../escape.txt"],
-        "posix absolute": ["reproduce.py", "result.csv", "/absolute.txt"],
-        "windows absolute": ["reproduce.py", "result.csv", "C:\\absolute.txt"],
-        "hidden fixture": ["reproduce.py", "result.csv", "_ground_truth/data.csv"],
-        "credential": ["reproduce.py", "result.csv", ".env"],
-        "non-string": ["reproduce.py", "result.csv", 7],
+        "missing declared group": declared_expected[:-1],
+        "reordered declared groups": [
+            "reproduce.py",
+            "analysis.md",
+            "result.csv",
+            "report.md",
+        ],
+        "duplicate": [*declared_expected, "report.md"],
+        "empty": [*declared_expected, ""],
+        "dot": [*declared_expected, "."],
+        "dot-dot": [*declared_expected, ".."],
+        "traversal": [*declared_expected, "extra/../escape.txt"],
+        "posix absolute": [*declared_expected, "/absolute.txt"],
+        "windows absolute": [*declared_expected, "C:\\absolute.txt"],
+        "hidden fixture": [*declared_expected, "_ground_truth/data.csv"],
+        "credential": [*declared_expected, ".env"],
+        "non-string": [*declared_expected, 7],
     }
     for label, expected_files in invalid_expected_files.items():
         side_effects.clear()

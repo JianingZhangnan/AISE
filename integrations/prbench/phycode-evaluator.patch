@@ -387,7 +387,7 @@ index c705de8..2524cb7 100644
 +        os.environ.update(saved)
 +
 +
-@@ -230,0 +312,389 @@ def _copy_input_files(task_config: dict, task_dir: str, workspace_dir: str) -> N
+@@ -230,0 +312,387 @@ def _copy_input_files(task_config: dict, task_dir: str, workspace_dir: str) -> N
 +def _validate_phycode_contract(
 +    task_config: dict,
 +    contract_file: str | None,
@@ -435,8 +435,8 @@ index c705de8..2524cb7 100644
 +        )
 +    declared_expected = [
 +        path
-+        for group in ("code", "data")
-+        for path in expected_config.get(group, [])
++        for output_group in expected_config.values()
++        for path in output_group
 +    ]
 +    expected_files = contract.get("expected_files")
 +    if not isinstance(expected_files, list) or any(
@@ -466,12 +466,10 @@ index c705de8..2524cb7 100644
 +            )
 +        ):
 +            raise RuntimeError(error)
-+        expected_keys.append(os.path.normcase(normalized))
++        expected_keys.append(normalized)
 +    if len(set(expected_keys)) != len(expected_keys):
 +        raise RuntimeError(error)
-+    declared_keys = [
-+        os.path.normcase(path.replace("\\", "/")) for path in declared_expected
-+    ]
++    declared_keys = [path.replace("\\", "/") for path in declared_expected]
 +    declared_index = 0
 +    for key in expected_keys:
 +        if declared_index < len(declared_keys) and key == declared_keys[declared_index]:
@@ -484,7 +482,7 @@ index c705de8..2524cb7 100644
 +        not isinstance(path, str) or not path for path in entrypoints
 +    ):
 +        raise RuntimeError(error)
-+    entrypoint_keys = [os.path.normcase(path.replace("\\", "/")) for path in entrypoints]
++    entrypoint_keys = [path.replace("\\", "/") for path in entrypoints]
 +    if (
 +        len(set(entrypoint_keys)) != len(entrypoint_keys)
 +        or any(key not in expected_keys for key in entrypoint_keys)
@@ -505,7 +503,7 @@ index c705de8..2524cb7 100644
 +        path = constraint.get("path")
 +        if not isinstance(path, str) or not path:
 +            raise RuntimeError(error)
-+        key = os.path.normcase(path.replace("\\", "/"))
++        key = path.replace("\\", "/")
 +        if key not in expected_keys or key in constraint_keys:
 +            raise RuntimeError(error)
 +        constraint_keys.append(key)
@@ -777,14 +775,14 @@ index c705de8..2524cb7 100644
 +        raise RuntimeError("PhyCode controls were not published")
 +
 +
-@@ -234,0 +705,3 @@ def _export_traces_for_type(
+@@ -234,0 +703,3 @@ def _export_traces_for_type(
 +    if agent_type == "phycode":
 +        # Already persisted inside workspace/.phycode/prbench.
 +        return
-@@ -251,0 +725,2 @@ def setup_docker_environment(
+@@ -251,0 +723,2 @@ def setup_docker_environment(
 +    phycode_contract_snapshot: bytes | None = None,
 +    phycode_approvals_snapshot: bytes | None = None,
-@@ -257,0 +733,8 @@ def setup_docker_environment(
+@@ -257,0 +731,8 @@ def setup_docker_environment(
 +    if white_agent_type == "phycode":
 +        _copy_phycode_controls(
 +            task_config,
@@ -793,22 +791,22 @@ index c705de8..2524cb7 100644
 +            phycode_contract_snapshot,
 +            phycode_approvals_snapshot,
 +        )
-@@ -261 +744,3 @@ def setup_docker_environment(
+@@ -261 +742,3 @@ def setup_docker_environment(
 -    # Collect credentials for all needed agent types via centralized resolver
 +    # A PhyCode white run must not expose green credentials to the shared
 +    # container. The green child receives them only when grading begins.
 +    defer_green_env = white_agent_type == "phycode"
-@@ -264 +749,2 @@ def setup_docker_environment(
+@@ -264 +747,2 @@ def setup_docker_environment(
 -        env_vars.update(resolve_env(t))
 +        if t != "phycode" and not (defer_green_env and t == green_agent_type):
 +            env_vars.update(resolve_env(t))
-@@ -273,0 +760,5 @@ def setup_docker_environment(
+@@ -273,0 +758,5 @@ def setup_docker_environment(
 +        phycode_wheel=(
 +            os.path.join(PROJECT_ROOT, ".phycode-adapter", "phycode.whl")
 +            if "phycode" in needed_types
 +            else None
 +        ),
-@@ -276,35 +767,53 @@ def setup_docker_environment(
+@@ -276,35 +765,53 @@ def setup_docker_environment(
 -    logger.info("Creating Docker environment...")
 -    docker_env.start()
 -
@@ -897,16 +895,16 @@ index c705de8..2524cb7 100644
 +        except BaseException:
 +            logger.warning("Docker cleanup failed after setup error")
 +        raise
-@@ -322,0 +832,5 @@ async def launch_evaluation(
+@@ -322,0 +830,5 @@ async def launch_evaluation(
 +    phycode_contract: str | None = None,
 +    phycode_approvals: str | None = None,
 +    approval_wait_seconds: int = 0,
 +    phycode_max_tool_calls: int = 40,
 +    phycode_max_context_chars: int = 12_000,
-@@ -325 +839 @@ async def launch_evaluation(
+@@ -325 +837 @@ async def launch_evaluation(
 -):
 +) -> bool:
-@@ -337,0 +852,13 @@ async def launch_evaluation(
+@@ -337,0 +850,13 @@ async def launch_evaluation(
 +    if not 0 <= approval_wait_seconds <= 900:
 +        raise ValueError("approval wait seconds must be between 0 and 900")
 +    if not 1 <= phycode_max_tool_calls <= 100:
@@ -920,16 +918,16 @@ index c705de8..2524cb7 100644
 +    phycode_provider_env: dict[str, str] = {}
 +    phycode_contract_snapshot: bytes | None = None
 +    phycode_approvals_snapshot: bytes | None = b'{\n  "grants": []\n}\n'
-@@ -357 +884 @@ async def launch_evaluation(
+@@ -357 +882 @@ async def launch_evaluation(
 -        return
 +        return False
-@@ -362 +889 @@ async def launch_evaluation(
+@@ -362 +887 @@ async def launch_evaluation(
 -        return
 +        return False
-@@ -364 +891 @@ async def launch_evaluation(
+@@ -364 +889 @@ async def launch_evaluation(
 -    with open(task_yaml, "r") as f:
 +    with open(task_yaml, "r", encoding="utf-8") as f:
-@@ -365,0 +893,11 @@ async def launch_evaluation(
+@@ -365,0 +891,11 @@ async def launch_evaluation(
 +    if effective_white_type == "phycode":
 +        try:
 +            phycode_contract_snapshot = _validate_phycode_contract(
@@ -941,7 +939,7 @@ index c705de8..2524cb7 100644
 +        except RuntimeError as error:
 +            raise ValueError(str(error)) from None
 +        phycode_provider_env = resolve_env("phycode")
-@@ -374,0 +913,10 @@ async def launch_evaluation(
+@@ -374,0 +911,10 @@ async def launch_evaluation(
 +    report_path = os.path.join(workspace_dir, "eval_logs", "eval_report.json")
 +    run_result_path = os.path.join(
 +        workspace_dir, ".phycode", "prbench", "run_result.json"
@@ -952,29 +950,29 @@ index c705de8..2524cb7 100644
 +    if effective_white_type == "phycode":
 +        _remove_stale_output(workspace_dir, run_result_path)
 +
-@@ -397,0 +946 @@ async def launch_evaluation(
+@@ -397,0 +944 @@ async def launch_evaluation(
 +    evaluation_succeeded = False
-@@ -410 +959,3 @@ async def launch_evaluation(
+@@ -410 +957,3 @@ async def launch_evaluation(
 -                                              green_agent_type=effective_green_type)
 +                                              green_agent_type=effective_green_type,
 +                                              phycode_contract_snapshot=phycode_contract_snapshot,
 +                                              phycode_approvals_snapshot=phycode_approvals_snapshot)
-@@ -420 +971,2 @@ async def launch_evaluation(
+@@ -420 +969,2 @@ async def launch_evaluation(
 -            args=("prbench_green_agent", green_host, green_port, container_id, effective_green_type),
 +            args=("prbench_green_agent", green_host, green_port, container_id,
 +                  effective_green_type, effective_white_type == "phycode"),
-@@ -423 +975 @@ async def launch_evaluation(
+@@ -423 +973 @@ async def launch_evaluation(
 -        p_green.start()
 +        _start_without_phycode_environment(p_green)
-@@ -427 +979 @@ async def launch_evaluation(
+@@ -427 +977 @@ async def launch_evaluation(
 -            return
 +            return False
-@@ -436 +988,3 @@ async def launch_evaluation(
+@@ -436 +986,3 @@ async def launch_evaluation(
 -                  workspace_dir, container_id, effective_white_type),
 +                  workspace_dir, container_id, effective_white_type,
 +                  phycode_provider_env, approval_wait_seconds,
 +                  phycode_max_tool_calls, phycode_max_context_chars),
-@@ -439 +993,7 @@ async def launch_evaluation(
+@@ -439 +991,7 @@ async def launch_evaluation(
 -        p_white.start()
 +        if effective_white_type == "phycode":
 +            run_with_phycode_cleanup(
@@ -983,21 +981,21 @@ index c705de8..2524cb7 100644
 +            )
 +        else:
 +            _start_without_phycode_environment(p_white)
-@@ -443 +1003 @@ async def launch_evaluation(
+@@ -443 +1001 @@ async def launch_evaluation(
 -            return
 +            return False
-@@ -466,0 +1027 @@ async def launch_evaluation(
+@@ -466,0 +1025 @@ async def launch_evaluation(
 +        send_succeeded = False
-@@ -469,0 +1031 @@ async def launch_evaluation(
+@@ -469,0 +1029 @@ async def launch_evaluation(
 +            send_succeeded = True
-@@ -478,4 +1040,2 @@ async def launch_evaluation(
+@@ -478,4 +1038,2 @@ async def launch_evaluation(
 -        report_path = os.path.join(workspace_dir, "eval_logs", "eval_report.json")
 -        if os.path.exists(report_path):
 -            with open(report_path, "r") as f:
 -                report = json.load(f)
 +        report_valid, report = _load_verified_json(workspace_dir, report_path)
 +        if report_valid:
-@@ -488,0 +1049,17 @@ async def launch_evaluation(
+@@ -488,0 +1047,17 @@ async def launch_evaluation(
 +        phycode_succeeded = True
 +        if effective_white_type == "phycode":
 +            run_result_valid, run_result = _load_verified_json(
@@ -1015,15 +1013,15 @@ index c705de8..2524cb7 100644
 +            send_succeeded and report_valid and phycode_succeeded
 +        )
 +
-@@ -505 +1082 @@ async def launch_evaluation(
+@@ -505 +1080 @@ async def launch_evaluation(
 -                with open(os.path.join(eval_logs_dir, "docker_container.log"), "w") as f:
 +                with open(os.path.join(eval_logs_dir, "docker_container.log"), "w", encoding="utf-8") as f:
-@@ -534,0 +1112 @@ async def launch_evaluation(
+@@ -534,0 +1110 @@ async def launch_evaluation(
 +    return evaluation_succeeded
-@@ -558 +1136 @@ async def batch_evaluate(
+@@ -558 +1134 @@ async def batch_evaluate(
 -                await launch_evaluation(
 +                succeeded = await launch_evaluation(
-@@ -569 +1147,4 @@ async def batch_evaluate(
+@@ -569 +1145,4 @@ async def batch_evaluate(
 -                print(f"[BATCH] Completed: {task_id}", flush=True)
 +                if succeeded:
 +                    print(f"[BATCH] Completed: {task_id}", flush=True)
