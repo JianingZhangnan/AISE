@@ -40,7 +40,6 @@ def test_prbench_wheel_contract_matches_project_version():
         _read("integrations/prbench/apply_adapter.py"),
         flags=re.MULTILINE,
     )
-    main_readme = re.search(filename_pattern, _read("README.md"))
     integration_readme = re.search(
         filename_pattern, _read("integrations/prbench/README.md")
     )
@@ -52,14 +51,12 @@ def test_prbench_wheel_contract_matches_project_version():
         rf"uv pip install --system /tmp/({filename_pattern})", patch
     )
     assert adapter_filename is not None
-    assert main_readme is not None
     assert integration_readme is not None
     assert patch_copy is not None
     assert patch_install is not None
 
     actual_filenames = {
         "adapter": adapter_filename.group(1),
-        "README.md": main_readme.group(0),
         "integrations/prbench/README.md": integration_readme.group(0),
         "patch copy target": patch_copy.group(1),
         "patch install target": patch_install.group(1),
@@ -119,6 +116,8 @@ def test_readme_documents_install_layout_limits_and_licensing():
     assert "git clone https://github.com/JianingZhangnan/AISE" in readme
     assert "github.com/JianingZhangnan/AISE/releases" in readme
     assert "pip install phycode" in readme
+    for banned in ("PRBench", "GAIA", "task_white_1993"):
+        assert banned not in readme, banned
     assert (ROOT / "LICENSE").exists()
     project = tomllib.loads(_read("pyproject.toml"))["project"]
     assert project.get("license") == "MIT"
@@ -180,7 +179,7 @@ def test_agent_log_records_task_10_to_12_execution_and_subagent_use():
 
 
 def test_prbench_readme_separates_deterministic_real_runner_and_official_smoke():
-    readme = _read("README.md")
+    readme = _read("integrations/prbench/README.md")
     required = [
         "phycode prbench run",
         "process.run",
@@ -215,7 +214,7 @@ def test_prbench_process_documents_refactor_and_real_api_acceptance_boundary():
 
 
 def test_docs_define_full_public_task_and_local_artifact_boundary() -> None:
-    readme = _read("README.md")
+    readme = _read("integrations/prbench/README.md")
     plan = _read("PLAN.md")
     process = _read("SPEC_PROCESS.md")
     log = _read("AGENT_LOG.md")
@@ -326,7 +325,7 @@ def test_docs_define_full_public_task_and_local_artifact_boundary() -> None:
 
 
 def test_process_docs_record_full_public_result_without_artifacts() -> None:
-    readme = _read("README.md")
+    readme = _read("integrations/prbench/README.md")
     plan = _read("PLAN.md")
     process = _read("SPEC_PROCESS.md")
     log = _read("AGENT_LOG.md")
@@ -337,7 +336,7 @@ def test_process_docs_record_full_public_result_without_artifacts() -> None:
         assert "凭据泄漏扫描" in document
 
     final_result_regions = {
-        "README.md": re.sub(
+        "integrations/prbench/README.md": re.sub(
             r"\s+",
             " ",
             _read_h2_section(readme, "PRBench 完整公开任务（正式运行前门禁）"),
@@ -623,7 +622,7 @@ def test_public_smoke_script_has_closed_credential_and_approval_contract():
     assert "Remove-Item -LiteralPath ('Env:' + $name) -ErrorAction SilentlyContinue" in script
     assert "[Environment]::SetEnvironmentVariable($name, $null, 'Process')" not in script
     assert not re.search(r"Write-(?:Host|Output).*\$env:", script, flags=re.IGNORECASE)
-    readme = _read("README.md")
+    readme = _read("integrations/prbench/README.md")
     assert 'a2a-sdk[http-server]==0.3.8' in readme
     for runtime_approval_term in (
         ".phycode/prbench/approval-request.json",
