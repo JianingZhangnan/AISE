@@ -1932,7 +1932,7 @@ def test_official_phycode_control_writes_fail_closed_on_target_or_workspace_swap
         "paper": {"paper_file": "paper.md"},
     }
     sentinel_bytes = b"outside-sentinel"
-    race_results: list[tuple[str, bool, bytes, bool, bool]] = []
+    race_results: list[tuple[str, bool, bytes, bool, bool, bool, bool]] = []
 
     for race_kind in ("approval-target", "workspace-parent"):
         case_dir = tmp_path / race_kind
@@ -2016,7 +2016,10 @@ def test_official_phycode_control_writes_fail_closed_on_target_or_workspace_swap
                 "_path_is_within",
                 "_read_verified_utf8",
                 "_is_reparse_point",
-                "_same_file_identity",
+                "_phycode_workspace_identity",
+                "_verify_phycode_control",
+                "_rollback_phycode_control",
+                "_preflight_phycode_controls",
                 "_write_phycode_control",
             ),
         )
@@ -2032,6 +2035,36 @@ def test_official_phycode_control_writes_fail_closed_on_target_or_workspace_swap
             )
         except (OSError, RuntimeError):
             raised = True
+        raced_target_cleaned = not (
+            contract_dst if race_kind == "workspace-parent" else approvals_dst
+        ).exists()
+        contract_cleaned = not contract_dst.exists()
+        retry_succeeded = True
+        if race_kind == "approval-target":
+            retry_copy = _load_function(
+                launcher,
+                "_copy_phycode_controls",
+                {"os": os, "shutil": shutil, "stat": stat},
+                dependencies=(
+                    "_path_is_within",
+                    "_is_reparse_point",
+                    "_phycode_workspace_identity",
+                    "_verify_phycode_control",
+                    "_rollback_phycode_control",
+                    "_preflight_phycode_controls",
+                    "_write_phycode_control",
+                ),
+            )
+            try:
+                retry_copy(  # type: ignore[operator]
+                    task_config,
+                    str(task_dir),
+                    str(workspace),
+                    b'{"contract": "trusted"}',
+                    approvals.read_bytes(),
+                )
+            except (OSError, RuntimeError):
+                retry_succeeded = False
         race_results.append(
             (
                 race_kind,
@@ -2039,19 +2072,18 @@ def test_official_phycode_control_writes_fail_closed_on_target_or_workspace_swap
                 sentinel.read_bytes(),
                 bool(opened_descriptors)
                 and opened_descriptors <= closed_descriptors,
-                not (
-                    contract_dst
-                    if race_kind == "workspace-parent"
-                    else approvals_dst
-                ).exists(),
+                raced_target_cleaned,
+                contract_cleaned,
+                retry_succeeded,
             )
         )
 
-    assert race_results == [
-        ("approval-target", True, sentinel_bytes, True, True),
-        ("workspace-parent", True, sentinel_bytes, True, True),
+    expected_race_results = [
+        ("approval-target", True, sentinel_bytes, True, True, True, True),
+        ("workspace-parent", True, sentinel_bytes, True, False, False, True),
     ]
 
+    preexisting_results: list[tuple[str, bytes, bool]] = []
     for target_name in ("task_contract.json", "phycode-approvals.json"):
         case_dir = tmp_path / f"preexisting-{target_name}"
         task_dir = case_dir / "task"
@@ -2068,7 +2100,10 @@ def test_official_phycode_control_writes_fail_closed_on_target_or_workspace_swap
             dependencies=(
                 "_path_is_within",
                 "_is_reparse_point",
-                "_same_file_identity",
+                "_phycode_workspace_identity",
+                "_verify_phycode_control",
+                "_rollback_phycode_control",
+                "_preflight_phycode_controls",
                 "_write_phycode_control",
             ),
         )
@@ -2082,7 +2117,112 @@ def test_official_phycode_control_writes_fail_closed_on_target_or_workspace_swap
                 b'{"grants": []}',
             )
 
-        assert target.read_bytes() == b"preexisting-control"
+        preexisting_results.append(
+            (
+                target_name,
+                target.read_bytes(),
+                target_name != "phycode-approvals.json"
+                or not (workspace / "task_contract.json").exists(),
+            )
+        )
+
+    postwrite_results: list[tuple[str, bool, bool, bytes, bool]] = []
+    for race_kind in ("target-after-write", "workspace-after-write"):
+        case_dir = tmp_path / race_kind
+        workspace = case_dir / "workspace"
+        alternate_workspace = case_dir / "alternate-workspace"
+        outside = case_dir / "outside"
+        workspace.mkdir(parents=True)
+        alternate_workspace.mkdir()
+        outside.mkdir()
+        target = workspace / "task_contract.json"
+        sentinel = outside / "sentinel.json"
+        sentinel.write_bytes(sentinel_bytes)
+        opened_descriptors: set[int] = set()
+        closed_descriptors: set[int] = set()
+
+        class PostWriteRaceOsProxy:
+            path = os.path
+            supports_dir_fd: set[object] = set()
+
+            def __init__(self) -> None:
+                self.control_descriptor: int | None = None
+                self.swapped = False
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(os, name)
+
+            def lstat(self, path: str | os.PathLike[str]) -> os.stat_result:
+                if self.swapped and Path(path) == workspace:
+                    return os.lstat(alternate_workspace)
+                if self.swapped and Path(path) == target:
+                    return os.lstat(sentinel)
+                return os.lstat(path)
+
+            def open(
+                self,
+                path: str | os.PathLike[str],
+                flags: int,
+                mode: int = 0o777,
+                **kwargs: object,
+            ) -> int:
+                descriptor = os.open(path, flags, mode, **kwargs)  # type: ignore[call-overload]
+                if Path(path) == target and flags & os.O_CREAT:
+                    self.control_descriptor = descriptor
+                    opened_descriptors.add(descriptor)
+                return descriptor
+
+            def write(self, descriptor: int, payload: object) -> int:
+                written = os.write(descriptor, payload)  # type: ignore[arg-type]
+                if descriptor == self.control_descriptor:
+                    self.swapped = True
+                return written
+
+            def close(self, descriptor: int) -> None:
+                closed_descriptors.add(descriptor)
+                os.close(descriptor)
+
+        race_os = PostWriteRaceOsProxy()
+        writer = _load_function(
+            launcher,
+            "_write_phycode_control",
+            {"os": race_os, "stat": stat},
+            dependencies=(
+                "_path_is_within",
+                "_is_reparse_point",
+                "_phycode_workspace_identity",
+                "_verify_phycode_control",
+                "_rollback_phycode_control",
+            ),
+        )
+        raised = False
+        publication_token: object | None = None
+        try:
+            publication_token = writer(
+                str(workspace), target.name, b"trusted-payload"
+            )
+        except (OSError, RuntimeError):
+            raised = True
+        postwrite_results.append(
+            (
+                race_kind,
+                raised,
+                publication_token is None,
+                sentinel.read_bytes(),
+                bool(opened_descriptors)
+                and opened_descriptors <= closed_descriptors,
+            )
+        )
+
+    assert postwrite_results == [
+        ("target-after-write", True, True, sentinel_bytes, True),
+        ("workspace-after-write", True, True, sentinel_bytes, True),
+    ]
+    assert race_results == expected_race_results
+    assert preexisting_results == [
+        ("task_contract.json", b"preexisting-control", True),
+        ("phycode-approvals.json", b"preexisting-control", True),
+    ]
 
 
 def test_official_launcher_copies_prevalidated_control_snapshots_after_source_swap(
@@ -2160,7 +2300,10 @@ def test_official_launcher_copies_prevalidated_control_snapshots_after_source_sw
         dependencies=(
             "_path_is_within",
             "_is_reparse_point",
-            "_same_file_identity",
+            "_phycode_workspace_identity",
+            "_verify_phycode_control",
+            "_rollback_phycode_control",
+            "_preflight_phycode_controls",
             "_write_phycode_control",
         ),
     )

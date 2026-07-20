@@ -387,7 +387,7 @@ index c705de8..2524cb7 100644
 +        os.environ.update(saved)
 +
 +
-@@ -230,0 +312,317 @@ def _copy_input_files(task_config: dict, task_dir: str, workspace_dir: str) -> N
+@@ -230,0 +312,383 @@ def _copy_input_files(task_config: dict, task_dir: str, workspace_dir: str) -> N
 +def _validate_phycode_contract(
 +    task_config: dict,
 +    contract_file: str | None,
@@ -526,15 +526,114 @@ index c705de8..2524cb7 100644
 +    return bool(getattr(file_status, "st_file_attributes", 0) & marker)
 +
 +
-+def _same_file_identity(first: os.stat_result, second: os.stat_result) -> bool:
-+    return (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino)
++def _phycode_workspace_identity(workspace_dir: str) -> tuple[str, int, int]:
++    workspace = os.lstat(workspace_dir)
++    if (
++        not stat.S_ISDIR(workspace.st_mode)
++        or stat.S_ISLNK(workspace.st_mode)
++        or _is_reparse_point(workspace)
++    ):
++        raise RuntimeError("PhyCode control workspace is not a trusted directory")
++    return (
++        os.path.normcase(os.path.realpath(workspace_dir)),
++        workspace.st_dev,
++        workspace.st_ino,
++    )
++
++
++def _verify_phycode_control(
++    workspace_dir: str,
++    control_name: str,
++    workspace_identity: tuple[str, int, int],
++    target_identity: tuple[int, int] | None,
++    directory_descriptor: int | None = None,
++) -> None:
++    if _phycode_workspace_identity(workspace_dir) != workspace_identity:
++        raise RuntimeError("PhyCode control workspace changed")
++    target_path = os.path.join(workspace_dir, control_name)
++    if not _path_is_within(workspace_identity[0], target_path):
++        raise RuntimeError("PhyCode control destination escapes the workspace")
++    if target_identity is None:
++        if os.path.lexists(target_path):
++            raise RuntimeError("PhyCode control destination already exists")
++        return
++    if directory_descriptor is not None:
++        anchored = os.stat(
++            control_name,
++            dir_fd=directory_descriptor,
++            follow_symlinks=False,
++        )
++        if (
++            not stat.S_ISREG(anchored.st_mode)
++            or (anchored.st_dev, anchored.st_ino) != target_identity
++        ):
++            raise RuntimeError("PhyCode control target changed")
++    current = os.lstat(target_path)
++    if (
++        not stat.S_ISREG(current.st_mode)
++        or _is_reparse_point(current)
++        or (current.st_dev, current.st_ino) != target_identity
++        or not _path_is_within(workspace_identity[0], target_path)
++    ):
++        raise RuntimeError("PhyCode control target changed")
++
++
++def _rollback_phycode_control(
++    workspace_dir: str,
++    control_name: str,
++    publication: tuple[str, int, int, int, int],
++) -> bool:
++    """Delete only the still-canonical file created by this publication."""
++    workspace_identity = publication[:3]
++    target_identity = publication[3:]
++    directory_descriptor: int | None = None
++    supports_dir_fd = os.open in getattr(os, "supports_dir_fd", ())
++    try:
++        if supports_dir_fd:
++            directory_descriptor = os.open(
++                workspace_dir,
++                os.O_RDONLY
++                | getattr(os, "O_DIRECTORY", 0)
++                | getattr(os, "O_CLOEXEC", 0),
++            )
++            opened_workspace = os.fstat(directory_descriptor)
++            if (opened_workspace.st_dev, opened_workspace.st_ino) != workspace_identity[1:]:
++                return False
++        _verify_phycode_control(
++            workspace_dir,
++            control_name,
++            workspace_identity,
++            target_identity,
++            directory_descriptor,
++        )
++        if directory_descriptor is not None:
++            os.unlink(control_name, dir_fd=directory_descriptor)
++        else:
++            os.unlink(os.path.join(workspace_dir, control_name))
++        return True
++    except (OSError, RuntimeError):
++        return False
++    finally:
++        if directory_descriptor is not None:
++            os.close(directory_descriptor)
++
++
++def _preflight_phycode_controls(
++    workspace_dir: str,
++    control_names: tuple[str, ...],
++) -> None:
++    workspace_identity = _phycode_workspace_identity(workspace_dir)
++    for control_name in control_names:
++        _verify_phycode_control(
++            workspace_dir, control_name, workspace_identity, None
++        )
 +
 +
 +def _write_phycode_control(
 +    workspace_dir: str,
 +    control_name: str,
 +    payload: bytes,
-+) -> None:
++) -> tuple[str, int, int, int, int]:
 +    """Exclusively publish bytes; path-only platforms fail on observed swaps."""
 +    if (
 +        not isinstance(payload, bytes)
@@ -542,23 +641,16 @@ index c705de8..2524cb7 100644
 +        or os.path.basename(control_name) != control_name
 +    ):
 +        raise RuntimeError("Invalid PhyCode control payload")
-+    workspace_before = os.lstat(workspace_dir)
-+    if (
-+        not stat.S_ISDIR(workspace_before.st_mode)
-+        or stat.S_ISLNK(workspace_before.st_mode)
-+        or _is_reparse_point(workspace_before)
-+    ):
-+        raise RuntimeError("PhyCode control workspace is not a trusted directory")
-+    workspace_real = os.path.realpath(workspace_dir)
++    workspace_identity = _phycode_workspace_identity(workspace_dir)
 +    target_path = os.path.join(workspace_dir, control_name)
-+    if not _path_is_within(workspace_real, target_path):
-+        raise RuntimeError("PhyCode control destination escapes the workspace")
-+    if os.path.lexists(target_path):
-+        raise RuntimeError("PhyCode control destination already exists")
++    _verify_phycode_control(
++        workspace_dir, control_name, workspace_identity, None
++    )
 +
 +    directory_descriptor: int | None = None
 +    descriptor: int | None = None
 +    created_identity: tuple[int, int] | None = None
++    publication: tuple[str, int, int, int, int] | None = None
 +    published = False
 +    supports_dir_fd = os.open in getattr(os, "supports_dir_fd", ())
 +    create_flags = (
@@ -580,7 +672,8 @@ index c705de8..2524cb7 100644
 +            opened_workspace = os.fstat(directory_descriptor)
 +            if (
 +                not stat.S_ISDIR(opened_workspace.st_mode)
-+                or not _same_file_identity(workspace_before, opened_workspace)
++                or (opened_workspace.st_dev, opened_workspace.st_ino)
++                != workspace_identity[1:]
 +            ):
 +                raise RuntimeError("PhyCode control workspace changed before create")
 +            descriptor = os.open(
@@ -594,38 +687,16 @@ index c705de8..2524cb7 100644
 +
 +        opened_target = os.fstat(descriptor)
 +        created_identity = (opened_target.st_dev, opened_target.st_ino)
++        publication = (*workspace_identity, *created_identity)
 +        if not stat.S_ISREG(opened_target.st_mode):
 +            raise RuntimeError("PhyCode control target is not a regular file")
-+        workspace_after = os.lstat(workspace_dir)
-+        if (
-+            not stat.S_ISDIR(workspace_after.st_mode)
-+            or stat.S_ISLNK(workspace_after.st_mode)
-+            or _is_reparse_point(workspace_after)
-+            or not _same_file_identity(workspace_before, workspace_after)
-+        ):
-+            raise RuntimeError("PhyCode control workspace changed during create")
-+        if directory_descriptor is not None and not _same_file_identity(
-+            workspace_before, os.fstat(directory_descriptor)
-+        ):
-+            raise RuntimeError("PhyCode control workspace changed during create")
-+        if directory_descriptor is not None:
-+            anchored_target = os.stat(
-+                control_name,
-+                dir_fd=directory_descriptor,
-+                follow_symlinks=False,
-+            )
-+            if not _same_file_identity(opened_target, anchored_target):
-+                raise RuntimeError("PhyCode control target changed during create")
-+        final_target = os.lstat(target_path)
-+        if (
-+            not stat.S_ISREG(final_target.st_mode)
-+            or _is_reparse_point(final_target)
-+            or not _same_file_identity(opened_target, final_target)
-+            or os.path.normcase(os.path.realpath(workspace_dir))
-+            != os.path.normcase(workspace_real)
-+            or not _path_is_within(workspace_real, target_path)
-+        ):
-+            raise RuntimeError("PhyCode control target changed during create")
++        _verify_phycode_control(
++            workspace_dir,
++            control_name,
++            workspace_identity,
++            created_identity,
++            directory_descriptor,
++        )
 +
 +        remaining = memoryview(payload)
 +        while remaining:
@@ -633,35 +704,22 @@ index c705de8..2524cb7 100644
 +            if written <= 0:
 +                raise OSError("Failed to write PhyCode control payload")
 +            remaining = remaining[written:]
++        if (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino) != created_identity:
++            raise RuntimeError("PhyCode control descriptor changed after write")
++        _verify_phycode_control(
++            workspace_dir,
++            control_name,
++            workspace_identity,
++            created_identity,
++            directory_descriptor,
++        )
 +        published = True
++        return (*workspace_identity, *created_identity)
 +    finally:
 +        if descriptor is not None:
 +            os.close(descriptor)
-+        if not published and created_identity is not None:
-+            try:
-+                if directory_descriptor is not None:
-+                    current = os.stat(
-+                        control_name,
-+                        dir_fd=directory_descriptor,
-+                        follow_symlinks=False,
-+                    )
-+                    if (
-+                        stat.S_ISREG(current.st_mode)
-+                        and (current.st_dev, current.st_ino) == created_identity
-+                        and current.st_size == 0
-+                    ):
-+                        os.unlink(control_name, dir_fd=directory_descriptor)
-+                else:
-+                    current = os.lstat(target_path)
-+                    if (
-+                        stat.S_ISREG(current.st_mode)
-+                        and not _is_reparse_point(current)
-+                        and (current.st_dev, current.st_ino) == created_identity
-+                        and current.st_size == 0
-+                    ):
-+                        os.unlink(target_path)
-+            except OSError:
-+                pass
++        if not published and publication is not None:
++            _rollback_phycode_control(workspace_dir, control_name, publication)
 +        if directory_descriptor is not None:
 +            os.close(directory_descriptor)
 +
@@ -678,6 +736,8 @@ index c705de8..2524cb7 100644
 +        raise RuntimeError("Verified PhyCode contract snapshot is required")
 +    if not isinstance(approvals_snapshot, bytes):
 +        raise RuntimeError("Verified PhyCode approval snapshot is required")
++    control_names = ("task_contract.json", "phycode-approvals.json")
++    _preflight_phycode_controls(workspace_dir, control_names)
 +    instruction_file = task_config.get("instruction_file", "")
 +    paper_file = task_config.get("paper", {}).get("paper_file", "")
 +    if not instruction_file or not paper_file:
@@ -699,20 +759,26 @@ index c705de8..2524cb7 100644
 +                "Declared public paper/input file was not copied to the workspace"
 +            )
 +
-+    contract_dst = os.path.join(workspace_dir, "task_contract.json")
-+    approvals_dst = os.path.join(workspace_dir, "phycode-approvals.json")
-+    _write_phycode_control(workspace_dir, os.path.basename(contract_dst), contract_snapshot)
-+    _write_phycode_control(workspace_dir, os.path.basename(approvals_dst), approvals_snapshot)
++    contract_publication = _write_phycode_control(
++        workspace_dir, control_names[0], contract_snapshot
++    )
++    try:
++        _write_phycode_control(workspace_dir, control_names[1], approvals_snapshot)
++    except BaseException:
++        _rollback_phycode_control(
++            workspace_dir, control_names[0], contract_publication
++        )
++        raise
 +
 +
-@@ -234,0 +633,3 @@ def _export_traces_for_type(
+@@ -234,0 +699,3 @@ def _export_traces_for_type(
 +    if agent_type == "phycode":
 +        # Already persisted inside workspace/.phycode/prbench.
 +        return
-@@ -251,0 +653,2 @@ def setup_docker_environment(
+@@ -251,0 +719,2 @@ def setup_docker_environment(
 +    phycode_contract_snapshot: bytes | None = None,
 +    phycode_approvals_snapshot: bytes | None = None,
-@@ -257,0 +661,8 @@ def setup_docker_environment(
+@@ -257,0 +727,8 @@ def setup_docker_environment(
 +    if white_agent_type == "phycode":
 +        _copy_phycode_controls(
 +            task_config,
@@ -721,22 +787,22 @@ index c705de8..2524cb7 100644
 +            phycode_contract_snapshot,
 +            phycode_approvals_snapshot,
 +        )
-@@ -261 +672,3 @@ def setup_docker_environment(
+@@ -261 +738,3 @@ def setup_docker_environment(
 -    # Collect credentials for all needed agent types via centralized resolver
 +    # A PhyCode white run must not expose green credentials to the shared
 +    # container. The green child receives them only when grading begins.
 +    defer_green_env = white_agent_type == "phycode"
-@@ -264 +677,2 @@ def setup_docker_environment(
+@@ -264 +743,2 @@ def setup_docker_environment(
 -        env_vars.update(resolve_env(t))
 +        if t != "phycode" and not (defer_green_env and t == green_agent_type):
 +            env_vars.update(resolve_env(t))
-@@ -273,0 +688,5 @@ def setup_docker_environment(
+@@ -273,0 +754,5 @@ def setup_docker_environment(
 +        phycode_wheel=(
 +            os.path.join(PROJECT_ROOT, ".phycode-adapter", "phycode.whl")
 +            if "phycode" in needed_types
 +            else None
 +        ),
-@@ -276,35 +695,53 @@ def setup_docker_environment(
+@@ -276,35 +761,53 @@ def setup_docker_environment(
 -    logger.info("Creating Docker environment...")
 -    docker_env.start()
 -
@@ -825,16 +891,16 @@ index c705de8..2524cb7 100644
 +        except BaseException:
 +            logger.warning("Docker cleanup failed after setup error")
 +        raise
-@@ -322,0 +760,5 @@ async def launch_evaluation(
+@@ -322,0 +826,5 @@ async def launch_evaluation(
 +    phycode_contract: str | None = None,
 +    phycode_approvals: str | None = None,
 +    approval_wait_seconds: int = 0,
 +    phycode_max_tool_calls: int = 40,
 +    phycode_max_context_chars: int = 12_000,
-@@ -325 +767 @@ async def launch_evaluation(
+@@ -325 +833 @@ async def launch_evaluation(
 -):
 +) -> bool:
-@@ -337,0 +780,13 @@ async def launch_evaluation(
+@@ -337,0 +846,13 @@ async def launch_evaluation(
 +    if not 0 <= approval_wait_seconds <= 900:
 +        raise ValueError("approval wait seconds must be between 0 and 900")
 +    if not 1 <= phycode_max_tool_calls <= 100:
@@ -848,16 +914,16 @@ index c705de8..2524cb7 100644
 +    phycode_provider_env: dict[str, str] = {}
 +    phycode_contract_snapshot: bytes | None = None
 +    phycode_approvals_snapshot: bytes | None = b'{\n  "grants": []\n}\n'
-@@ -357 +812 @@ async def launch_evaluation(
+@@ -357 +878 @@ async def launch_evaluation(
 -        return
 +        return False
-@@ -362 +817 @@ async def launch_evaluation(
+@@ -362 +883 @@ async def launch_evaluation(
 -        return
 +        return False
-@@ -364 +819 @@ async def launch_evaluation(
+@@ -364 +885 @@ async def launch_evaluation(
 -    with open(task_yaml, "r") as f:
 +    with open(task_yaml, "r", encoding="utf-8") as f:
-@@ -365,0 +821,11 @@ async def launch_evaluation(
+@@ -365,0 +887,11 @@ async def launch_evaluation(
 +    if effective_white_type == "phycode":
 +        try:
 +            phycode_contract_snapshot = _validate_phycode_contract(
@@ -869,7 +935,7 @@ index c705de8..2524cb7 100644
 +        except RuntimeError as error:
 +            raise ValueError(str(error)) from None
 +        phycode_provider_env = resolve_env("phycode")
-@@ -374,0 +841,10 @@ async def launch_evaluation(
+@@ -374,0 +907,10 @@ async def launch_evaluation(
 +    report_path = os.path.join(workspace_dir, "eval_logs", "eval_report.json")
 +    run_result_path = os.path.join(
 +        workspace_dir, ".phycode", "prbench", "run_result.json"
@@ -880,29 +946,29 @@ index c705de8..2524cb7 100644
 +    if effective_white_type == "phycode":
 +        _remove_stale_output(workspace_dir, run_result_path)
 +
-@@ -397,0 +874 @@ async def launch_evaluation(
+@@ -397,0 +940 @@ async def launch_evaluation(
 +    evaluation_succeeded = False
-@@ -410 +887,3 @@ async def launch_evaluation(
+@@ -410 +953,3 @@ async def launch_evaluation(
 -                                              green_agent_type=effective_green_type)
 +                                              green_agent_type=effective_green_type,
 +                                              phycode_contract_snapshot=phycode_contract_snapshot,
 +                                              phycode_approvals_snapshot=phycode_approvals_snapshot)
-@@ -420 +899,2 @@ async def launch_evaluation(
+@@ -420 +965,2 @@ async def launch_evaluation(
 -            args=("prbench_green_agent", green_host, green_port, container_id, effective_green_type),
 +            args=("prbench_green_agent", green_host, green_port, container_id,
 +                  effective_green_type, effective_white_type == "phycode"),
-@@ -423 +903 @@ async def launch_evaluation(
+@@ -423 +969 @@ async def launch_evaluation(
 -        p_green.start()
 +        _start_without_phycode_environment(p_green)
-@@ -427 +907 @@ async def launch_evaluation(
+@@ -427 +973 @@ async def launch_evaluation(
 -            return
 +            return False
-@@ -436 +916,3 @@ async def launch_evaluation(
+@@ -436 +982,3 @@ async def launch_evaluation(
 -                  workspace_dir, container_id, effective_white_type),
 +                  workspace_dir, container_id, effective_white_type,
 +                  phycode_provider_env, approval_wait_seconds,
 +                  phycode_max_tool_calls, phycode_max_context_chars),
-@@ -439 +921,7 @@ async def launch_evaluation(
+@@ -439 +987,7 @@ async def launch_evaluation(
 -        p_white.start()
 +        if effective_white_type == "phycode":
 +            run_with_phycode_cleanup(
@@ -911,21 +977,21 @@ index c705de8..2524cb7 100644
 +            )
 +        else:
 +            _start_without_phycode_environment(p_white)
-@@ -443 +931 @@ async def launch_evaluation(
+@@ -443 +997 @@ async def launch_evaluation(
 -            return
 +            return False
-@@ -466,0 +955 @@ async def launch_evaluation(
+@@ -466,0 +1021 @@ async def launch_evaluation(
 +        send_succeeded = False
-@@ -469,0 +959 @@ async def launch_evaluation(
+@@ -469,0 +1025 @@ async def launch_evaluation(
 +            send_succeeded = True
-@@ -478,4 +968,2 @@ async def launch_evaluation(
+@@ -478,4 +1034,2 @@ async def launch_evaluation(
 -        report_path = os.path.join(workspace_dir, "eval_logs", "eval_report.json")
 -        if os.path.exists(report_path):
 -            with open(report_path, "r") as f:
 -                report = json.load(f)
 +        report_valid, report = _load_verified_json(workspace_dir, report_path)
 +        if report_valid:
-@@ -488,0 +977,17 @@ async def launch_evaluation(
+@@ -488,0 +1043,17 @@ async def launch_evaluation(
 +        phycode_succeeded = True
 +        if effective_white_type == "phycode":
 +            run_result_valid, run_result = _load_verified_json(
@@ -943,15 +1009,15 @@ index c705de8..2524cb7 100644
 +            send_succeeded and report_valid and phycode_succeeded
 +        )
 +
-@@ -505 +1010 @@ async def launch_evaluation(
+@@ -505 +1076 @@ async def launch_evaluation(
 -                with open(os.path.join(eval_logs_dir, "docker_container.log"), "w") as f:
 +                with open(os.path.join(eval_logs_dir, "docker_container.log"), "w", encoding="utf-8") as f:
-@@ -534,0 +1040 @@ async def launch_evaluation(
+@@ -534,0 +1106 @@ async def launch_evaluation(
 +    return evaluation_succeeded
-@@ -558 +1064 @@ async def batch_evaluate(
+@@ -558 +1130 @@ async def batch_evaluate(
 -                await launch_evaluation(
 +                succeeded = await launch_evaluation(
-@@ -569 +1075,4 @@ async def batch_evaluate(
+@@ -569 +1141,4 @@ async def batch_evaluate(
 -                print(f"[BATCH] Completed: {task_id}", flush=True)
 +                if succeeded:
 +                    print(f"[BATCH] Completed: {task_id}", flush=True)
