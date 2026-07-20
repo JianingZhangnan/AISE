@@ -982,9 +982,11 @@ def test_public_full_rejects_missing_provider_before_uv(
         timeout=30,
         env=environment,
     )
-    assert completed.returncode != 0
-    assert "must be configured in the current process" in (
-        completed.stdout + completed.stderr
+    assert completed.returncode == 2
+    assert completed.stdout == ""
+    assert completed.stderr.strip() == (
+        "PHYCODE_API_KEY, PHYCODE_BASE_URL, and PHYCODE_MODEL must be configured "
+        "in the current process."
     )
 
 

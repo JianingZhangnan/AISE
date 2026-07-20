@@ -6,10 +6,12 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$providerConfigurationError = 'PHYCODE_API_KEY, PHYCODE_BASE_URL, and PHYCODE_MODEL must be configured in the current process.'
 if ([string]::IsNullOrWhiteSpace($env:PHYCODE_API_KEY) -or
     [string]::IsNullOrWhiteSpace($env:PHYCODE_BASE_URL) -or
     [string]::IsNullOrWhiteSpace($env:PHYCODE_MODEL)) {
-    throw 'PHYCODE_API_KEY, PHYCODE_BASE_URL, and PHYCODE_MODEL must be configured in the current process.'
+    [Console]::Error.WriteLine($providerConfigurationError)
+    exit 2
 }
 Write-Host 'PhyCode provider environment configured (values are not displayed).'
 
