@@ -2601,9 +2601,22 @@ Task 32 → Task 33 → Task 34 → Task 35 → Task 34B/34C/34D/34E → 主 age
   脱敏摘要；初次三次尝试记录的 commit 为 `b303d52cf1e7cf2811d42c0aab917f056bc92922`。
   用户把上限扩展到五次后，本次继续在 Task 36A 范围内补齐最终五次未成功验收、review
   与泄漏扫描，只修改过程文档及其合同测试。
-- [ ] Task 36B：whole-branch review 与最终复验（pending）。Task 36 whole-branch review
-  与最终复验仍为 pending；在独立 review 清零 Critical / Important 并完成修复后复验前，
-  不得把 Task 36 整体标为完成。
+- [x] Task 36B：whole-branch review 与最终复验。Task 36 whole-branch review 与最终复验已完成；
+  commit：本次文档提交。最终审查范围为
+  `588aa08ab56f929b4ac61895227574306a16ee13..50f1089f47eda141b8715bf937ecd318c49d2a48`，
+  共 35 commits / 30 files，结论为 Critical / Important / Minor = 0 / 0 / 3，Ready。
+  Task 36 整体按过程门禁完成，但五次正式尝试仍未跑通，绝不改写为成功。
+  三项非阻塞 Minor 为：每个 CSV 的 capture 上限均为 8 MiB，但没有全局 capture 总预算；
+  没有真实 Windows junction/reparse 集成覆盖，现有覆盖为 synthetic；没有任意未知
+  output-group 名的专门变异测试，但实现对动态 values 的处理正确。
+  最终复验在清除 evaluator/provider 环境变量后完成：离线 pytest exit 0、766 collected；
+  Pyright 0 errors / 0 warnings / 0 informations；fresh、固定到 evaluator commit
+  `3e5bee4545cad2138832f06302e9c98bd81f5216` 的 clean adapter 为
+  128 collected / 126 passed / 2 skipped；`uv build` 成功；`pwsh` 与 Windows PowerShell AST
+  均通过；`git diff --check` 通过；worktree clean。HEAD 的 109 个 tracked regular blobs 中
+  credential filenames 0、高置信 secret 0，35 commits 历史相同项 0；branch diff 运行产物
+  路径 0；7 个 evaluator/provider 环境变量均 absent；`dist`、`.pytest_cache`、`.venv` 与
+  授权 source 均 ignored。
 
 ### task_white_1993 完整公开任务真实验收
 
@@ -2631,4 +2644,5 @@ Task 32 → Task 33 → Task 34 → Task 35 → Task 34B/34C/34D/34E → 主 age
   文件中，两组 exact key 匹配 0、读取错误 0，其中日志/trace/report/wheel 筛选出的 81 个
   文件同样为两组 exact key 匹配 0、读取错误 0。7 个 provider/PRBench 相关环境变量均
   absent，容器数 0。相关本地产物继续保持 ignored；评测产物未提交。
-- Task 36 脱敏结果记录已完成；Task 36 whole-branch review 与最终复验仍为 pending。
+- Task 36 脱敏结果记录已完成；Task 36 whole-branch review 与最终复验已完成。过程门禁完成
+  不改变真实验收结论：五次正式尝试仍未跑通。

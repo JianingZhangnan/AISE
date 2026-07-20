@@ -306,7 +306,7 @@ def test_process_docs_record_full_public_result_without_artifacts() -> None:
         "runner `completed` 与有效 green report",
         "完整公开任务未跑通",
         "Task 36 脱敏结果记录已完成",
-        "Task 36 whole-branch review 与最终复验仍为 pending",
+        "Task 36 whole-branch review 与最终复验已完成",
     )
     for name, region in final_result_regions.items():
         missing = [fact for fact in shared_final_facts if fact not in region]
@@ -393,23 +393,6 @@ def _process_doc_state_problems(documents: dict[str, str]) -> list[str]:
             "## 2026-07-19 Task 36：",
         ),
     }
-    task36_regions = {
-        "PLAN.md Task 36": _normalized_region(
-            documents["PLAN.md"],
-            "- [x] Task 36A：",
-            "### task_white_1993 完整公开任务真实验收",
-        ),
-        "SPEC_PROCESS.md 第五轮": _normalized_region(
-            documents["SPEC_PROCESS.md"],
-            "### 第五轮：",
-            "## 仓库平台记录",
-        ),
-        "AGENT_LOG.md Task 36": _normalized_region(
-            documents["AGENT_LOG.md"],
-            "## 2026-07-19 Task 36：",
-            None,
-        ),
-    }
     problems: list[str] = []
     base = "7547db2a9ed8db98cb6b86d6ea95c186e30192d7"
     head = "0c0b5b0f6e322e1c6a8e0f57d23716f24a1ec23f"
@@ -436,26 +419,58 @@ def _process_doc_state_problems(documents: dict[str, str]) -> list[str]:
             if stale in current_status:
                 problems.append(f"{name} retains stale status {stale!r}")
 
-    plan_task36 = task36_regions["PLAN.md Task 36"]
-    if "- [x] Task 36A：脱敏结果记录" not in plan_task36:
-        problems.append("PLAN.md Task 36 does not complete only Task 36A")
-    if (
-        "- [ ] Task 36B：whole-branch review 与最终复验（pending）"
-        not in plan_task36
-    ):
-        problems.append("PLAN.md Task 36 does not keep Task 36B pending")
-    for name, region in task36_regions.items():
-        for phrase in (
-            "Task 36 脱敏结果记录已完成",
-            "Task 36 whole-branch review 与最终复验仍为 pending",
-        ):
+    task36b_markers = {
+        "PLAN.md Task 36B": "- [x] Task 36B：",
+        "SPEC_PROCESS.md 第六轮": "### 第六轮：Task 36B",
+        "AGENT_LOG.md Task 36B": "Task 36B whole-branch review 与最终复验完成",
+    }
+    task36b_regions: dict[str, str] = {}
+    for name, marker in task36b_markers.items():
+        document_name = name.split(" ", 1)[0]
+        document = documents[document_name]
+        if marker not in document:
+            problems.append(f"{name} missing completion marker {marker!r}")
+            continue
+        task36b_regions[name] = _normalized_region(document, marker, None)
+
+    shared_review_facts = (
+        "588aa08ab56f929b4ac61895227574306a16ee13..50f1089f47eda141b8715bf937ecd318c49d2a48",
+        "35 commits / 30 files",
+        "Critical / Important / Minor = 0 / 0 / 3，Ready",
+        "Task 36 whole-branch review 与最终复验已完成",
+        "五次正式尝试仍未跑通",
+    )
+    for name, region in task36b_regions.items():
+        for phrase in shared_review_facts:
             if phrase not in region:
                 problems.append(f"{name} missing {phrase!r}")
+
+    complete_review_record = " ".join(task36b_regions.values())
+    for phrase in (
+        "每个 CSV 的 capture 上限均为 8 MiB，但没有全局 capture 总预算",
+        "没有真实 Windows junction/reparse 集成覆盖",
+        "没有任意未知 output-group 名的专门变异测试",
+        "766 collected",
+        "Pyright 0 errors / 0 warnings / 0 informations",
+        "128 collected / 126 passed / 2 skipped",
+        "`uv build` 成功",
+        "`pwsh` 与 Windows PowerShell AST 均通过",
+        "`git diff --check` 通过",
+        "credential filenames 0",
+        "高置信 secret 0",
+        "35 commits 历史相同项 0",
+        "branch diff 运行产物路径 0",
+        "7 个 evaluator/provider 环境变量均 absent",
+        "`dist`、`.pytest_cache`、`.venv` 与授权 source 均 ignored",
+        "worktree clean",
+    ):
+        if phrase not in complete_review_record:
+            problems.append(f"Task 36B review record missing {phrase!r}")
 
     return problems
 
 
-def test_process_docs_keep_branch_review_pending_and_close_task35_review() -> None:
+def test_process_docs_close_task36b_review_and_task35_review() -> None:
     documents = {
         name: _read(name)
         for name in ("PLAN.md", "SPEC_PROCESS.md", "AGENT_LOG.md")

@@ -404,9 +404,33 @@ gitlink），两组 exact key 匹配 0、读取错误 0；本地 `.superpowers/s
 容器数 0。所有本地测试产物继续保持 ignored；评测产物未提交。
 
 Task 36 使用文档合同先取得预期 RED，再写入上述脱敏摘要；不读取 evaluator workspace、
-报告正文、凭据、provider source 或 ground truth。Task 36 脱敏结果记录已完成；Task 36
-whole-branch review 与最终复验仍为 pending，必须等待独立 review 与最终复验，不能提前
-记录 Task 36 整体完成。
+报告正文、凭据、provider source 或 ground truth。Task 36 脱敏结果记录已完成。
+
+### 第六轮：Task 36B whole-branch review 与最终复验
+
+Task 36B 继续以文档 TDD 收尾：先把 `tests/test_docs_process.py` 从 pending 合同改为最终
+完成合同，并确认当前文档取得预期 RED；随后才写入本节、`PLAN.md`、`AGENT_LOG.md` 与
+README 的最小状态更新。最终 whole-branch review 范围为
+`588aa08ab56f929b4ac61895227574306a16ee13..50f1089f47eda141b8715bf937ecd318c49d2a48`，
+共 35 commits / 30 files，结论为 Critical / Important / Minor = 0 / 0 / 3，Ready。
+
+三项 Minor 均为非阻塞加固项：每个 CSV 的 capture 上限均为 8 MiB，但没有全局 capture
+总预算；没有真实 Windows junction/reparse 集成覆盖，现有覆盖为 synthetic；没有任意
+未知 output-group 名的专门变异测试，但实现对动态 values 的处理正确。它们如实保留，
+没有改写成零 finding。
+
+最终复验先清除 evaluator/provider 环境变量，再执行离线 pytest，结果 exit 0、
+766 collected；Pyright 0 errors / 0 warnings / 0 informations。fresh、固定到 evaluator commit
+`3e5bee4545cad2138832f06302e9c98bd81f5216` 的 clean adapter 为
+128 collected / 126 passed / 2 skipped；`uv build` 成功；`pwsh` 与 Windows PowerShell AST
+均通过；`git diff --check` 通过；worktree clean。安全与仓库复核覆盖 HEAD 的 109 个
+tracked regular blobs：credential filenames 0、高置信 secret 0，35 commits 历史相同项 0；
+branch diff 运行产物路径 0；7 个 evaluator/provider 环境变量均 absent；`dist`、
+`.pytest_cache`、`.venv` 与授权 source 均 ignored。
+
+Task 36 whole-branch review 与最终复验已完成，因此 Task 36 整体可以按过程门禁标记完成；
+但 runner `completed` 与有效 green report 的成功合同没有变化，五次正式尝试仍未跑通，
+绝不将完整公开任务记录为成功。
 
 ## 仓库平台记录
 

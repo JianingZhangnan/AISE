@@ -253,8 +253,8 @@ CSV capture 总预算，以及缺少真实 Windows junction 集成覆盖。
 81 个文件同样为两组 exact key 匹配 0、读取错误 0。7 个 provider/PRBench 相关环境变量均
 absent，容器数 0；上述评测产物未提交。
 
-Task 36 脱敏结果记录已完成；Task 36 whole-branch review 与最终复验仍为 pending，不能
-提前把 Task 36 整体标为完成。
+Task 36 脱敏结果记录已完成；Task 36 whole-branch review 与最终复验已完成，最终结论为
+Ready。Task 36 的过程门禁已经完成，但五次正式尝试仍未跑通，不能改写为成功。
 
 evaluator clone、workspace、trace JSONL、execution journal、run result、grader 报告、
 模型生成脚本/CSV 及本地扫描清单都是本机忽略产物：**评测产物不提交**，也不得执行

@@ -677,5 +677,25 @@
 - 2026-07-20 最终补记 GREEN：聚焦文档合同 2 passed / 29 deselected，完整文档测试 31
   passed；最终文件状态下全仓 656 passed / 110 skipped，Pyright 0 errors / 0 warnings，
   `git diff --check` 通过。提交范围只有四份过程文档与 `tests/test_docs_process.py`。
-- Task 36 脱敏结果记录已完成；Task 36 whole-branch review 与最终复验仍为 pending。
-  独立 review 与最终复验完成前，不提前声称 Task 36 整体完成。
+- Task 36 脱敏结果记录已完成。
+- Task 36B whole-branch review 与最终复验完成。文档 subagent 继续使用
+  `test-driven-development`，只消费主 agent 提供的脱敏事实；先把
+  `tests/test_docs_process.py` 切换为完成合同，聚焦运行得到预期 2 failed，再更新四份文档。
+  whole-branch review 范围为
+  `588aa08ab56f929b4ac61895227574306a16ee13..50f1089f47eda141b8715bf937ecd318c49d2a48`，
+  共 35 commits / 30 files，结论为 Critical / Important / Minor = 0 / 0 / 3，Ready。
+- 三项 Minor 如实保留：每个 CSV 的 capture 上限均为 8 MiB，但没有全局 capture 总预算；
+  没有真实 Windows junction/reparse 集成覆盖，现有覆盖为 synthetic；没有任意未知
+  output-group 名的专门变异测试，但实现对动态 values 的处理正确。
+- 最终复验在清除 evaluator/provider 环境变量后运行：离线 pytest exit 0、766 collected；
+  Pyright 0 errors / 0 warnings / 0 informations；fresh、固定到 evaluator commit
+  `3e5bee4545cad2138832f06302e9c98bd81f5216` 的 clean adapter 为
+  128 collected / 126 passed / 2 skipped；`uv build` 成功；`pwsh` 与 Windows PowerShell AST
+  均通过；`git diff --check` 通过；worktree clean。
+- 最终仓库与安全复核：HEAD 的 109 个 tracked regular blobs 中 credential filenames 0、
+  高置信 secret 0，35 commits 历史相同项 0；branch diff 运行产物路径 0；7 个
+  evaluator/provider 环境变量均 absent；`dist`、`.pytest_cache`、`.venv` 与授权 source
+  均 ignored。
+- Task 36 whole-branch review 与最终复验已完成，Task 36 整体可以按过程门禁完成；但
+  五次正式尝试仍未跑通，runner `completed` 与有效 green report 的成功合同未满足，绝不改写
+  为成功。本次文档提交不 push。
