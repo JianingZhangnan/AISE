@@ -628,9 +628,44 @@
   warnings。`git diff --check`、tracked 凭据文件名/高置信凭据模式、新增
   evaluator/runtime artifact 扫描均通过；feature worktree 只有五个预期文件，主
   checkout 仍是 tracked worktree 与 index clean、未跟踪 `AGENTS.md`。修复提交信息为
-  `docs(prbench): harden full-run approval guide`，最终 hash 将在提交后写入 ignored
-  Task 35 报告；修复后复审尚未发生，不预先声称 review clean。
+  `docs(prbench): harden full-run approval guide`，commit 为
+  `0c0b5b0f6e322e1c6a8e0f57d23716f24a1ec23f`；修复后复审尚未发生，不预先声称 review
+  clean。
 - 正式运行只属于主 agent：最多三次、首次白色响应前的基础设施失败不计数，每个动态
   request 必须人工核验 exact argv/cwd/hash 后原样原子批准；只有 runner `completed` 与
   有效 grader report 同时成立才算成功。所有评测产物不提交，功能分支不经授权不进入
   `main`，保持主分支干净。
+
+## 2026-07-19 Task 36：task_white_1993 完整公开任务真实验收
+
+- 新鲜 Task 36 subagent 使用 `executing-plans` 与 `test-driven-development`，严格只消费
+  主 agent 的脱敏摘要；没有打开或遍历 evaluator workspace、运行报告、凭据、provider
+  source、隐藏资料或 ground truth。先在 `tests/test_docs_process.py` 增加过程文档合同，
+  `uv run pytest tests/test_docs_process.py -k full_public_result -v` 得到预期 1 failed / 27
+  deselected，失败仅因三份文档尚无本轮记录；随后最小补齐 `PLAN.md`、
+  `SPEC_PROCESS.md` 与本日志。
+- 固定 evaluator commit 为 `3e5bee4545cad2138832f06302e9c98bd81f5216`，模型为
+  `deepseek-v4-pro`；正式尝试次数为 3，上限已用尽。三次 official green grader 输出
+  均为有效 grading JSON 且没有结构化 `error`。
+- 尝试 1：runner `tool_budget_exhausted`，50 次工具调用，约 279 秒，单个公开任务
+  `overall_score` 0.0。
+- 尝试 2：runner `provider_error`，13 次工具调用，white 阶段约 211 秒，grader
+  生命周期约 259.34 秒，单个公开任务 `overall_score` 0.0；不记录原始错误。
+- 尝试 3：runner `approval_required`，42 次工具调用，white 阶段约 3454 秒，grader
+  生命周期约 3539.93 秒，单个公开任务 `overall_score` 0.17；20 项声明产物存在 13 项，
+  7 项 CSV 存在 0 项。人工安全审查没有授予任何 `process.run` grant，资源风险脚本未
+  执行。
+- 最终终态：`approval_required`。三次均未同时获得 runner `completed` 与有效 green
+  report，成功标准未达到，不记录为跑通或成功；0.17 不能写成 holdout 或课程总体成绩。
+- 正式运行前后的修订提交包括 Task 34B / 34C UTF-8 修复 `31704dd`、`8625192`，Task 34D
+  分页/发现配额修复 `ee11a09`、`4da448b`（review 0 / 0 / 0），以及 Task 34E PRBench
+  600 秒有界 deadline `23b6747`（review 0 / 0 / 0）；普通 adapter 的 120 秒保持不变。
+- 凭据泄漏扫描计数为 108 个 tracked 普通文件、1077 个本地日志/trace/report/wheel
+  文件、0 个读取错误；两组 key 在 tracked 与本地产物中的精确匹配均为 0。全部
+  evaluator clone/workspace、trace、journal、report、模型产物、wheel 和扫描清单保持
+  ignored；评测产物未提交，只提交核心代码和清理后的过程文档/测试。
+- Task 36 前最终核心门禁为 full pytest 100% exit 0、Pyright 0 errors / 0 warnings、
+  wheel build 成功、diff/status clean。主工作区 tracked clean，仅有用户原有未跟踪
+  `AGENTS.md`，本任务未修改。Task 36 提交信息为
+  `docs(prbench): record full public evaluation`，commit hash 在提交后写入 ignored 脱敏
+  报告。

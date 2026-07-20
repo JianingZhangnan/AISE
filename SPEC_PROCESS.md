@@ -366,6 +366,42 @@ active workspace 句改回旧 `data/workspaces/task_white_1993_*`；section-scop
 凭据文件名/高置信模式与新增 evaluator/runtime artifact 扫描均通过。修复后复审仍待
 执行，不能把本轮 GREEN 记录为 review clean 或正式 evaluator 成功。
 
+### 第五轮：task_white_1993 完整公开任务真实验收
+
+Task 35 之后的正式尝试暴露了真实 evaluator 文本 I/O、生产工具预算以及长推理响应的
+边界。采纳的确定性修订依次为：Task 34B / 34C 用 `31704dd`、`8625192` 修复 green / white
+evaluator UTF-8 文本 I/O；Task 34D 用 `ee11a09`、`4da448b` 增加分页、保留发现阶段工具
+配额并保持 event sink 兼容，review 为 0 / 0 / 0；Task 34E 用 `23b6747` 把 PRBench provider
+deadline 设为有界 600 秒，review 为 0 / 0 / 0，普通 adapter 的 120 秒 deadline 不变。
+
+固定 evaluator commit 为 `3e5bee4545cad2138832f06302e9c98bd81f5216`，正式模型为
+`deepseek-v4-pro`。正式尝试次数为 3，上限已用尽；三次 official green grader 输出均为
+有效 grading JSON，且均没有结构化 `error`。实际结果如下：
+
+1. runner `tool_budget_exhausted`，50 次工具调用，约 279 秒，公开任务
+   `overall_score` 0.0。
+2. runner `provider_error`，13 次工具调用，white 阶段约 211 秒，grader 生命周期约
+   259.34 秒，公开任务 `overall_score` 0.0。过程记录只保留该结构化状态，不保留原始
+   错误。
+3. runner `approval_required`，42 次工具调用，white 阶段约 3454 秒，grader 生命周期
+   约 3539.93 秒，公开任务 `overall_score` 0.17。20 项声明产物中存在 13 项，7 项 CSV
+   中存在 0 项；人工安全审查未授予任何 `process.run` grant，资源风险脚本未执行。
+
+最终终态为 `approval_required`。成功合同要求 runner `completed` 与有效 green report
+同时成立，三次尝试均未达到，因此不能写成跑通或成功；0.17 只属于这一个完整公开任务，
+不是 holdout 或课程总体成绩。这也修正了“grader JSON 有效即可视作运行成功”的潜在误读：
+green grader 的结构有效性只证明评分生命周期完成，不能覆盖 runner 终态门禁。
+
+凭据泄漏扫描覆盖 108 个 tracked 普通文件和 1077 个本地日志、trace、report、wheel
+文件，读取错误为 0；两组 key 在 tracked 文件和本地产物中的精确匹配都为 0。所有
+evaluator clone/workspace、trace、journal、report、模型产物、wheel 与扫描清单继续
+保持 ignored；评测产物未提交，仓库只保留核心代码与清理后的过程文档/测试。
+
+Task 36 前核心门禁为 full pytest 100% exit 0、Pyright 0 errors / 0 warnings、wheel
+build 成功、diff/status clean。主工作区 tracked clean，只有用户原有未跟踪
+`AGENTS.md`，本轮未修改。Task 36 使用文档合同先取得预期 RED，再写入上述脱敏摘要；
+不读取 evaluator workspace、报告正文、凭据、provider source 或 ground truth。
+
 ## 仓库平台记录
 
 助教尚未最终确认期末项目应提交到 GitHub 还是 NJU Git。当前为了开发、提交、review 和过程记录顺畅，先使用 GitHub 仓库 `JianingZhangnan/AISE`。如课程后续明确要求 NJU Git，将以 GitHub 仓库完整历史为源迁移或镜像，并在本文件和 `AGENT_LOG.md` 中记录切换原因与关键操作。

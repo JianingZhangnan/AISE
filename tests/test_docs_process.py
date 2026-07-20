@@ -265,6 +265,31 @@ def test_docs_define_full_public_task_and_local_artifact_boundary() -> None:
     assert "严格 `git status --porcelain` 为空" not in normalized_log
 
 
+def test_process_docs_record_full_public_result_without_artifacts() -> None:
+    plan = _read("PLAN.md")
+    process = _read("SPEC_PROCESS.md")
+    log = _read("AGENT_LOG.md")
+    for document in (plan, process, log):
+        assert "task_white_1993 完整公开任务真实验收" in document
+        assert "正式尝试次数" in document
+        assert "评测产物未提交" in document
+        assert "凭据泄漏扫描" in document
+    assert any(
+        f"最终终态：`{status}`" in log
+        for status in (
+            "completed",
+            "approval_required",
+            "policy_blocked",
+            "provider_error",
+            "process_failed",
+            "artifact_verification_failed",
+            "repeated_no_progress",
+            "tool_budget_exhausted",
+            "grader_failed",
+        )
+    )
+
+
 def test_public_smoke_script_has_closed_credential_and_approval_contract():
     script = _read("integrations/prbench/run_public_smoke.ps1")
 
