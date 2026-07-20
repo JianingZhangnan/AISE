@@ -1931,10 +1931,12 @@ def test_official_phycode_control_writes_fail_closed_on_target_or_workspace_swap
         "instruction_file": "instruction.md",
         "paper": {"paper_file": "paper.md"},
     }
+    contract_snapshot = b'{"contract": "trusted"}'
+    approval_snapshot = b'{"grants": []}'
     sentinel_bytes = b"outside-sentinel"
-    race_results: list[tuple[str, bool, bytes, bool, bool, bool, bool]] = []
+    race_results: list[tuple[str, bool, bytes, bool, bool, bool, bool, bool]] = []
 
-    for race_kind in ("approval-target", "workspace-parent"):
+    for race_kind in ("approval-target", "workspace-parent", "contract-close"):
         case_dir = tmp_path / race_kind
         task_dir = case_dir / "task"
         workspace = task_dir / "workspace"
@@ -1955,6 +1957,7 @@ def test_official_phycode_control_writes_fail_closed_on_target_or_workspace_swap
         contract_dst = workspace / "task_contract.json"
         opened_descriptors: set[int] = set()
         closed_descriptors: set[int] = set()
+        control_unlink_calls = 0
 
         class RaceOsProxy:
             path = os.path
@@ -1962,6 +1965,8 @@ def test_official_phycode_control_writes_fail_closed_on_target_or_workspace_swap
 
             def __init__(self) -> None:
                 self.workspace_swapped = False
+                self.contract_descriptor: int | None = None
+                self.close_failed = False
 
             def __getattr__(self, name: str) -> object:
                 return getattr(os, name)
@@ -1996,11 +2001,34 @@ def test_official_phycode_control_writes_fail_closed_on_target_or_workspace_swap
                     if race_kind == "workspace-parent":
                         self.workspace_swapped = True
                     return descriptor
-                return os.open(path, flags, mode, **kwargs)  # type: ignore[call-overload]
+                descriptor = os.open(path, flags, mode, **kwargs)  # type: ignore[call-overload]
+                if is_control_create and race_kind == "contract-close":
+                    opened_descriptors.add(descriptor)
+                    if target == contract_dst:
+                        self.contract_descriptor = descriptor
+                return descriptor
 
             def close(self, descriptor: int) -> None:
                 closed_descriptors.add(descriptor)
                 os.close(descriptor)
+                if (
+                    race_kind == "contract-close"
+                    and descriptor == self.contract_descriptor
+                    and not self.close_failed
+                ):
+                    self.close_failed = True
+                    raise OSError("synthetic close failure")
+
+            def unlink(
+                self, path: str | os.PathLike[str], **kwargs: object
+            ) -> None:
+                nonlocal control_unlink_calls
+                if race_kind == "approval-target" and Path(path) == contract_dst:
+                    displaced = outside / "displaced-contract.json"
+                    os.replace(contract_dst, displaced)
+                    os.link(sentinel, contract_dst)
+                control_unlink_calls += 1
+                os.unlink(path, **kwargs)  # type: ignore[call-overload]
 
         race_os = RaceOsProxy()
 
@@ -2018,7 +2046,6 @@ def test_official_phycode_control_writes_fail_closed_on_target_or_workspace_swap
                 "_is_reparse_point",
                 "_phycode_workspace_identity",
                 "_verify_phycode_control",
-                "_rollback_phycode_control",
                 "_preflight_phycode_controls",
                 "_write_phycode_control",
             ),
@@ -2030,27 +2057,30 @@ def test_official_phycode_control_writes_fail_closed_on_target_or_workspace_swap
                 task_config,
                 str(task_dir),
                 str(workspace),
-                b'{"contract": "trusted"}',
-                approvals.read_bytes(),
+                contract_snapshot,
+                approval_snapshot,
             )
         except (OSError, RuntimeError):
             raised = True
         raced_target_cleaned = not (
             contract_dst if race_kind == "workspace-parent" else approvals_dst
         ).exists()
-        contract_cleaned = not contract_dst.exists()
+        contract_is_snapshot = (
+            contract_dst.is_file()
+            and contract_dst.read_bytes() == contract_snapshot
+        )
         retry_succeeded = True
-        if race_kind == "approval-target":
+        if race_kind in {"approval-target", "contract-close"}:
             retry_copy = _load_function(
                 launcher,
                 "_copy_phycode_controls",
                 {"os": os, "shutil": shutil, "stat": stat},
                 dependencies=(
                     "_path_is_within",
+                    "_read_verified_utf8",
                     "_is_reparse_point",
                     "_phycode_workspace_identity",
                     "_verify_phycode_control",
-                    "_rollback_phycode_control",
                     "_preflight_phycode_controls",
                     "_write_phycode_control",
                 ),
@@ -2060,8 +2090,8 @@ def test_official_phycode_control_writes_fail_closed_on_target_or_workspace_swap
                     task_config,
                     str(task_dir),
                     str(workspace),
-                    b'{"contract": "trusted"}',
-                    approvals.read_bytes(),
+                    contract_snapshot,
+                    approval_snapshot,
                 )
             except (OSError, RuntimeError):
                 retry_succeeded = False
@@ -2073,56 +2103,76 @@ def test_official_phycode_control_writes_fail_closed_on_target_or_workspace_swap
                 bool(opened_descriptors)
                 and opened_descriptors <= closed_descriptors,
                 raced_target_cleaned,
-                contract_cleaned,
+                contract_is_snapshot,
                 retry_succeeded,
+                control_unlink_calls == 0,
             )
         )
 
     expected_race_results = [
-        ("approval-target", True, sentinel_bytes, True, True, True, True),
-        ("workspace-parent", True, sentinel_bytes, True, False, False, True),
+        ("approval-target", True, sentinel_bytes, True, True, True, True, True),
+        ("workspace-parent", True, sentinel_bytes, True, False, False, True, True),
+        ("contract-close", True, sentinel_bytes, True, True, True, True, True),
     ]
 
-    preexisting_results: list[tuple[str, bytes, bool]] = []
-    for target_name in ("task_contract.json", "phycode-approvals.json"):
-        case_dir = tmp_path / f"preexisting-{target_name}"
+    preexisting_results: list[
+        tuple[str, bool, bytes | None, bytes | None]
+    ] = []
+    for scenario in (
+        "exact-contract",
+        "exact-pair",
+        "mismatch-contract",
+        "mismatch-approval",
+    ):
+        case_dir = tmp_path / f"preexisting-{scenario}"
         task_dir = case_dir / "task"
         workspace = task_dir / "workspace"
         workspace.mkdir(parents=True)
         (task_dir / "instruction.md").write_text("instruction", encoding="utf-8")
         (workspace / "paper.md").write_text("paper", encoding="utf-8")
-        target = workspace / target_name
-        target.write_bytes(b"preexisting-control")
+        contract_dst = workspace / "task_contract.json"
+        approvals_dst = workspace / "phycode-approvals.json"
+        if scenario in {"exact-contract", "exact-pair"}:
+            contract_dst.write_bytes(contract_snapshot)
+        elif scenario == "mismatch-contract":
+            contract_dst.write_bytes(b"mismatched-contract")
+        if scenario == "exact-pair":
+            approvals_dst.write_bytes(approval_snapshot)
+        elif scenario == "mismatch-approval":
+            approvals_dst.write_bytes(b"mismatched-approval")
         copy_controls = _load_function(
             launcher,
             "_copy_phycode_controls",
             {"os": os, "shutil": shutil, "stat": stat},
             dependencies=(
                 "_path_is_within",
+                "_read_verified_utf8",
                 "_is_reparse_point",
                 "_phycode_workspace_identity",
                 "_verify_phycode_control",
-                "_rollback_phycode_control",
                 "_preflight_phycode_controls",
                 "_write_phycode_control",
             ),
         )
 
-        with pytest.raises(RuntimeError, match="already exists"):
+        raised = False
+        try:
             copy_controls(  # type: ignore[operator]
                 task_config,
                 str(task_dir),
                 str(workspace),
-                b'{"contract": "trusted"}',
-                b'{"grants": []}',
+                contract_snapshot,
+                approval_snapshot,
             )
+        except (OSError, RuntimeError):
+            raised = True
 
         preexisting_results.append(
             (
-                target_name,
-                target.read_bytes(),
-                target_name != "phycode-approvals.json"
-                or not (workspace / "task_contract.json").exists(),
+                scenario,
+                raised,
+                contract_dst.read_bytes() if contract_dst.is_file() else None,
+                approvals_dst.read_bytes() if approvals_dst.is_file() else None,
             )
         )
 
@@ -2192,7 +2242,6 @@ def test_official_phycode_control_writes_fail_closed_on_target_or_workspace_swap
                 "_is_reparse_point",
                 "_phycode_workspace_identity",
                 "_verify_phycode_control",
-                "_rollback_phycode_control",
             ),
         )
         raised = False
@@ -2220,8 +2269,10 @@ def test_official_phycode_control_writes_fail_closed_on_target_or_workspace_swap
     ]
     assert race_results == expected_race_results
     assert preexisting_results == [
-        ("task_contract.json", b"preexisting-control", True),
-        ("phycode-approvals.json", b"preexisting-control", True),
+        ("exact-contract", False, contract_snapshot, approval_snapshot),
+        ("exact-pair", False, contract_snapshot, approval_snapshot),
+        ("mismatch-contract", True, b"mismatched-contract", None),
+        ("mismatch-approval", True, None, b"mismatched-approval"),
     ]
 
 
@@ -2299,10 +2350,10 @@ def test_official_launcher_copies_prevalidated_control_snapshots_after_source_sw
         },
         dependencies=(
             "_path_is_within",
+            "_read_verified_utf8",
             "_is_reparse_point",
             "_phycode_workspace_identity",
             "_verify_phycode_control",
-            "_rollback_phycode_control",
             "_preflight_phycode_controls",
             "_write_phycode_control",
         ),
