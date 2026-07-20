@@ -1908,6 +1908,10 @@ def test_official_launcher_validates_explicit_expected_file_superset_before_prov
         side_effects.append("resolve-env")
         raise ProviderReached
 
+    def setup_docker_environment(*_args: object, **_kwargs: object) -> object:
+        side_effects.append("docker-setup")
+        raise AssertionError("contract validation must run before Docker setup")
+
     launcher = patched_official_evaluator / "src/launcher.py"
     launch_evaluation = _load_function(
         launcher,
@@ -1925,6 +1929,7 @@ def test_official_launcher_validates_explicit_expected_file_superset_before_prov
             "open": open,
             "os": os,
             "resolve_env": resolve_env,
+            "setup_docker_environment": setup_docker_environment,
             "stat": stat,
             "yaml": types.SimpleNamespace(safe_load=lambda _handle: task_config),
         },
@@ -1977,6 +1982,7 @@ def test_official_launcher_validates_explicit_expected_file_superset_before_prov
         "windows absolute": ["reproduce.py", "result.csv", "C:\\absolute.txt"],
         "hidden fixture": ["reproduce.py", "result.csv", "_ground_truth/data.csv"],
         "credential": ["reproduce.py", "result.csv", ".env"],
+        "non-string": ["reproduce.py", "result.csv", 7],
     }
     for label, expected_files in invalid_expected_files.items():
         side_effects.clear()
@@ -2001,6 +2007,124 @@ def test_official_launcher_validates_explicit_expected_file_superset_before_prov
             )
 
         assert side_effects == [], label
+
+
+def test_official_launcher_does_not_derive_approvals_from_safe_contract_superset(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+) -> None:
+    task_root = tmp_path / "tasks/public-task"
+    task_root.mkdir(parents=True)
+    (task_root / "task.yaml").write_text("public task", encoding="utf-8")
+    task_config = {
+        "instruction_file": "instruction.md",
+        "paper": {
+            "title": "Public task",
+            "author": "Public author",
+            "paper_file": "paper.md",
+        },
+        "input_files": [],
+        "expected_outputs": {
+            "code": ["reproduce.py"],
+            "data": ["result.csv"],
+        },
+    }
+    contract = tmp_path / "contract.json"
+    contract.write_text(
+        json.dumps(
+            {
+                "instruction_file": "instruction.md",
+                "paper_file": "paper.md",
+                "input_files": [],
+                "expected_files": [
+                    "reproduce.py",
+                    "extras/entry.py",
+                    "result.csv",
+                    "extras/report.csv",
+                ],
+                "execution_entrypoints": ["extras/entry.py"],
+                "constraints": [
+                    {"path": "extras/report.csv", "csv_header": ["value"]}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    side_effects: list[str] = []
+    approval_snapshots: list[bytes] = []
+
+    class ReachedDockerSetup(RuntimeError):
+        pass
+
+    def resolve_env(agent_type: str) -> dict[str, str]:
+        assert agent_type == "phycode"
+        side_effects.append("resolve-env")
+        return {}
+
+    def setup_docker_environment(*_args: object, **kwargs: object) -> object:
+        side_effects.append("docker-setup")
+        approval_snapshot = kwargs["phycode_approvals_snapshot"]
+        assert isinstance(approval_snapshot, bytes)
+        approval_snapshots.append(approval_snapshot)
+        raise ReachedDockerSetup
+
+    launch_evaluation = _load_function(
+        patched_official_evaluator / "src/launcher.py",
+        "launch_evaluation",
+        {
+            "DATA_DIR": str(tmp_path / "tasks"),
+            "_archive_trace": lambda *_args: None,
+            "_archive_workspace": lambda *_args: "archive-destination",
+            "_copy_input_files": lambda *_args: None,
+            "_copy_paper_images": lambda *_args: None,
+            "_copy_paper_markdown": lambda *_args: None,
+            "_export_traces_for_type": lambda *_args: None,
+            "_kill_process": lambda *_args: None,
+            "_path_is_within": lambda *_args: True,
+            "_remove_container": lambda *_args: None,
+            "_remove_stale_output": lambda *_args: None,
+            "find_free_port_pair": lambda: (9001, 9002),
+            "json": json,
+            "logger": types.SimpleNamespace(
+                error=lambda *_: None,
+                info=lambda *_: None,
+            ),
+            "logging": types.SimpleNamespace(
+                INFO=20,
+                basicConfig=lambda **_kwargs: None,
+                FileHandler=lambda *_args: object(),
+                StreamHandler=lambda *_args: object(),
+            ),
+            "open": open,
+            "os": os,
+            "resolve_env": resolve_env,
+            "setup_docker_environment": setup_docker_environment,
+            "stat": stat,
+            "yaml": types.SimpleNamespace(safe_load=lambda _handle: task_config),
+        },
+        dependencies=(
+            "_path_is_within",
+            "_read_verified_utf8",
+            "_validate_phycode_contract",
+            "_validate_phycode_approvals",
+        ),
+    )
+
+    with pytest.raises(ReachedDockerSetup):
+        asyncio.run(
+            launch_evaluation(  # type: ignore[arg-type]
+                task_id="public-task",
+                green_port=9001,
+                white_port=9002,
+                white_agent_type="phycode",
+                green_agent_type="opencode",
+                phycode_contract=str(contract),
+                archive=False,
+            )
+        )
+
+    assert side_effects == ["resolve-env", "docker-setup"]
+    assert approval_snapshots == [b'{\n  "grants": []\n}\n']
 
 
 @pytest.mark.parametrize(
