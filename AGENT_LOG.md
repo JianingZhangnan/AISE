@@ -733,3 +733,11 @@
 - 验证：`uv run pytest` 全量 670 passed / 98 skipped、exit 0；`uvx pyright` 0 errors /
   0 warnings；`uv build` 成功生成 `phycode-0.1.4` wheel/sdist。v0.1.4 tag、GitHub Release
   与 PyPI 首次发布待用户在 PyPI 网页完成 pending publisher（Trusted Publisher）配置后执行。
+- 发布完成补记（同日）：用户完成 PyPI pending publisher 配置后，主 agent 推送 `v0.1.4`
+  tag；release workflow（pytest → `uv build` → `uv publish`，OIDC Trusted Publishing）一次
+  通过，phycode 0.1.4 首发 PyPI（License: MIT）。GitHub Release v0.1.4 附带自 PyPI 回下载的
+  同组 wheel/sdist 与 SHA256（wheel `0f9532…d89ad`、sdist `25cc2e…b7615`）。端到端验证：
+  `uvx phycode@0.1.4 version` 从 PyPI 全新解析安装 48 个包并输出 `phycode 0.1.4`，
+  `tools list` 正常。注意事项：不带版本的 `uvx phycode` 在本机曾输出 0.1.2，经核实为本机
+  历史 `uv tool install` 的旧工具环境优先所致；已解包核对 PyPI wheel 内
+  `__version__ = "0.1.4"`，与发布产物无关。
