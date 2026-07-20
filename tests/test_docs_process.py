@@ -107,6 +107,23 @@ def test_readme_documents_all_user_facing_commands():
     assert "不得提交" in readme
 
 
+def test_readme_documents_install_layout_limits_and_licensing():
+    readme = _read("README.md")
+    for heading in (
+        "## 安装",
+        "## 目录结构",
+        "## 已知限制",
+        "## 第三方依赖与许可证",
+    ):
+        assert heading in readme, heading
+    assert "git clone https://github.com/JianingZhangnan/AISE" in readme
+    assert "github.com/JianingZhangnan/AISE/releases" in readme
+    assert "pip install phycode" in readme
+    assert (ROOT / "LICENSE").exists()
+    project = tomllib.loads(_read("pyproject.toml"))["project"]
+    assert project.get("license") == "MIT"
+
+
 def test_plan_marks_tasks_10_to_12_complete_and_records_scope():
     plan = _read("PLAN.md")
     assert "### Task 10: CLI Run、Chat、Config、Keys 和工具列表 - ✅" in plan
