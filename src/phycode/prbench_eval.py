@@ -16,11 +16,16 @@ from phycode.composition import build_agent, trusted_prbench_runtime_settings
 from phycode.config import load_prbench_provider_config, validate_prbench_model_label
 from phycode.execution import ArtifactSnapshot, ExecutionJournal
 from phycode.llm import LLMClient, OpenAICompatibleChatAdapter
-from phycode.models import AgentEventType, AgentProfile, SessionMode
+from phycode.models import (
+    PRBENCH_DEFAULT_FILE_READ_CHARS,
+    PRBENCH_MAX_FILE_READ_CHARS,
+    AgentEventType,
+    AgentProfile,
+    SessionMode,
+)
 from phycode.prbench_contract import ArtifactVerifier, TaskContract
 from phycode.profiles import profile_spec
 from phycode.redaction import redact_obj, redact_text
-from phycode.tools.file_tools import DEFAULT_FILE_READ_CHARS, MAX_FILE_READ_CHARS
 from phycode.visibility import (
     PRBENCH_HIDDEN_PATH_COMPONENTS,
     has_hidden_path_component,
@@ -372,7 +377,8 @@ def build_prbench_task_brief(
         f"{constraints}\n"
         f"Artifacts (*=entrypoint): {expected}\n"
         "file.read offset/limit: zero-based UTF-8 decoded characters, not lines; "
-        f"default/max={DEFAULT_FILE_READ_CHARS}/{MAX_FILE_READ_CHARS}. If truncated follow "
+        f"default/max={PRBENCH_DEFAULT_FILE_READ_CHARS}/{PRBENCH_MAX_FILE_READ_CHARS}. "
+        "If truncated follow "
         "next_offset; Do not overlap/re-read. Do not exhaustively page through the paper; use "
         "targeted grep. Implement via file.write/edit before discovery cap, then process.run "
         "entrypoints. Verifier reports after each successful tool."

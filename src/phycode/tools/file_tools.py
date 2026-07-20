@@ -14,7 +14,6 @@ from openpyxl import load_workbook
 from pypdf import PdfReader
 
 from phycode.models import (
-    PRBENCH_FILE_READ_CHARS,
     FileReadConfig,
     ToolCall,
     ToolResult,
@@ -24,8 +23,6 @@ from phycode.models import (
 from phycode.tools.base import ToolRegistry
 
 MAX_INSPECT_CHARS = 20_000
-DEFAULT_FILE_READ_CHARS = PRBENCH_FILE_READ_CHARS
-MAX_FILE_READ_CHARS = PRBENCH_FILE_READ_CHARS
 MAX_ARCHIVE_MEMBERS = 100
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 50_000_000
 MAX_ARCHIVE_MEMBER_BYTES = 10_000_000
