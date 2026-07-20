@@ -1,5 +1,6 @@
 stages:
   - test
+  - build
 
 unit-test:
   stage: test
@@ -9,3 +10,15 @@ unit-test:
     - uv sync --dev
   script:
     - uv run pytest
+
+build-package:
+  stage: build
+  image: python:3.11
+  before_script:
+    - pip install uv
+  script:
+    - uv build
+  artifacts:
+    paths:
+      - dist/phycode-*.whl
+      - dist/phycode-*.tar.gz
