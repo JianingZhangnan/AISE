@@ -33,7 +33,7 @@ class WorkspaceFileReadError(RuntimeError):
 
 @dataclass(frozen=True)
 class WorkspaceFileContent:
-    data: bytes
+    data: bytes | None
     size: int
     sha256: str
 
@@ -82,52 +82,109 @@ def _inspect_regular_file(
     return tuple(identities)
 
 
+def _read_stable_pass(
+    descriptor: int,
+    workspace_root: Path,
+    path: Path,
+    expected_identities: tuple[tuple[int, int, int], ...],
+    capture_limit: int | None,
+) -> tuple[str, int, bytes | None]:
+    opened_before = os.fstat(descriptor)
+    identities_before = _inspect_regular_file(workspace_root, path)
+    if identities_before is None or identities_before != expected_identities:
+        raise WorkspaceFileReadError("workspace file identity changed before reading")
+    if not stat.S_ISREG(opened_before.st_mode):
+        raise UnsafeWorkspaceFileError("workspace file is not a regular file")
+    if _file_identity(opened_before) != expected_identities[-1]:
+        raise WorkspaceFileReadError("workspace file identity changed before reading")
+
+    hasher = hashlib.sha256()
+    total = 0
+    captured = bytearray() if capture_limit is not None else None
+    while chunk := os.read(descriptor, 1024 * 1024):
+        total += len(chunk)
+        if capture_limit is not None and total > capture_limit:
+            raise WorkspaceFileReadError("workspace file exceeds the safe capture limit")
+        hasher.update(chunk)
+        if captured is not None:
+            captured.extend(chunk)
+
+    opened_after = os.fstat(descriptor)
+    identities_after = _inspect_regular_file(workspace_root, path)
+    if identities_after is None or identities_after != expected_identities:
+        raise WorkspaceFileReadError("workspace file identity changed while being read")
+    if (
+        _file_identity(opened_after) != _file_identity(opened_before)
+        or _file_version(opened_after) != _file_version(opened_before)
+        or total != opened_after.st_size
+    ):
+        raise WorkspaceFileReadError("workspace file changed while being read")
+    return hasher.hexdigest(), total, bytes(captured) if captured is not None else None
+
+
 def read_workspace_regular_file(
     workspace_root: Path,
     path: Path,
+    *,
+    capture_limit: int | None = None,
 ) -> WorkspaceFileContent | None:
-    """Read a non-link regular file while binding checks to the opened identity."""
+    """Snapshot a regular file with two bounded stability checks on one descriptor.
+
+    The repeated reads detect changes visible during these checks; no finite userspace
+    check can lock a file against a malicious writer that synchronizes between them.
+    """
+    if capture_limit is not None and capture_limit < 0:
+        raise ValueError("capture_limit must not be negative")
     initial_identities = _inspect_regular_file(workspace_root, path)
     if initial_identities is None:
         return None
 
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor: int | None = None
     try:
         descriptor = os.open(path, flags)
-        opened_before = os.fstat(descriptor)
-        if not stat.S_ISREG(opened_before.st_mode):
-            raise UnsafeWorkspaceFileError("workspace file is not a regular file")
-        if _file_identity(opened_before) != initial_identities[-1]:
-            raise WorkspaceFileReadError("workspace file identity changed before reading")
-
-        chunks: list[bytes] = []
-        while chunk := os.read(descriptor, 1024 * 1024):
-            chunks.append(chunk)
-        opened_after = os.fstat(descriptor)
-    except UnsafeWorkspaceFileError:
-        raise
     except (OSError, ValueError) as exc:
         raise WorkspaceFileReadError("workspace file cannot be read") from exc
-    finally:
-        if descriptor is not None:
+
+    try:
+        first_hash, first_size, data = _read_stable_pass(
+            descriptor,
+            workspace_root,
+            path,
+            initial_identities,
+            capture_limit,
+        )
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        second_hash, second_size, _ = _read_stable_pass(
+            descriptor,
+            workspace_root,
+            path,
+            initial_identities,
+            None,
+        )
+        if first_hash != second_hash or first_size != second_size:
+            raise WorkspaceFileReadError("workspace file was not stable across bounded reads")
+    except (UnsafeWorkspaceFileError, WorkspaceFileReadError):
+        try:
             os.close(descriptor)
+        except OSError:
+            pass
+        raise
+    except (OSError, ValueError) as exc:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise WorkspaceFileReadError("workspace file cannot be read") from exc
+    try:
+        os.close(descriptor)
+    except OSError as exc:
+        raise WorkspaceFileReadError("workspace file cannot be closed safely") from exc
 
-    if (
-        _file_identity(opened_after) != _file_identity(opened_before)
-        or _file_version(opened_after) != _file_version(opened_before)
-    ):
-        raise WorkspaceFileReadError("workspace file changed while being read")
-    final_identities = _inspect_regular_file(workspace_root, path)
-    if final_identities is None or final_identities != initial_identities:
-        raise WorkspaceFileReadError("workspace file identity changed while being read")
-
-    data = b"".join(chunks)
     return WorkspaceFileContent(
         data=data,
-        size=len(data),
-        sha256=hashlib.sha256(data).hexdigest(),
+        size=first_size,
+        sha256=first_hash,
     )
 
 

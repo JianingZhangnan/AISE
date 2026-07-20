@@ -10,7 +10,12 @@ from pathlib import Path
 from pydantic import ValidationError
 import pytest
 
-from phycode.execution import ExecutionJournal, ExecutionJournalError
+from phycode.execution import (
+    ExecutionJournal,
+    ExecutionJournalError,
+    WorkspaceFileReadError,
+    read_workspace_regular_file,
+)
 from phycode.models import AgentProfile, ToolCall
 from phycode.policy import PolicyContext
 from phycode.prbench_contract import ArtifactConstraint, ArtifactVerifier, TaskContract
@@ -662,6 +667,136 @@ def test_missing_regular_artifact_remains_missing(tmp_path: Path) -> None:
 
     assert {issue.code for issue in result.issues} == {"missing_artifact"}
     assert journal.snapshot_artifacts()[0].exists is False
+
+
+def test_workspace_snapshot_does_not_capture_content_by_default(tmp_path: Path) -> None:
+    artifact = tmp_path / "result.txt"
+    artifact.write_bytes(b"bounded snapshot")
+
+    snapshot = read_workspace_regular_file(tmp_path, artifact)
+
+    assert snapshot is not None
+    assert snapshot.data is None
+    assert snapshot.size == len(b"bounded snapshot")
+
+
+def test_verifier_fails_closed_when_constrained_csv_exceeds_capture_limit(tmp_path: Path) -> None:
+    artifact = tmp_path / "large.csv"
+    with artifact.open("wb") as handle:
+        handle.write(b"a,b\n")
+        handle.truncate(8 * 1024 * 1024 + 1)
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=("large.csv",),
+        constraints=(ArtifactConstraint(path="large.csv", csv_header=("a", "b")),),
+    )
+
+    result = ArtifactVerifier(tmp_path, contract, ExecutionJournal(tmp_path, ())).verify()
+
+    assert not result.ok
+    assert {issue.code for issue in result.issues} == {"artifact_read_error"}
+
+
+def test_verifier_rejects_same_inode_mutation_with_restored_size_and_mtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "result.txt"
+    initial = b"version-one"
+    replacement = b"version-two"
+    assert len(initial) == len(replacement)
+    artifact.write_bytes(initial)
+    original_stat = artifact.stat()
+    original_read = os.read
+    mutated = False
+
+    def mutate_after_first_pass(file_descriptor: int, length: int) -> bytes:
+        nonlocal mutated
+        data = original_read(file_descriptor, length)
+        if not data and not mutated:
+            artifact.write_bytes(replacement)
+            os.utime(
+                artifact,
+                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            )
+            mutated = True
+        return data
+
+    monkeypatch.setattr("phycode.execution.os.read", mutate_after_first_pass)
+    contract = TaskContract(
+        instruction_file="instruction.md",
+        paper_file="paper.md",
+        expected_files=("result.txt",),
+    )
+
+    result = ArtifactVerifier(tmp_path, contract, ExecutionJournal(tmp_path, ())).verify()
+
+    assert mutated
+    assert not result.ok
+    assert {issue.code for issue in result.issues} == {"artifact_read_error"}
+
+
+def test_workspace_snapshot_converts_close_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "result.txt"
+    artifact.write_bytes(b"complete")
+
+    def fail_close(_file_descriptor: int) -> None:
+        raise OSError("test-only close failure")
+
+    monkeypatch.setattr("phycode.execution.os.close", fail_close)
+
+    with pytest.raises(WorkspaceFileReadError, match="closed"):
+        read_workspace_regular_file(tmp_path, artifact)
+
+
+def test_workspace_snapshot_close_error_does_not_replace_read_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "result.txt"
+    artifact.write_bytes(b"complete")
+
+    def fail_read(_file_descriptor: int, _length: int) -> bytes:
+        raise OSError("test-only primary read failure")
+
+    def fail_close(_file_descriptor: int) -> None:
+        raise OSError("test-only secondary close failure")
+
+    monkeypatch.setattr("phycode.execution.os.read", fail_read)
+    monkeypatch.setattr("phycode.execution.os.close", fail_close)
+
+    with pytest.raises(WorkspaceFileReadError, match="cannot be read") as error:
+        read_workspace_regular_file(tmp_path, artifact)
+
+    assert error.value.__cause__ is not None
+    assert "primary read failure" in str(error.value.__cause__)
+
+
+def test_workspace_snapshot_rejects_fstat_version_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "result.txt"
+    artifact.write_bytes(b"complete")
+    original_fstat = os.fstat
+    calls = 0
+
+    def changing_fstat(file_descriptor: int):
+        nonlocal calls
+        calls += 1
+        result = original_fstat(file_descriptor)
+        if calls == 2:
+            return _StatProxy(result, st_mtime_ns=result.st_mtime_ns + 1)
+        return result
+
+    monkeypatch.setattr("phycode.execution.os.fstat", changing_fstat)
+
+    with pytest.raises(WorkspaceFileReadError, match="changed"):
+        read_workspace_regular_file(tmp_path, artifact)
 
 
 @pytest.mark.parametrize("hidden_target", ["_ground_truth/secret.csv", "private/.env"])

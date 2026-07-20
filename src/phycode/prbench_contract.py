@@ -18,6 +18,9 @@ from phycode.execution import (
 from phycode.visibility import normalize_public_relative_path
 
 
+MAX_CAPTURED_CSV_BYTES = 8 * 1024 * 1024
+
+
 def _path_key(path: str) -> str:
     return os.path.normcase(path.replace("\\", "/"))
 
@@ -104,13 +107,26 @@ class ArtifactVerifier:
         issues: list[VerificationIssue] = []
         contents: dict[str, WorkspaceFileContent] = {}
         entrypoint_keys = {_path_key(path) for path in self.contract.execution_entrypoints}
+        captured_keys = {
+            self._key(constraint.path)
+            for constraint in self.contract.constraints
+            if self._constraint_requires_content(constraint)
+        }
         for relative_path in self.contract.expected_files:
             path = self._resolve(relative_path)
             if path is None:
                 issues.append(self._issue("invalid_artifact_path", relative_path, "Artifact path is not visible"))
                 continue
             try:
-                content = read_workspace_regular_file(self.workspace_root, path)
+                content = read_workspace_regular_file(
+                    self.workspace_root,
+                    path,
+                    capture_limit=(
+                        MAX_CAPTURED_CSV_BYTES
+                        if self._key(relative_path) in captured_keys
+                        else None
+                    ),
+                )
             except UnsafeWorkspaceFileError:
                 issues.append(self._issue("invalid_artifact_path", relative_path, "Artifact path is not visible"))
                 continue
@@ -154,8 +170,13 @@ class ArtifactVerifier:
 
         for constraint in self.contract.constraints:
             content = contents.get(self._key(constraint.path))
-            if content is None or content.size == 0:
+            if (
+                content is None
+                or content.size == 0
+                or not self._constraint_requires_content(constraint)
+            ):
                 continue
+            assert content.data is not None
             issues.extend(self._verify_csv_constraint(content.data, constraint))
 
         return VerificationResult(ok=not issues, issues=tuple(issues))
@@ -209,16 +230,29 @@ class ArtifactVerifier:
         constraint: ArtifactConstraint,
     ) -> list[VerificationIssue]:
         try:
-            rows = list(csv.reader(io.StringIO(data.decode("utf-8"), newline="")))
+            reader = csv.reader(io.StringIO(data.decode("utf-8"), newline=""))
+            header = next(reader, None)
+            actual_count = 0
+            rows_mismatch = False
+            for row in reader:
+                if constraint.csv_rows is not None and (
+                    actual_count >= len(constraint.csv_rows)
+                    or tuple(row) != constraint.csv_rows[actual_count]
+                ):
+                    rows_mismatch = True
+                actual_count += 1
+            if constraint.csv_rows is not None and actual_count != len(constraint.csv_rows):
+                rows_mismatch = True
         except (UnicodeError, csv.Error):
             return [self._issue("csv_read_error", constraint.path, "CSV cannot be read")]
         issues: list[VerificationIssue] = []
-        if constraint.csv_header is not None and (not rows or tuple(rows[0]) != constraint.csv_header):
+        if constraint.csv_header is not None and (
+            header is None or tuple(header) != constraint.csv_header
+        ):
             issues.append(self._issue("csv_header_mismatch", constraint.path, "CSV header does not match"))
-        actual_rows = tuple(tuple(row) for row in rows[1:]) if rows else ()
-        if constraint.csv_rows is not None and actual_rows != constraint.csv_rows:
+        if rows_mismatch:
             issues.append(self._issue("csv_rows_mismatch", constraint.path, "CSV rows do not match"))
-        if constraint.csv_data_row_count is not None and len(actual_rows) != constraint.csv_data_row_count:
+        if constraint.csv_data_row_count is not None and actual_count != constraint.csv_data_row_count:
             issues.append(
                 self._issue(
                     "csv_row_count_mismatch",
@@ -227,6 +261,14 @@ class ArtifactVerifier:
                 )
             )
         return issues
+
+    @staticmethod
+    def _constraint_requires_content(constraint: ArtifactConstraint) -> bool:
+        return (
+            constraint.csv_header is not None
+            or constraint.csv_rows is not None
+            or constraint.csv_data_row_count is not None
+        )
 
     def _resolve(self, relative_path: str) -> Path | None:
         try:
