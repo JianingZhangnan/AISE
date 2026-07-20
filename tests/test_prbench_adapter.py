@@ -191,10 +191,16 @@ def _load_launcher_output_helpers(
         "os": os_module,
         "stat": stat,
     }
+    read_verified_utf8 = _load_function(
+        launcher_path,
+        "_read_verified_utf8",
+        helper_globals,
+    )
+    helper_globals["_read_verified_utf8"] = read_verified_utf8
     validate_phycode_contract = _load_function(
         launcher_path,
         "_validate_phycode_contract",
-        {"json": json, "open": open_function, "os": os_module},
+        helper_globals,
     )
     helper_globals["_validate_phycode_contract"] = validate_phycode_contract
     return {
@@ -202,6 +208,7 @@ def _load_launcher_output_helpers(
             launcher_path, "_load_verified_json", helper_globals
         ),
         "_path_is_within": path_is_within,
+        "_read_verified_utf8": read_verified_utf8,
         "_remove_stale_output": _load_function(
             launcher_path, "_remove_stale_output", helper_globals
         ),
@@ -789,6 +796,83 @@ def test_official_launcher_verified_json_round_trips_utf8_without_platform_defau
     assert payload == expected
 
 
+@pytest.mark.parametrize("replacement_kind", ["symlink", "regular"])
+def test_official_launcher_verified_json_rejects_lstat_to_open_replacement(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+    replacement_kind: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    output = workspace / "result.json"
+    output.write_text('{"status": "trusted"}', encoding="utf-8")
+    untrusted = tmp_path / "untrusted.json"
+    untrusted.write_text('{"status": "untrusted"}', encoding="utf-8")
+    replacement = workspace / "replacement.json"
+    replacement.write_text('{"status": "untrusted"}', encoding="utf-8")
+    untrusted_reads: list[str] = []
+
+    class RaceOsProxy:
+        path = os.path
+
+        def __init__(self) -> None:
+            self.swapped = False
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(os, name)
+
+        def swap(self, path: str | os.PathLike[str]) -> None:
+            if self.swapped or Path(path) != output:
+                return
+            self.swapped = True
+            if replacement_kind == "regular":
+                output.unlink()
+                replacement.replace(output)
+
+        def open(self, path: str | os.PathLike[str], flags: int) -> int:
+            self.swap(path)
+            if replacement_kind == "symlink":
+                nofollow = getattr(os, "O_NOFOLLOW", 0)
+                if nofollow and flags & nofollow:
+                    raise OSError("synthetic O_NOFOLLOW rejection")
+                return os.open(untrusted, flags)
+            return os.open(path, flags)
+
+        def fdopen(self, descriptor: int, *args: object, **kwargs: object) -> object:
+            untrusted_reads.append("fdopen")
+            return os.fdopen(descriptor, *args, **kwargs)  # type: ignore[call-overload]
+
+    race_os = RaceOsProxy()
+
+    def race_text_open(
+        path: str | os.PathLike[str],
+        mode: str = "r",
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        race_os.swap(path)
+        untrusted_reads.append("open")
+        if replacement_kind == "symlink":
+            return open(untrusted, mode, *args, **kwargs)  # type: ignore[call-overload]
+        return open(path, mode, *args, **kwargs)  # type: ignore[call-overload]
+
+    launcher = patched_official_evaluator / "src/launcher.py"
+    helpers = _load_launcher_output_helpers(
+        launcher,
+        race_os,
+        open_function=race_text_open,
+    )
+    load_verified_json = helpers["_load_verified_json"]
+
+    valid, payload = load_verified_json(  # type: ignore[operator]
+        str(workspace), str(output)
+    )
+
+    assert valid is False
+    assert payload is None
+    assert untrusted_reads == []
+
+
 def test_official_phycode_setup_defers_green_credentials_until_grading(
     patched_official_evaluator: Path,
 ) -> None:
@@ -834,6 +918,7 @@ def test_official_phycode_setup_defers_green_credentials_until_grading(
         patched_official_evaluator / "src/launcher.py",
         "setup_docker_environment",
         {
+            "_copy_phycode_controls": lambda *_args: None,
             "DockerEnvironment": FakeDockerEnvironment,
             "PROJECT_ROOT": str(patched_official_evaluator),
             "logger": types.SimpleNamespace(info=lambda *_: None),
@@ -843,7 +928,9 @@ def test_official_phycode_setup_defers_green_credentials_until_grading(
     )
     config = {"docker": {}}
 
-    setup(config, "task", "workspace", "phycode", "opencode")  # type: ignore[operator]
+    setup(  # type: ignore[operator]
+        config, "task", "workspace", "phycode", "opencode", b"{}", None
+    )
 
     assert calls == []
     assert instances[-1].env_vars == {}  # type: ignore[attr-defined]
@@ -932,6 +1019,7 @@ def test_official_setup_cleans_only_its_started_container_and_preserves_error(
         patched_official_evaluator / "src/launcher.py",
         "setup_docker_environment",
         {
+            "_copy_phycode_controls": lambda *_args: None,
             "DockerEnvironment": FakeDockerEnvironment,
             "PROJECT_ROOT": str(patched_official_evaluator),
             "logger": logging.getLogger("test.patched.launcher-setup"),
@@ -948,6 +1036,8 @@ def test_official_setup_cleans_only_its_started_container_and_preserves_error(
             "workspace",
             "phycode",
             "opencode",
+            b"{}",
+            None,
         )
 
     if failure_mode == "post_start_exception":
@@ -1406,6 +1496,7 @@ def test_official_setup_preserves_original_error_when_real_stop_hits_base_except
         patched_official_evaluator / "src/launcher.py",
         "setup_docker_environment",
         {
+            "_copy_phycode_controls": lambda *_args: None,
             "DockerEnvironment": FakeDockerEnvironment,
             "PROJECT_ROOT": str(patched_official_evaluator),
             "logger": logger,
@@ -1416,7 +1507,15 @@ def test_official_setup_preserves_original_error_when_real_stop_hits_base_except
     caplog.set_level(logging.INFO, logger="test.patched.real-stop-setup")
 
     with pytest.raises(RuntimeError) as raised:
-        setup({"docker": {}}, "task", "workspace", "phycode", "opencode")
+        setup(
+            {"docker": {}},
+            "task",
+            "workspace",
+            "phycode",
+            "opencode",
+            b"{}",
+            None,
+        )
 
     assert raised.value is original_error
     assert events == [("stop", 10), ("remove", True)]
@@ -1764,11 +1863,16 @@ def test_official_launcher_rejects_untrusted_phycode_contract_before_agent_side_
             ),
             "open": open,
             "os": os,
+            "stat": stat,
             "resolve_env": resolve_env,
             "setup_docker_environment": setup_docker_environment,
             "yaml": types.SimpleNamespace(safe_load=lambda _handle: task_config),
         },
-        dependencies=("_validate_phycode_contract",),
+        dependencies=(
+            "_path_is_within",
+            "_read_verified_utf8",
+            "_validate_phycode_contract",
+        ),
     )
 
     with pytest.raises(ValueError, match="PhyCode contract"):
@@ -1795,17 +1899,12 @@ def test_official_phycode_controls_reject_missing_contract_without_fallback(
     (task_dir / "instruction.md").write_text("public instruction", encoding="utf-8")
     (workspace / "paper.md").write_text("public paper", encoding="utf-8")
     launcher = patched_official_evaluator / "src/launcher.py"
-    validate_contract = _load_function(
-        launcher,
-        "_validate_phycode_contract",
-        {"json": json, "open": open, "os": os},
-    )
     copy_controls = _load_function(
         launcher,
         "_copy_phycode_controls",
         {
-            "_validate_phycode_contract": validate_contract,
             "json": json,
+            "open": open,
             "os": os,
             "shutil": shutil,
         },
@@ -1816,31 +1915,29 @@ def test_official_phycode_controls_reject_missing_contract_without_fallback(
         "expected_outputs": {"code": ["reproduce.py"], "data": ["result.csv"]},
     }
 
-    with pytest.raises(RuntimeError, match="Explicit PhyCode contract"):
+    with pytest.raises(RuntimeError, match="contract snapshot"):
         copy_controls(  # type: ignore[operator]
             task_config,
             str(task_dir),
             str(workspace),
             None,
             None,
-            False,
         )
 
     assert not (workspace / "task_contract.json").exists()
 
 
-def test_official_phycode_controls_copy_explicit_contract_exactly(
+def test_official_launcher_copies_prevalidated_contract_snapshot_after_source_swap(
     patched_official_evaluator: Path,
     tmp_path: Path,
 ) -> None:
-    task_dir = tmp_path / "task"
-    workspace = task_dir / "workspace"
-    task_dir.mkdir()
-    workspace.mkdir()
+    task_dir = tmp_path / "tasks" / "public-task"
+    task_dir.mkdir(parents=True)
+    (task_dir / "task.yaml").write_text("public task", encoding="utf-8")
     (task_dir / "instruction.md").write_text("public instruction", encoding="utf-8")
-    (workspace / "paper.md").write_text("public paper", encoding="utf-8")
+    (task_dir / "paper.md").write_text("public paper", encoding="utf-8")
     contract = tmp_path / "public-contract.json"
-    contract_text = json.dumps(
+    contract_bytes = json.dumps(
         {
             "instruction_file": "instruction.md",
             "paper_file": "paper.md",
@@ -1854,13 +1951,49 @@ def test_official_phycode_controls_copy_explicit_contract_exactly(
             ],
         },
         ensure_ascii=False,
-    )
-    contract.write_text(contract_text, encoding="utf-8")
+        indent=2,
+    ).encode("utf-8")
+    contract.write_bytes(contract_bytes)
+    swapped_bytes = b'{"unexpected": true}'
+    source_open_count = 0
+    setup_snapshots: list[bytes] = []
+
+    class ContractOsProxy:
+        path = os.path
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(os, name)
+
+        def open(self, path: str | os.PathLike[str], flags: int) -> int:
+            nonlocal source_open_count
+            if Path(path) == contract:
+                source_open_count += 1
+            return os.open(path, flags)
+
+    contract_os = ContractOsProxy()
+
+    def tracking_open(
+        path: str | os.PathLike[str],
+        mode: str = "r",
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        nonlocal source_open_count
+        if Path(path) == contract:
+            source_open_count += 1
+        return open(path, mode, *args, **kwargs)  # type: ignore[call-overload]
+
     launcher = patched_official_evaluator / "src/launcher.py"
     validate_contract = _load_function(
         launcher,
         "_validate_phycode_contract",
-        {"json": json, "open": open, "os": os},
+        {
+            "json": json,
+            "open": tracking_open,
+            "os": contract_os,
+            "stat": stat,
+        },
+        dependencies=("_path_is_within", "_read_verified_utf8"),
     )
     copy_controls = _load_function(
         launcher,
@@ -1868,25 +2001,107 @@ def test_official_phycode_controls_copy_explicit_contract_exactly(
         {
             "_validate_phycode_contract": validate_contract,
             "json": json,
-            "os": os,
+            "open": tracking_open,
+            "os": contract_os,
             "shutil": shutil,
         },
     )
-
-    copy_controls(  # type: ignore[operator]
-        {
-            "instruction_file": "instruction.md",
-            "paper": {"paper_file": "paper.md"},
-            "expected_outputs": {"data": ["result.csv"]},
+    task_config = {
+        "instruction_file": "instruction.md",
+        "paper": {
+            "title": "Public task",
+            "author": "Public author",
+            "paper_file": "paper.md",
         },
-        str(task_dir),
-        str(workspace),
-        str(contract),
-        None,
-        False,
+        "expected_outputs": {"data": ["result.csv"]},
+    }
+
+    def resolve_env(agent_type: str) -> dict[str, str]:
+        if agent_type == "phycode":
+            contract.write_bytes(swapped_bytes)
+        return {}
+
+    class StopAfterControls(RuntimeError):
+        pass
+
+    def setup_docker_environment(
+        received_task_config: dict[str, object],
+        received_task_dir: str,
+        workspace_dir: str,
+        **kwargs: object,
+    ) -> object:
+        snapshot = kwargs["phycode_contract_snapshot"]
+        assert isinstance(snapshot, bytes)
+        setup_snapshots.append(snapshot)
+        copy_controls(  # type: ignore[operator]
+            received_task_config,
+            received_task_dir,
+            workspace_dir,
+            snapshot,
+            kwargs.get("phycode_approvals"),
+        )
+        raise StopAfterControls
+
+    launch_evaluation = _load_function(
+        launcher,
+        "launch_evaluation",
+        {
+            "DATA_DIR": str(tmp_path / "tasks"),
+            "_archive_trace": lambda *_args: None,
+            "_archive_workspace": lambda *_args: "archive-destination",
+            "_copy_input_files": lambda *_args: None,
+            "_copy_paper_images": lambda *_args: None,
+            "_copy_paper_markdown": lambda _config, _task, workspace: (
+                Path(workspace) / "paper.md"
+            ).write_text("public paper", encoding="utf-8"),
+            "_copy_phycode_controls": copy_controls,
+            "_export_traces_for_type": lambda *_args: None,
+            "_kill_process": lambda *_args: None,
+            "_path_is_within": lambda *_args: True,
+            "_remove_container": lambda *_args: None,
+            "_remove_stale_output": lambda *_args: None,
+            "find_free_port_pair": lambda: (9001, 9002),
+            "json": json,
+            "logger": types.SimpleNamespace(
+                error=lambda *_: None,
+                info=lambda *_: None,
+            ),
+            "logging": types.SimpleNamespace(
+                INFO=20,
+                basicConfig=lambda **_kwargs: None,
+                FileHandler=lambda *_args: object(),
+                StreamHandler=lambda *_args: object(),
+            ),
+            "open": tracking_open,
+            "os": contract_os,
+            "resolve_env": resolve_env,
+            "setup_docker_environment": setup_docker_environment,
+            "stat": stat,
+            "yaml": types.SimpleNamespace(safe_load=lambda _handle: task_config),
+        },
+        dependencies=(
+            "_path_is_within",
+            "_read_verified_utf8",
+            "_validate_phycode_contract",
+        ),
     )
 
-    assert (workspace / "task_contract.json").read_text(encoding="utf-8") == contract_text
+    with pytest.raises(StopAfterControls):
+        asyncio.run(
+            launch_evaluation(  # type: ignore[arg-type]
+                task_id="public-task",
+                white_agent_type="phycode",
+                green_agent_type="opencode",
+                phycode_contract=str(contract),
+                archive=False,
+            )
+        )
+
+    workspace = task_dir / "workspace"
+    assert contract.read_bytes() == swapped_bytes
+    assert (workspace / "task_contract.json").read_bytes() == contract_bytes
+    assert setup_snapshots == [contract_bytes]
+    assert source_open_count == 1
     assert json.loads(
         (workspace / "phycode-approvals.json").read_text(encoding="utf-8")
     ) == {"grants": []}
@@ -3675,24 +3890,6 @@ def test_patch_uses_explicit_controls_and_minimal_provider_environment() -> None
     assert "PHYCODE_MODEL" in patch
     assert "metadata_file" not in patch
     assert "ground_truth_data_dir" not in patch
-
-
-def test_patch_removes_generated_phycode_contract_fallback() -> None:
-    launcher = "\n".join(_added_hunks("src/launcher.py"))
-
-    assert "def _validate_phycode_contract(" in launcher
-    assert launcher.count("_validate_phycode_contract(") == 3
-    assert launcher.index("phycode_contract = _validate_phycode_contract(") < (
-        launcher.index('phycode_provider_env = resolve_env("phycode")')
-    )
-    assert "json.dump(contract" not in launcher
-    assert "Explicit PhyCode contract is required" in launcher
-
-
-def test_patch_launcher_verified_json_uses_explicit_utf8() -> None:
-    launcher = "\n".join(_added_hunks("src/launcher.py"))
-
-    assert 'with open(output_path, "r", encoding="utf-8") as handle:' in launcher
 
 
 def test_patch_uses_pinned_uv_without_pip_bootstrap() -> None:
