@@ -1,6 +1,6 @@
 [project]
 name = "phycode"
-version = "0.1.4"
+version = "0.1.5"
 description = "CLI-first coding agent harness with policy-aware tool runtime"
 readme = "README_PYPI.md"
 license = "MIT"
