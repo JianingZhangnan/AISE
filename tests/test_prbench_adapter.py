@@ -220,19 +220,32 @@ def _text_open_calls_missing_utf8(source: Path) -> list[int]:
     tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
     missing_utf8: list[int] = []
     for node in ast.walk(tree):
-        if not (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "open"
-        ):
+        if not isinstance(node, ast.Call):
             continue
-        mode_node = node.args[1] if len(node.args) > 1 else None
+        if isinstance(node.func, ast.Name) and node.func.id == "open":
+            mode_index = 1
+        elif isinstance(node.func, ast.Attribute) and node.func.attr == "open":
+            mode_index = (
+                1
+                if isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "io"
+                else 0
+            )
+        else:
+            continue
+        mode_node = node.args[mode_index] if len(node.args) > mode_index else None
         mode_node = next(
             (keyword.value for keyword in node.keywords if keyword.arg == "mode"),
             mode_node,
         )
-        mode = mode_node.value if isinstance(mode_node, ast.Constant) else "r"
-        if isinstance(mode, str) and "b" in mode:
+        if mode_node is None:
+            mode = "r"
+        elif isinstance(mode_node, ast.Constant) and isinstance(mode_node.value, str):
+            mode = mode_node.value
+        else:
+            # A static scan cannot prove whether a dynamic mode is text or binary.
+            continue
+        if "b" in mode:
             continue
         encoding_node = next(
             (keyword.value for keyword in node.keywords if keyword.arg == "encoding"),
@@ -753,7 +766,28 @@ def test_official_white_instruction_writer_round_trips_utf8(
 
 def test_official_launcher_text_open_calls_use_utf8(
     patched_official_evaluator: Path,
+    tmp_path: Path,
 ) -> None:
+    probe = tmp_path / "open_probe.py"
+    probe.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "import io",
+                'open("builtin.txt", "r")',
+                'Path("path.txt").open("w")',
+                'io.open("io.txt", mode="a")',
+                'open("binary.bin", "wb")',
+                'mode = "r"',
+                'open("dynamic.txt", mode)',
+                'open("encoded.txt", "w", encoding="utf-8")',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert _text_open_calls_missing_utf8(probe) == [3, 4, 5]
+
     source = patched_official_evaluator / "src/launcher.py"
     missing_utf8 = _text_open_calls_missing_utf8(source)
 
@@ -1888,46 +1922,170 @@ def test_official_launcher_rejects_untrusted_phycode_contract_before_agent_side_
     assert side_effects == []
 
 
-def test_official_phycode_controls_reject_missing_contract_without_fallback(
+def test_official_phycode_control_writes_fail_closed_on_target_or_workspace_swap(
     patched_official_evaluator: Path,
     tmp_path: Path,
 ) -> None:
-    task_dir = tmp_path / "task"
-    workspace = task_dir / "workspace"
-    task_dir.mkdir()
-    workspace.mkdir()
-    (task_dir / "instruction.md").write_text("public instruction", encoding="utf-8")
-    (workspace / "paper.md").write_text("public paper", encoding="utf-8")
     launcher = patched_official_evaluator / "src/launcher.py"
-    copy_controls = _load_function(
-        launcher,
-        "_copy_phycode_controls",
-        {
-            "json": json,
-            "open": open,
-            "os": os,
-            "shutil": shutil,
-        },
-    )
     task_config = {
         "instruction_file": "instruction.md",
         "paper": {"paper_file": "paper.md"},
-        "expected_outputs": {"code": ["reproduce.py"], "data": ["result.csv"]},
     }
+    sentinel_bytes = b"outside-sentinel"
+    race_results: list[tuple[str, bool, bytes, bool, bool]] = []
 
-    with pytest.raises(RuntimeError, match="contract snapshot"):
-        copy_controls(  # type: ignore[operator]
-            task_config,
-            str(task_dir),
-            str(workspace),
-            None,
-            None,
+    for race_kind in ("approval-target", "workspace-parent"):
+        case_dir = tmp_path / race_kind
+        task_dir = case_dir / "task"
+        workspace = task_dir / "workspace"
+        outside = case_dir / "outside"
+        alternate_workspace = case_dir / "alternate-workspace"
+        workspace.mkdir(parents=True)
+        outside.mkdir()
+        alternate_workspace.mkdir()
+        (task_dir / "instruction.md").write_text(
+            "public instruction", encoding="utf-8"
+        )
+        (workspace / "paper.md").write_text("public paper", encoding="utf-8")
+        approvals = case_dir / "approvals.json"
+        approvals.write_bytes(b'{"grants": []}')
+        sentinel = outside / "sentinel.json"
+        sentinel.write_bytes(sentinel_bytes)
+        approvals_dst = workspace / "phycode-approvals.json"
+        contract_dst = workspace / "task_contract.json"
+        opened_descriptors: set[int] = set()
+        closed_descriptors: set[int] = set()
+
+        class RaceOsProxy:
+            path = os.path
+            supports_dir_fd: set[object] = set()
+
+            def __init__(self) -> None:
+                self.workspace_swapped = False
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(os, name)
+
+            def lstat(self, path: str | os.PathLike[str]) -> os.stat_result:
+                if self.workspace_swapped and Path(path) == workspace:
+                    return os.lstat(alternate_workspace)
+                return os.lstat(path)
+
+            def open(
+                self,
+                path: str | os.PathLike[str],
+                flags: int,
+                mode: int = 0o777,
+                **kwargs: object,
+            ) -> int:
+                target = Path(path)
+                is_control_create = bool(flags & os.O_CREAT) and target in {
+                    contract_dst,
+                    approvals_dst,
+                }
+                if is_control_create and (
+                    (race_kind == "approval-target" and target == approvals_dst)
+                    or (race_kind == "workspace-parent" and target == contract_dst)
+                ):
+                    descriptor = (
+                        os.open(path, flags, mode, **kwargs)  # type: ignore[call-overload]
+                        if race_kind == "workspace-parent"
+                        else os.open(sentinel, os.O_WRONLY)
+                    )
+                    opened_descriptors.add(descriptor)
+                    if race_kind == "workspace-parent":
+                        self.workspace_swapped = True
+                    return descriptor
+                return os.open(path, flags, mode, **kwargs)  # type: ignore[call-overload]
+
+            def close(self, descriptor: int) -> None:
+                closed_descriptors.add(descriptor)
+                os.close(descriptor)
+
+        race_os = RaceOsProxy()
+
+        copy_controls = _load_function(
+            launcher,
+            "_copy_phycode_controls",
+            {
+                "os": race_os,
+                "shutil": shutil,
+                "stat": stat,
+            },
+            dependencies=(
+                "_path_is_within",
+                "_read_verified_utf8",
+                "_is_reparse_point",
+                "_same_file_identity",
+                "_write_phycode_control",
+            ),
         )
 
-    assert not (workspace / "task_contract.json").exists()
+        raised = False
+        try:
+            copy_controls(  # type: ignore[operator]
+                task_config,
+                str(task_dir),
+                str(workspace),
+                b'{"contract": "trusted"}',
+                approvals.read_bytes(),
+            )
+        except (OSError, RuntimeError):
+            raised = True
+        race_results.append(
+            (
+                race_kind,
+                raised,
+                sentinel.read_bytes(),
+                bool(opened_descriptors)
+                and opened_descriptors <= closed_descriptors,
+                not (
+                    contract_dst
+                    if race_kind == "workspace-parent"
+                    else approvals_dst
+                ).exists(),
+            )
+        )
+
+    assert race_results == [
+        ("approval-target", True, sentinel_bytes, True, True),
+        ("workspace-parent", True, sentinel_bytes, True, True),
+    ]
+
+    for target_name in ("task_contract.json", "phycode-approvals.json"):
+        case_dir = tmp_path / f"preexisting-{target_name}"
+        task_dir = case_dir / "task"
+        workspace = task_dir / "workspace"
+        workspace.mkdir(parents=True)
+        (task_dir / "instruction.md").write_text("instruction", encoding="utf-8")
+        (workspace / "paper.md").write_text("paper", encoding="utf-8")
+        target = workspace / target_name
+        target.write_bytes(b"preexisting-control")
+        copy_controls = _load_function(
+            launcher,
+            "_copy_phycode_controls",
+            {"os": os, "shutil": shutil, "stat": stat},
+            dependencies=(
+                "_path_is_within",
+                "_is_reparse_point",
+                "_same_file_identity",
+                "_write_phycode_control",
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="already exists"):
+            copy_controls(  # type: ignore[operator]
+                task_config,
+                str(task_dir),
+                str(workspace),
+                b'{"contract": "trusted"}',
+                b'{"grants": []}',
+            )
+
+        assert target.read_bytes() == b"preexisting-control"
 
 
-def test_official_launcher_copies_prevalidated_contract_snapshot_after_source_swap(
+def test_official_launcher_copies_prevalidated_control_snapshots_after_source_swap(
     patched_official_evaluator: Path,
     tmp_path: Path,
 ) -> None:
@@ -1954,9 +2112,13 @@ def test_official_launcher_copies_prevalidated_contract_snapshot_after_source_sw
         indent=2,
     ).encode("utf-8")
     contract.write_bytes(contract_bytes)
-    swapped_bytes = b'{"unexpected": true}'
-    source_open_count = 0
-    setup_snapshots: list[bytes] = []
+    approvals = tmp_path / "approvals.json"
+    approval_bytes = b'{"grants": []}'
+    approvals.write_bytes(approval_bytes)
+    swapped_contract_bytes = b'{"unexpected": true}'
+    swapped_approval_bytes = b'{"grants": [{"unexpected": true}]}'
+    source_open_counts = {contract: 0, approvals: 0}
+    setup_snapshots: list[tuple[bytes, bytes]] = []
 
     class ContractOsProxy:
         path = os.path
@@ -1964,11 +2126,17 @@ def test_official_launcher_copies_prevalidated_contract_snapshot_after_source_sw
         def __getattr__(self, name: str) -> object:
             return getattr(os, name)
 
-        def open(self, path: str | os.PathLike[str], flags: int) -> int:
-            nonlocal source_open_count
-            if Path(path) == contract:
-                source_open_count += 1
-            return os.open(path, flags)
+        def open(
+            self,
+            path: str | os.PathLike[str],
+            flags: int,
+            mode: int = 0o777,
+            **kwargs: object,
+        ) -> int:
+            source = Path(path)
+            if source in source_open_counts:
+                source_open_counts[source] += 1
+            return os.open(path, flags, mode, **kwargs)  # type: ignore[call-overload]
 
     contract_os = ContractOsProxy()
 
@@ -1978,33 +2146,23 @@ def test_official_launcher_copies_prevalidated_contract_snapshot_after_source_sw
         *args: object,
         **kwargs: object,
     ) -> object:
-        nonlocal source_open_count
-        if Path(path) == contract:
-            source_open_count += 1
         return open(path, mode, *args, **kwargs)  # type: ignore[call-overload]
 
     launcher = patched_official_evaluator / "src/launcher.py"
-    validate_contract = _load_function(
-        launcher,
-        "_validate_phycode_contract",
-        {
-            "json": json,
-            "open": tracking_open,
-            "os": contract_os,
-            "stat": stat,
-        },
-        dependencies=("_path_is_within", "_read_verified_utf8"),
-    )
     copy_controls = _load_function(
         launcher,
         "_copy_phycode_controls",
         {
-            "_validate_phycode_contract": validate_contract,
-            "json": json,
-            "open": tracking_open,
             "os": contract_os,
             "shutil": shutil,
+            "stat": stat,
         },
+        dependencies=(
+            "_path_is_within",
+            "_is_reparse_point",
+            "_same_file_identity",
+            "_write_phycode_control",
+        ),
     )
     task_config = {
         "instruction_file": "instruction.md",
@@ -2018,7 +2176,8 @@ def test_official_launcher_copies_prevalidated_contract_snapshot_after_source_sw
 
     def resolve_env(agent_type: str) -> dict[str, str]:
         if agent_type == "phycode":
-            contract.write_bytes(swapped_bytes)
+            contract.write_bytes(swapped_contract_bytes)
+            approvals.write_bytes(swapped_approval_bytes)
         return {}
 
     class StopAfterControls(RuntimeError):
@@ -2030,15 +2189,17 @@ def test_official_launcher_copies_prevalidated_contract_snapshot_after_source_sw
         workspace_dir: str,
         **kwargs: object,
     ) -> object:
-        snapshot = kwargs["phycode_contract_snapshot"]
-        assert isinstance(snapshot, bytes)
-        setup_snapshots.append(snapshot)
+        contract_snapshot = kwargs["phycode_contract_snapshot"]
+        approval_snapshot = kwargs["phycode_approvals_snapshot"]
+        assert isinstance(contract_snapshot, bytes)
+        assert isinstance(approval_snapshot, bytes)
+        setup_snapshots.append((contract_snapshot, approval_snapshot))
         copy_controls(  # type: ignore[operator]
             received_task_config,
             received_task_dir,
             workspace_dir,
-            snapshot,
-            kwargs.get("phycode_approvals"),
+            contract_snapshot,
+            approval_snapshot,
         )
         raise StopAfterControls
 
@@ -2083,6 +2244,7 @@ def test_official_launcher_copies_prevalidated_contract_snapshot_after_source_sw
             "_path_is_within",
             "_read_verified_utf8",
             "_validate_phycode_contract",
+            "_validate_phycode_approvals",
         ),
     )
 
@@ -2093,18 +2255,18 @@ def test_official_launcher_copies_prevalidated_contract_snapshot_after_source_sw
                 white_agent_type="phycode",
                 green_agent_type="opencode",
                 phycode_contract=str(contract),
+                phycode_approvals=str(approvals),
                 archive=False,
             )
         )
 
     workspace = task_dir / "workspace"
-    assert contract.read_bytes() == swapped_bytes
+    assert contract.read_bytes() == swapped_contract_bytes
+    assert approvals.read_bytes() == swapped_approval_bytes
     assert (workspace / "task_contract.json").read_bytes() == contract_bytes
-    assert setup_snapshots == [contract_bytes]
-    assert source_open_count == 1
-    assert json.loads(
-        (workspace / "phycode-approvals.json").read_text(encoding="utf-8")
-    ) == {"grants": []}
+    assert (workspace / "phycode-approvals.json").read_bytes() == approval_bytes
+    assert setup_snapshots == [(contract_bytes, approval_bytes)]
+    assert source_open_counts == {contract: 1, approvals: 1}
 
 
 def test_official_main_and_white_runner_pass_approval_wait_only_to_phycode(
