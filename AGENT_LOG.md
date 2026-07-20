@@ -634,42 +634,48 @@
   `7547db2a9ed8db98cb6b86d6ea95c186e30192d7` 至 HEAD
   `0c0b5b0f6e322e1c6a8e0f57d23716f24a1ec23f`，Review clean，Critical / Important / Minor
   为 0 / 0 / 0，规格与文档/测试质量均通过。
-- 正式运行只属于主 agent：最多三次、首次白色响应前的基础设施失败不计数，每个动态
+- 正式运行只属于主 agent：初始上限 3 次，后由用户扩展到最多五次；首次白色响应前的基础设施失败不计数，每个动态
   request 必须人工核验 exact argv/cwd/hash 后原样原子批准；只有 runner `completed` 与
   有效 grader report 同时成立才算成功。所有评测产物不提交，功能分支不经授权不进入
   `main`，保持主分支干净。
 
 ## 2026-07-19 Task 36：task_white_1993 完整公开任务真实验收
 
-- 新鲜 Task 36 subagent 使用 `executing-plans` 与 `test-driven-development`，严格只消费
-  主 agent 的脱敏摘要；没有打开或遍历 evaluator workspace、运行报告、凭据、provider
-  source、隐藏资料或 ground truth。先在 `tests/test_docs_process.py` 增加过程文档合同，
-  `uv run pytest tests/test_docs_process.py -k full_public_result -v` 得到预期 1 failed / 27
-  deselected，失败仅因三份文档尚无本轮记录；随后最小补齐 `PLAN.md`、
-  `SPEC_PROCESS.md` 与本日志。
-- 固定 evaluator commit 为 `3e5bee4545cad2138832f06302e9c98bd81f5216`，模型为
-  `deepseek-v4-pro`；正式尝试次数为 3，上限已用尽。三次 official green grader 输出
-  均为有效 grading JSON 且没有结构化 `error`。
-- 尝试 1：runner `tool_budget_exhausted`，50 次工具调用，约 279 秒，单个公开任务
-  `overall_score` 0.0。
-- 尝试 2：runner `provider_error`，13 次工具调用，white 阶段约 211 秒，grader
-  生命周期约 259.34 秒，单个公开任务 `overall_score` 0.0；不记录原始错误。
-- 尝试 3：runner `approval_required`，42 次工具调用，white 阶段约 3454 秒，grader
-  生命周期约 3539.93 秒，单个公开任务 `overall_score` 0.17；20 项声明产物存在 13 项，
-  7 项 CSV 存在 0 项。人工安全审查没有授予任何 `process.run` grant，资源风险脚本未
-  执行。
-- 最终终态：`approval_required`。三次均未同时获得 runner `completed` 与有效 green
-  report，成功标准未达到，不记录为跑通或成功；0.17 不能写成 holdout 或课程总体成绩。
-- 正式运行前后的修订提交包括 Task 34B / 34C UTF-8 修复 `31704dd`、`8625192`，Task 34D
-  分页/发现配额修复 `ee11a09`、`4da448b`（review 0 / 0 / 0），以及 Task 34E PRBench
-  600 秒有界 deadline `23b6747`（review 0 / 0 / 0）；普通 adapter 的 120 秒保持不变。
-- 凭据泄漏扫描计数为 108 个 tracked 普通文件、1077 个本地日志/trace/report/wheel
-  文件、0 个读取错误；两组 key 在 tracked 与本地产物中的精确匹配均为 0。全部
-  evaluator clone/workspace、trace、journal、report、模型产物、wheel 和扫描清单保持
-  ignored；评测产物未提交，只提交核心代码和清理后的过程文档/测试。
-- Task 36 前最终核心门禁为 full pytest 100% exit 0、Pyright 0 errors / 0 warnings、
-  wheel build 成功、diff/status clean。主工作区 tracked clean，仅有用户原有未跟踪
-  `AGENTS.md`，本任务未修改。Task 36 脱敏结果记录已完成，commit 为
-  `b303d52cf1e7cf2811d42c0aab917f056bc92922`（`docs(prbench): record full public
-  evaluation`）。Task 36 whole-branch review 与最终复验仍为 pending；独立 review 与
-  修复后完整门禁完成前，不提前声称 Task 36 整体完成。
+- 初次 Task 36 subagent 使用 `executing-plans` 与 `test-driven-development`，提交三次尝试
+  的脱敏记录 `b303d52cf1e7cf2811d42c0aab917f056bc92922`。用户随后扩展上限，本次最终补记继续使用
+  `test-driven-development`，严格只消费主 agent 提供的脱敏事实；没有打开或遍历 provider
+  文件、`.superpowers/sdd` 正式运行目录、任何 evaluator 报告/trace/workspace、凭据、
+  groundtruth 或 reference。先修改 `tests/test_docs_process.py`，再运行
+  `uv run pytest tests/test_docs_process.py -k "full_public" -v`，得到预期 2 failed / 29
+  deselected：README 仍写“最多三次”，且四份文档缺少最终五次事实。随后才最小修改
+  `README.md`、`PLAN.md`、`SPEC_PROCESS.md` 与本日志。
+- 固定 evaluator commit 为 `3e5bee4545cad2138832f06302e9c98bd81f5216`。用户把正式尝试上限从 3 次扩展到 5 次，
+  最后两次指定模型 `glm-5.2`；正式尝试次数为 5，上限已经用尽，
+  没有第 6 次。
+- 尝试 1：模型 `deepseek-v4-pro`，runner `tool_budget_exhausted`，50 次工具调用，`overall_score` 0.0。
+- 尝试 2：模型 `deepseek-v4-pro`，runner `provider_error`，13 次工具调用，`overall_score` 0.0。
+- 尝试 3：模型 `deepseek-v4-pro`，runner `approval_required`，42 次工具调用，20 项声明产物存在 13 项，7 项 CSV 存在 0 项，`overall_score` 0.17。
+- 尝试 4：模型 `glm-5.2`，runner `provider_error`，11 次工具调用，20 项声明产物存在 0 项，`overall_score` 0.0，约 720 秒。
+- 尝试 5：模型 `glm-5.2`，runner `provider_error`，11 次工具调用，20 项声明产物存在 0 项，white 约 662 秒、grader 约 700 秒，`overall_score` 0.0。
+- 最终终态：`provider_error`。最佳结果仍是未成功的尝试 3；成功标准始终是 runner
+  `completed` 与有效 green report 同时成立，五次均未满足，因此完整公开任务未跑通，
+  不记录为成功，也不把 0.17 写成 holdout 或课程总体成绩。
+- 首次模型响应前的基础设施/预检失败不计次数：两次 OpenCode 安装相关失败、一次旧
+  exact-equality contract preflight 失败，以及一次手动预检后的 double-adapter
+  clean-check 失败。
+- 正式运行期间修复/review 关键 commits：`4e831d1`、`a0f8df9`、`c3be45e..fb42598`、
+  `2011e84`、`1d30458`、`a5be873`、`1c410ab`、`f99cec8`。最终 contract spec review 为
+  Critical / Important / Minor = 0 / 0 / 0；quality review 为 0 / 0 / 1，Ready，唯一 Minor
+  是没有用任意未知组名做专门变异测试。artifact review 曾有两个非阻塞 Minor：缺少全局
+  CSV capture 总预算，以及缺少真实 Windows junction 集成覆盖。
+- 当前凭据泄漏扫描：HEAD 的 109 个 tracked regular blobs（仅 mode 100644/100755，排除
+  gitlink）中，两组 exact key 匹配 0、读取错误 0；本地 `.superpowers/sdd` 与 `dist` 排除
+  `.git`、`.venv`、`node_modules`、`_ground_truth`、`groundtruth`、`reference` 后的 1000 个
+  文件中，两组 exact key 匹配 0、读取错误 0，其中日志/trace/report/wheel 筛选出的 81 个
+  文件同样为两组 exact key 匹配 0、读取错误 0。7 个 provider/PRBench 相关环境变量均
+  absent，容器数 0。全部本地测试产物保持 ignored；评测产物未提交。
+- 2026-07-20 最终补记 GREEN：聚焦文档合同 2 passed / 29 deselected，完整文档测试 31
+  passed；最终文件状态下全仓 656 passed / 110 skipped，Pyright 0 errors / 0 warnings，
+  `git diff --check` 通过。提交范围只有四份过程文档与 `tests/test_docs_process.py`。
+- Task 36 脱敏结果记录已完成；Task 36 whole-branch review 与最终复验仍为 pending。
+  独立 review 与最终复验完成前，不提前声称 Task 36 整体完成。

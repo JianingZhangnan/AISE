@@ -302,7 +302,7 @@ blocker。不同脚本及 read/write 不能清除，AgentLoop 也不会二次调
 ## PRBench 完整公开任务设计迭代（2026-07-19，正式运行前）
 
 本轮目标是单个**完整公开任务** `task_white_1993`，不是 holdout，也不能推导课程最终
-成绩。正式真实 API / official evaluator 尚未运行；本节只记录为何推翻旧 baseline、
+成绩。本轮设计发生在正式真实 API / official evaluator 执行之前；本节只记录为何推翻旧 baseline、
 如何把确定性机制扩展到完整任务，以及用户批准的成功、尝试和 Git 边界。
 
 ### 第一轮：从全 `.py` provenance 到显式执行入口
@@ -336,7 +336,7 @@ runner-side read 假设，并由 `0d4582b`、`7547db2` 锁定 instruction 验证
 `7fe73aa..e51a82c` 最终 review clean。
 
 用户批准的边界是：每个 exact `argv` / `cwd` / script SHA-256 请求均由主 agent 阅读脚本
-后人工审批，并把请求对象原样原子追加到 active workspace；最多三次，每次使用新的固定
+后人工审批，并把请求对象原样原子追加到 active workspace；初始上限是 3 次，每次使用新的固定
 commit clone/workspace，首次白色模型响应前的基础设施失败不计数。成功必须同时具备 runner
 `completed` 与本轮新生成的有效 grader report；部分产物、mock GREEN 或单独 grader 片段
 都不能冒充成功。所有 evaluator workspace、trace、journal、报告和模型生成物保持本地
@@ -357,8 +357,8 @@ contract expected Python、cwd 等于 workspace、尾随 argv 路径与完整脚
 采纳的修订先把测试限制到“PRBench 完整公开任务（正式运行前门禁）”单一 H2 section，
 自然 RED 在同一次失败中同时列出错误 workspace 与缺失审批条件。README 随后按八步顺序
 写明路径/文件类型、解释器、脚本入口、精确 cwd、尾随参数、脚本拒绝项、内容哈希与最后
-原子批准；外部 attempt/clone 目录与 evaluator 内部 workspace 分开。正式运行仍未发生，
-本轮只修正文档与确定性合同。修正文档初步 GREEN 后，受控文本 mutation 临时把正确的
+原子批准；外部 attempt/clone 目录与 evaluator 内部 workspace 分开。在这个历史时点，
+本轮只修正文档与确定性合同，正式运行要到后续阶段才开始。修正文档初步 GREEN 后，受控文本 mutation 临时把正确的
 active workspace 句改回旧 `data/workspaces/task_white_1993_*`；section-scoped 测试得到
 1 failed，failure 精确显示 `missing=[]` 且 forbidden 只含旧路径。反向补丁恢复 README
 后，同一聚焦测试重新为 1 passed，证明合同能杀死本次真实路径回归。完整文档套件随后
@@ -371,41 +371,42 @@ Task 35 修复后独立复审完成，核对 BASE `7547db2a9ed8db98cb6b86d6ea95c
 
 ### 第五轮：task_white_1993 完整公开任务真实验收
 
-Task 35 之后的正式尝试暴露了真实 evaluator 文本 I/O、生产工具预算以及长推理响应的
-边界。采纳的确定性修订依次为：Task 34B / 34C 用 `31704dd`、`8625192` 修复 green / white
-evaluator UTF-8 文本 I/O；Task 34D 用 `ee11a09`、`4da448b` 增加分页、保留发现阶段工具
-配额并保持 event sink 兼容，review 为 0 / 0 / 0；Task 34E 用 `23b6747` 把 PRBench provider
-deadline 设为有界 600 秒，review 为 0 / 0 / 0，普通 adapter 的 120 秒 deadline 不变。
+Task 35 之后的正式尝试暴露了真实 evaluator 文本 I/O、生产工具预算、长推理响应以及
+artifact capture 边界。正式运行期间修复/review 关键 commits 为 `4e831d1`、`a0f8df9`、
+`c3be45e..fb42598`、`2011e84`、`1d30458`、`a5be873`、`1c410ab`、`f99cec8`。
 
-固定 evaluator commit 为 `3e5bee4545cad2138832f06302e9c98bd81f5216`，正式模型为
-`deepseek-v4-pro`。正式尝试次数为 3，上限已用尽；三次 official green grader 输出均为
-有效 grading JSON，且均没有结构化 `error`。实际结果如下：
+固定 evaluator commit 为 `3e5bee4545cad2138832f06302e9c98bd81f5216`。用户把正式尝试上限从 3 次扩展到 5 次，
+最后两次指定模型 `glm-5.2`；正式尝试次数为 5，上限已经用尽，
+没有第 6 次。实际结果如下：
 
-1. runner `tool_budget_exhausted`，50 次工具调用，约 279 秒，公开任务
-   `overall_score` 0.0。
-2. runner `provider_error`，13 次工具调用，white 阶段约 211 秒，grader 生命周期约
-   259.34 秒，公开任务 `overall_score` 0.0。过程记录只保留该结构化状态，不保留原始
-   错误。
-3. runner `approval_required`，42 次工具调用，white 阶段约 3454 秒，grader 生命周期
-   约 3539.93 秒，公开任务 `overall_score` 0.17。20 项声明产物中存在 13 项，7 项 CSV
-   中存在 0 项；人工安全审查未授予任何 `process.run` grant，资源风险脚本未执行。
+1. 尝试 1：模型 `deepseek-v4-pro`，runner `tool_budget_exhausted`，50 次工具调用，`overall_score` 0.0。
+2. 尝试 2：模型 `deepseek-v4-pro`，runner `provider_error`，13 次工具调用，`overall_score` 0.0。
+3. 尝试 3：模型 `deepseek-v4-pro`，runner `approval_required`，42 次工具调用，20 项声明产物存在 13 项，7 项 CSV 存在 0 项，`overall_score` 0.17。
+4. 尝试 4：模型 `glm-5.2`，runner `provider_error`，11 次工具调用，20 项声明产物存在 0 项，`overall_score` 0.0，约 720 秒。
+5. 尝试 5：模型 `glm-5.2`，runner `provider_error`，11 次工具调用，20 项声明产物存在 0 项，white 约 662 秒、grader 约 700 秒，`overall_score` 0.0。
 
-最终终态为 `approval_required`。成功合同要求 runner `completed` 与有效 green report
-同时成立，三次尝试均未达到，因此不能写成跑通或成功；0.17 只属于这一个完整公开任务，
-不是 holdout 或课程总体成绩。这也修正了“grader JSON 有效即可视作运行成功”的潜在误读：
-green grader 的结构有效性只证明评分生命周期完成，不能覆盖 runner 终态门禁。
+最佳结果仍是未成功的尝试 3。成功合同始终要求 runner `completed` 与有效 green report
+同时成立，五次均未满足，因此完整公开任务未跑通，不能写成成功；0.17 只属于这一个完整
+公开任务，不是 holdout 或课程总体成绩。首次模型响应前的基础设施/预检失败不计次数：
+两次 OpenCode 安装相关失败、一次旧 exact-equality contract preflight 失败，以及一次
+手动预检后的 double-adapter clean-check 失败。
 
-凭据泄漏扫描覆盖 108 个 tracked 普通文件和 1077 个本地日志、trace、report、wheel
-文件，读取错误为 0；两组 key 在 tracked 文件和本地产物中的精确匹配都为 0。所有
-evaluator clone/workspace、trace、journal、report、模型产物、wheel 与扫描清单继续
-保持 ignored；评测产物未提交，仓库只保留核心代码与清理后的过程文档/测试。
+最终 contract spec review 为 Critical / Important / Minor = 0 / 0 / 0；quality review
+为 0 / 0 / 1，Ready，唯一 Minor 是没有用任意未知组名做专门变异测试。artifact review
+曾有两个非阻塞 Minor：缺少全局 CSV capture 总预算，以及缺少真实 Windows junction
+集成覆盖。
 
-Task 36 前核心门禁为 full pytest 100% exit 0、Pyright 0 errors / 0 warnings、wheel
-build 成功、diff/status clean。主工作区 tracked clean，只有用户原有未跟踪
-`AGENTS.md`，本轮未修改。Task 36 使用文档合同先取得预期 RED，再写入上述脱敏摘要；
-不读取 evaluator workspace、报告正文、凭据、provider source 或 ground truth。
-Task 36 脱敏结果记录已完成；Task 36 whole-branch review 与最终复验仍为 pending，必须
-等待独立 review 与修复后完整门禁，不能提前记录 Task 36 整体完成。
+当前凭据泄漏扫描覆盖 HEAD 的 109 个 tracked regular blobs（仅 mode 100644/100755，排除
+gitlink），两组 exact key 匹配 0、读取错误 0；本地 `.superpowers/sdd` 与 `dist` 排除
+`.git`、`.venv`、`node_modules`、`_ground_truth`、`groundtruth`、`reference` 后的 1000 个
+文件同样为两组 exact key 匹配 0、读取错误 0，其中日志/trace/report/wheel 筛选出的 81 个
+文件也为两组 exact key 匹配 0、读取错误 0。7 个 provider/PRBench 相关环境变量均 absent，
+容器数 0。所有本地测试产物继续保持 ignored；评测产物未提交。
+
+Task 36 使用文档合同先取得预期 RED，再写入上述脱敏摘要；不读取 evaluator workspace、
+报告正文、凭据、provider source 或 ground truth。Task 36 脱敏结果记录已完成；Task 36
+whole-branch review 与最终复验仍为 pending，必须等待独立 review 与最终复验，不能提前
+记录 Task 36 整体完成。
 
 ## 仓库平台记录
 

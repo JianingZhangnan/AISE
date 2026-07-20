@@ -205,7 +205,7 @@ def test_docs_define_full_public_task_and_local_artifact_boundary() -> None:
         "不得生成通配 grant",
         "不得批准直接写 CSV",
         "不得静态预授权 `process.run`",
-        "最多三次",
+        "最多五次",
         "首次白色模型响应前失败",
         "基础设施预响应失败，不计数",
         "runner `completed`",
@@ -266,14 +266,85 @@ def test_docs_define_full_public_task_and_local_artifact_boundary() -> None:
 
 
 def test_process_docs_record_full_public_result_without_artifacts() -> None:
+    readme = _read("README.md")
     plan = _read("PLAN.md")
     process = _read("SPEC_PROCESS.md")
     log = _read("AGENT_LOG.md")
-    for document in (plan, process, log):
+    for document in (readme, plan, process, log):
         assert "task_white_1993 完整公开任务真实验收" in document
         assert "正式尝试次数" in document
         assert "评测产物未提交" in document
         assert "凭据泄漏扫描" in document
+
+    final_result_regions = {
+        "README.md": re.sub(
+            r"\s+",
+            " ",
+            _read_h2_section(readme, "PRBench 完整公开任务（正式运行前门禁）"),
+        ),
+        "PLAN.md": _normalized_region(
+            plan,
+            "### task_white_1993 完整公开任务真实验收",
+            None,
+        ),
+        "SPEC_PROCESS.md": _normalized_region(
+            process,
+            "### 第五轮：task_white_1993 完整公开任务真实验收",
+            "## 仓库平台记录",
+        ),
+        "AGENT_LOG.md": _normalized_region(
+            log,
+            "## 2026-07-19 Task 36：task_white_1993 完整公开任务真实验收",
+            None,
+        ),
+    }
+    shared_final_facts = (
+        "正式尝试上限从 3 次扩展到 5 次",
+        "正式尝试次数为 5",
+        "没有第 6 次",
+        "`glm-5.2`",
+        "runner `completed` 与有效 green report",
+        "完整公开任务未跑通",
+        "Task 36 脱敏结果记录已完成",
+        "Task 36 whole-branch review 与最终复验仍为 pending",
+    )
+    for name, region in final_result_regions.items():
+        missing = [fact for fact in shared_final_facts if fact not in region]
+        assert not missing, f"{name} missing final five-attempt facts: {missing}"
+        assert "正式尝试次数为 3" not in region
+
+    complete_record = " ".join(final_result_regions.values())
+    for fact in (
+        "尝试 1：模型 `deepseek-v4-pro`，runner `tool_budget_exhausted`，50 次工具调用，`overall_score` 0.0",
+        "尝试 2：模型 `deepseek-v4-pro`，runner `provider_error`，13 次工具调用，`overall_score` 0.0",
+        "尝试 3：模型 `deepseek-v4-pro`，runner `approval_required`，42 次工具调用，20 项声明产物存在 13 项，7 项 CSV 存在 0 项，`overall_score` 0.17",
+        "尝试 4：模型 `glm-5.2`，runner `provider_error`，11 次工具调用，20 项声明产物存在 0 项，`overall_score` 0.0，约 720 秒",
+        "尝试 5：模型 `glm-5.2`，runner `provider_error`，11 次工具调用，20 项声明产物存在 0 项，white 约 662 秒、grader 约 700 秒，`overall_score` 0.0",
+        "最佳结果仍是未成功的尝试 3",
+        "两次 OpenCode 安装相关失败",
+        "旧 exact-equality contract preflight",
+        "手动预检后的 double-adapter clean-check",
+        "4e831d1",
+        "a0f8df9",
+        "c3be45e..fb42598",
+        "2011e84",
+        "1d30458",
+        "a5be873",
+        "1c410ab",
+        "f99cec8",
+        "contract spec review 为 Critical / Important / Minor = 0 / 0 / 0",
+        "quality review 为 0 / 0 / 1，Ready",
+        "没有用任意未知组名做专门变异测试",
+        "缺少全局 CSV capture 总预算",
+        "缺少真实 Windows junction 集成覆盖",
+        "109 个 tracked regular blobs",
+        "1000 个文件",
+        "81 个文件",
+        "两组 exact key 匹配 0、读取错误 0",
+        "7 个 provider/PRBench 相关环境变量均 absent",
+        "容器数 0",
+    ):
+        assert fact in complete_record
     assert any(
         f"最终终态：`{status}`" in log
         for status in (
