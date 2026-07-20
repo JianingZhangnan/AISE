@@ -763,7 +763,7 @@ def test_public_full_restores_environment_and_passes_exact_fake_uv_arguments(
 
     evaluator = tmp_path / "evaluator"
     evaluator.mkdir()
-    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.4-py3-none-any.whl"
     wheel.write_bytes(b"fake wheel")
     wrapper = tmp_path / "invoke-full.ps1"
     wrapper.write_text(
@@ -971,7 +971,7 @@ def test_public_full_rejects_missing_provider_before_uv(
 
     evaluator = tmp_path / "evaluator"
     evaluator.mkdir()
-    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.4-py3-none-any.whl"
     wheel.write_bytes(b"fake wheel")
     environment = os.environ.copy()
     for name in ("PHYCODE_API_KEY", "PHYCODE_BASE_URL", "PHYCODE_MODEL"):
@@ -1047,7 +1047,7 @@ def test_public_smoke_restores_or_removes_opencode_environment_with_fake_uv(
         fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
     evaluator = tmp_path / "evaluator"
     evaluator.mkdir()
-    wheel = tmp_path / "phycode-0.1.3-py3-none-any.whl"
+    wheel = tmp_path / "phycode-0.1.4-py3-none-any.whl"
     wheel.write_bytes(b"fake wheel")
     wrapper = tmp_path / "invoke-smoke.ps1"
     wrapper.write_text(
