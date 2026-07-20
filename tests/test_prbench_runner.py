@@ -901,6 +901,7 @@ def test_runner_constructs_provider_only_from_phycode_environment(
     assert captured["api_key"] == "test-provider-secret"
     assert captured["base_url"] == "https://provider.example/v1"
     assert captured["model"] == "environment-model"
+    assert captured["timeout_seconds"] == 600.0
     persisted = "\n".join(
         path.read_text(encoding="utf-8")
         for path in (tmp_path / ".phycode").rglob("*")

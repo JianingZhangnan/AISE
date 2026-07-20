@@ -50,6 +50,8 @@ _EXIT_CODES = {
     PRBenchRunStatus.TOOL_BUDGET_EXHAUSTED: 8,
 }
 
+_PRBENCH_PROVIDER_TIMEOUT_SECONDS = 600.0
+
 
 class PRBenchArtifactSummary(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -486,6 +488,7 @@ def run_prbench(
                 api_key=provider.api_key.get_secret_value(),
                 base_url=provider.base_url,
                 model=provider.model,
+                timeout_seconds=_PRBENCH_PROVIDER_TIMEOUT_SECONDS,
             )
         except Exception:
             result = PRBenchRunResult(
