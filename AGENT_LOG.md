@@ -761,3 +761,24 @@
   消费端与测试字面量；「完整公开任务」历史章节的 0.1.3 引用继续保留。
 - 验证：`uv run pytest` 全量 671 passed / 98 skipped；`uvx pyright` 0 errors；`uv build`
   生成 0.1.5 wheel/sdist。随后推送 `v0.1.5` tag 走同一 Trusted Publishing 发布链路。
+- v0.1.5 发布确认：release workflow 通过，PyPI 0.1.5 端点验证新描述不含 PRBench/GAIA 且
+  含分步安装；GitHub Release v0.1.5 附 PyPI 回下载产物与 SHA256；
+  `uvx --no-cache phycode@0.1.5 version` 输出 `phycode 0.1.5`（发布后数分钟内 simple 索引
+  存在 CDN 缓存延迟，属正常）。
+
+## 2026-07-20 主 README 收敛：移出 PRBench/GAIA（Claude Code 主 agent）
+
+- 用户要求把主 README 中与作业要求无关的 GAIA、PRBench 内容直接删除，特别点名开头
+  「五次正式尝试未跑通」的消极状态陈述。处理原则：主 README 只保留课程要求的章节；
+  运行文档与历史事实**搬移而非丢弃**——PRBench 三层验证、smoke/完整任务入口、八步审批
+  门禁与五次尝试记录逐字节移入 `integrations/prbench/README.md`（与其描述的 adapter
+  同目录），GAIA 使用说明移入 `docs/gaia-eval.md`；PLAN/SPEC_PROCESS/AGENT_LOG 的过程
+  证据不动。
+- 文档 TDD（`edba81a` RED → `62f8983` GREEN）：先改 5 个合同——主 README 新增禁止出现
+  PRBench/GAIA/task_white_1993 的反向合同；`test_prbench_readme_separates…`、
+  `test_docs_define_full_public_task…`、`test_process_docs_record_full_public_result…`、
+  smoke 合同的 README 断言全部改指向 `integrations/prbench/README.md`；轮子一致性契约
+  去掉主 README 消费端。确认 5 failed 后执行搬移与残留清理（目录结构行、已知限制
+  bullet、许可证段的提法改为不含被禁词的中性表述），主 README 对三个被禁词命中为 0。
+- 验证：`uv run pytest` 全量 671 passed / 98 skipped；`uvx pyright` 0 errors / 0 warnings。
+  本轮为仓库文档重组，PyPI 描述（`README_PYPI.md`）未变，不需要发新版本。
