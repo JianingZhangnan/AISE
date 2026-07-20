@@ -290,6 +290,38 @@ def test_process_docs_record_full_public_result_without_artifacts() -> None:
     )
 
 
+def test_process_docs_keep_branch_review_pending_and_close_task35_review() -> None:
+    documents = {
+        name: re.sub(r"\s+", " ", _read(name))
+        for name in ("PLAN.md", "SPEC_PROCESS.md", "AGENT_LOG.md")
+    }
+    problems: list[str] = []
+    plan = documents["PLAN.md"]
+    if "- [x] Task 36A：脱敏结果记录" not in plan:
+        problems.append("PLAN.md does not limit completed work to Task 36A")
+    if "- [ ] Task 36B：whole-branch review 与最终复验（pending）" not in plan:
+        problems.append("PLAN.md does not keep Task 36B pending")
+
+    for name, document in documents.items():
+        for phrase in (
+            "Task 36 脱敏结果记录已完成",
+            "Task 36 whole-branch review 与最终复验仍为 pending",
+            "Task 35 修复后独立复审完成",
+            "Review clean，Critical / Important / Minor 为 0 / 0 / 0",
+        ):
+            if phrase not in document:
+                problems.append(f"{name} missing {phrase!r}")
+        for stale in (
+            "修复后独立复审尚未发生",
+            "修复后复审仍待执行",
+            "修复后复审尚未发生",
+        ):
+            if stale in document:
+                problems.append(f"{name} retains stale status {stale!r}")
+
+    assert not problems, problems
+
+
 def test_public_smoke_script_has_closed_credential_and_approval_contract():
     script = _read("integrations/prbench/run_public_smoke.ps1")
 

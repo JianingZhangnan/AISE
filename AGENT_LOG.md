@@ -629,8 +629,11 @@
   evaluator/runtime artifact 扫描均通过；feature worktree 只有五个预期文件，主
   checkout 仍是 tracked worktree 与 index clean、未跟踪 `AGENTS.md`。修复提交信息为
   `docs(prbench): harden full-run approval guide`，commit 为
-  `0c0b5b0f6e322e1c6a8e0f57d23716f24a1ec23f`；修复后复审尚未发生，不预先声称 review
-  clean。
+  `0c0b5b0f6e322e1c6a8e0f57d23716f24a1ec23f`。本条在修复完成时没有预写复审结论；
+  随后 Task 35 修复后独立复审完成，核对 BASE
+  `7547db2a9ed8db98cb6b86d6ea95c186e30192d7` 至 HEAD
+  `0c0b5b0f6e322e1c6a8e0f57d23716f24a1ec23f`，Review clean，Critical / Important / Minor
+  为 0 / 0 / 0，规格与文档/测试质量均通过。
 - 正式运行只属于主 agent：最多三次、首次白色响应前的基础设施失败不计数，每个动态
   request 必须人工核验 exact argv/cwd/hash 后原样原子批准；只有 runner `completed` 与
   有效 grader report 同时成立才算成功。所有评测产物不提交，功能分支不经授权不进入
@@ -666,6 +669,7 @@
   ignored；评测产物未提交，只提交核心代码和清理后的过程文档/测试。
 - Task 36 前最终核心门禁为 full pytest 100% exit 0、Pyright 0 errors / 0 warnings、
   wheel build 成功、diff/status clean。主工作区 tracked clean，仅有用户原有未跟踪
-  `AGENTS.md`，本任务未修改。Task 36 提交信息为
-  `docs(prbench): record full public evaluation`，commit hash 在提交后写入 ignored 脱敏
-  报告。
+  `AGENTS.md`，本任务未修改。Task 36 脱敏结果记录已完成，commit 为
+  `b303d52cf1e7cf2811d42c0aab917f056bc92922`（`docs(prbench): record full public
+  evaluation`）。Task 36 whole-branch review 与最终复验仍为 pending；独立 review 与
+  修复后完整门禁完成前，不提前声称 Task 36 整体完成。

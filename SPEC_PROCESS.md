@@ -363,8 +363,11 @@ active workspace 句改回旧 `data/workspaces/task_white_1993_*`；section-scop
 1 failed，failure 精确显示 `missing=[]` 且 forbidden 只含旧路径。反向补丁恢复 README
 后，同一聚焦测试重新为 1 passed，证明合同能杀死本次真实路径回归。完整文档套件随后
 为 27 passed，全仓 693 项达到 100% exit 0，Pyright 为 0 errors / 0 warnings；diff、
-凭据文件名/高置信模式与新增 evaluator/runtime artifact 扫描均通过。修复后复审仍待
-执行，不能把本轮 GREEN 记录为 review clean 或正式 evaluator 成功。
+凭据文件名/高置信模式与新增 evaluator/runtime artifact 扫描均通过。该阶段没有在复审
+发生前预写 clean，也没有把 GREEN 记录为正式 evaluator 成功；随后
+Task 35 修复后独立复审完成，核对 BASE `7547db2a9ed8db98cb6b86d6ea95c186e30192d7` 至 HEAD
+`0c0b5b0f6e322e1c6a8e0f57d23716f24a1ec23f`，Review clean，Critical / Important / Minor
+为 0 / 0 / 0，规格与文档/测试质量均通过。
 
 ### 第五轮：task_white_1993 完整公开任务真实验收
 
@@ -401,6 +404,8 @@ Task 36 前核心门禁为 full pytest 100% exit 0、Pyright 0 errors / 0 warnin
 build 成功、diff/status clean。主工作区 tracked clean，只有用户原有未跟踪
 `AGENTS.md`，本轮未修改。Task 36 使用文档合同先取得预期 RED，再写入上述脱敏摘要；
 不读取 evaluator workspace、报告正文、凭据、provider source 或 ground truth。
+Task 36 脱敏结果记录已完成；Task 36 whole-branch review 与最终复验仍为 pending，必须
+等待独立 review 与修复后完整门禁，不能提前记录 Task 36 整体完成。
 
 ## 仓库平台记录
 

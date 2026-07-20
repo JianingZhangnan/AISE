@@ -2545,7 +2545,7 @@ upstream import API 漂移；overlay 不修改上游依赖声明。最终只有 
 `task_white_1993` 建立确定性的 artifact provenance、紧凑上下文、固定 evaluator 入口
 与正式运行前文档门禁；它不代表 holdout 或课程最终成绩。实际依赖链为
 Task 32 → Task 33 → Task 34 → Task 35 → Task 34B/34C/34D/34E → 主 agent 最多三次
-正式验收 → Task 36 脱敏记录。
+正式验收 → Task 36A 脱敏记录 → Task 36B whole-branch review 与最终复验。
 
 - [x] Task 32：把可执行 Python artifact 与普通 expected Python 分开建模，只允许
   `execution_entrypoints` 为 CSV 提供成功 execution provenance，并增加 CSV 数据行数
@@ -2584,8 +2584,10 @@ Task 32 → Task 33 → Task 34 → Task 35 → Task 34B/34C/34D/34E → 主 age
   判别性 RED；恢复后聚焦测试 1 passed、完整文档 27 passed，全仓 693 项达到 100%
   exit 0，Pyright 0 / 0，diff、凭据与新增运行产物扫描通过。修复提交信息为
   `docs(prbench): harden full-run approval guide`，commit 为
-  `0c0b5b0f6e322e1c6a8e0f57d23716f24a1ec23f`；修复后独立复审尚未发生，不预先声明
-  review clean。
+  `0c0b5b0f6e322e1c6a8e0f57d23716f24a1ec23f`。该阶段遵守先修复、后复审的顺序，没有
+  预写 clean 结论；随后 Task 35 修复后独立复审完成，核对范围为
+  `7547db2a9ed8db98cb6b86d6ea95c186e30192d7..0c0b5b0f6e322e1c6a8e0f57d23716f24a1ec23f`，
+  Review clean，Critical / Important / Minor 为 0 / 0 / 0，规格与文档/测试质量均通过。
 - [x] Task 34B / 34C：分别修复 green evaluator 与 white evaluator 的 UTF-8 文本
   I/O，提交 `31704dd6aa2ca72dd9367a07ed7e00000f431d1d` 与
   `86251927aa00e3967408637e2838eb7b03816c79`。
@@ -2595,10 +2597,12 @@ Task 32 → Task 33 → Task 34 → Task 35 → Task 34B/34C/34D/34E → 主 age
 - [x] Task 34E：把 PRBench adapter 的 provider deadline 调整为有界 600 秒，提交
   `23b67474d73d206d531a199e7dbcb95456022080`，最终 review clean，0 / 0 / 0；普通
   adapter 的 120 秒 deadline 保持不变。
-- [x] Task 36：只消费主 agent 提供的脱敏摘要，记录三次未成功正式验收、泄漏扫描与
-  whole-branch 门禁；只修改过程文档及其合同测试。提交信息为
-  `docs(prbench): record full public evaluation`，hash 由提交后的 ignored Task 36
-  报告记录。
+- [x] Task 36A：脱敏结果记录。Task 36 脱敏结果记录已完成：只消费主 agent 提供的
+  脱敏摘要，记录三次未成功正式验收与泄漏扫描，只修改过程文档及其合同测试；commit
+  为 `b303d52cf1e7cf2811d42c0aab917f056bc92922`。
+- [ ] Task 36B：whole-branch review 与最终复验（pending）。Task 36 whole-branch review
+  与最终复验仍为 pending；在独立 review 清零 Critical / Important 并完成修复后复验前，
+  不得把 Task 36 整体标为完成。
 
 ### task_white_1993 完整公开任务真实验收
 
