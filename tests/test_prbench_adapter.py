@@ -134,7 +134,11 @@ def patched_official_evaluator(tmp_path: Path) -> Path:
 
 
 def _load_function(
-    source: Path, function_name: str, globals_: dict[str, object]
+    source: Path,
+    function_name: str,
+    globals_: dict[str, object],
+    *,
+    dependencies: tuple[str, ...] = (),
 ) -> Callable[..., object]:
     """Load one real function without importing the evaluator's optional stack."""
     tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
@@ -145,6 +149,12 @@ def _load_function(
         and node.name == function_name
     )
     function.decorator_list = []
+    dependency_functions = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in dependencies
+    ]
     module = ast.Module(
         body=[
             ast.ImportFrom(
@@ -152,6 +162,7 @@ def _load_function(
                 names=[ast.alias(name="annotations")],
                 level=0,
             ),
+            *dependency_functions,
             function,
         ],
         type_ignores=[],
@@ -180,6 +191,12 @@ def _load_launcher_output_helpers(
         "os": os_module,
         "stat": stat,
     }
+    validate_phycode_contract = _load_function(
+        launcher_path,
+        "_validate_phycode_contract",
+        {"json": json, "open": open_function, "os": os_module},
+    )
+    helper_globals["_validate_phycode_contract"] = validate_phycode_contract
     return {
         "_load_verified_json": _load_function(
             launcher_path, "_load_verified_json", helper_globals
@@ -188,6 +205,7 @@ def _load_launcher_output_helpers(
         "_remove_stale_output": _load_function(
             launcher_path, "_remove_stale_output", helper_globals
         ),
+        "_validate_phycode_contract": validate_phycode_contract,
     }
 
 
@@ -954,7 +972,17 @@ def test_official_launcher_does_not_double_remove_after_setup_self_cleanup(
     task_root.mkdir(parents=True)
     (task_root / "task.yaml").write_text("public task", encoding="utf-8")
     contract = tmp_path / "contract.json"
-    contract.write_text("{}", encoding="utf-8")
+    contract.write_text(
+        json.dumps(
+            {
+                "instruction_file": "instruction.md",
+                "paper_file": "paper.md",
+                "input_files": [],
+                "expected_files": [],
+            }
+        ),
+        encoding="utf-8",
+    )
     owned_remove_calls: list[bool] = []
     outer_remove_calls: list[str | None] = []
     setup_error = RuntimeError("setup failed after owned cleanup")
@@ -1002,10 +1030,12 @@ def test_official_launcher_does_not_double_remove_after_setup_self_cleanup(
             "stat": stat,
             "yaml": types.SimpleNamespace(
                 safe_load=lambda _handle: {
+                    "instruction_file": "instruction.md",
                     "docker": {},
                     "paper": {
                         "title": "Public task",
                         "author": "Public author",
+                        "paper_file": "paper.md",
                     },
                 }
             ),
@@ -1638,21 +1668,63 @@ def test_official_launcher_rejects_invalid_phycode_limits_before_container_setup
 
 @pytest.mark.parametrize(
     "contract_case",
-    ["missing", "empty", "whitespace", "unavailable", "directory"],
+    [
+        "malformed",
+        "non_object",
+        "schema",
+        "filename",
+        "input_files",
+        "expected_files",
+    ],
 )
-def test_official_launcher_requires_explicit_phycode_contract_before_agent_side_effects(
+def test_official_launcher_rejects_untrusted_phycode_contract_before_agent_side_effects(
     patched_official_evaluator: Path,
     tmp_path: Path,
     contract_case: str,
 ) -> None:
     side_effects: list[str] = []
-    contract_values: dict[str, str | None] = {
-        "missing": None,
-        "empty": "",
-        "whitespace": "   ",
-        "unavailable": str(tmp_path / "missing-contract.json"),
-        "directory": str(tmp_path),
+    task_root = tmp_path / "tasks/public-task"
+    task_root.mkdir(parents=True)
+    (task_root / "task.yaml").write_text("public task", encoding="utf-8")
+    task_config = {
+        "instruction_file": "instruction.md",
+        "paper": {
+            "title": "Public task",
+            "author": "Public author",
+            "paper_file": "paper.md",
+        },
+        "input_files": ["input.csv"],
+        "expected_outputs": {
+            "code": ["reproduce.py"],
+            "data": ["result.csv"],
+        },
     }
+    contract_payload: dict[str, object] | list[object] = {
+        "instruction_file": "instruction.md",
+        "paper_file": "paper.md",
+        "input_files": ["input.csv"],
+        "expected_files": ["reproduce.py", "result.csv"],
+    }
+    if contract_case == "non_object":
+        contract_payload = []
+    elif contract_case == "schema":
+        assert isinstance(contract_payload, dict)
+        contract_payload["unexpected"] = True
+    elif contract_case == "filename":
+        assert isinstance(contract_payload, dict)
+        contract_payload["instruction_file"] = "../instruction.md"
+    elif contract_case == "input_files":
+        assert isinstance(contract_payload, dict)
+        contract_payload["input_files"] = []
+    elif contract_case == "expected_files":
+        assert isinstance(contract_payload, dict)
+        contract_payload["expected_files"] = ["reproduce.py"]
+
+    contract = tmp_path / "contract.json"
+    contract.write_text(
+        "{" if contract_case == "malformed" else json.dumps(contract_payload),
+        encoding="utf-8",
+    )
 
     def resolve_env(_agent_type: str) -> dict[str, str]:
         side_effects.append("resolve-env")
@@ -1660,34 +1732,52 @@ def test_official_launcher_requires_explicit_phycode_contract_before_agent_side_
 
     def setup_docker_environment(*_args: object, **_kwargs: object) -> object:
         side_effects.append("docker-setup")
-        return object()
+        raise RuntimeError("agent side effect reached")
 
     launch_evaluation = _load_function(
         patched_official_evaluator / "src/launcher.py",
         "launch_evaluation",
         {
             "DATA_DIR": str(tmp_path / "tasks"),
+            "_copy_input_files": lambda *_args: None,
+            "_copy_paper_images": lambda *_args: None,
+            "_copy_paper_markdown": lambda *_args: None,
+            "_copy_phycode_controls": lambda *_args: None,
+            "_archive_trace": lambda *_args: None,
+            "_archive_workspace": lambda *_args: "archive-destination",
+            "_export_traces_for_type": lambda *_args: None,
+            "_kill_process": lambda *_args: None,
+            "_path_is_within": lambda *_args: True,
+            "_remove_container": lambda *_args: None,
+            "_remove_stale_output": lambda *_args: None,
             "find_free_port_pair": lambda: (9001, 9002),
-            "logger": types.SimpleNamespace(error=lambda *_: None),
+            "json": json,
+            "logger": types.SimpleNamespace(
+                error=lambda *_: None,
+                info=lambda *_: None,
+            ),
             "logging": types.SimpleNamespace(
                 INFO=20,
                 basicConfig=lambda **_kwargs: None,
                 FileHandler=lambda *_args: object(),
                 StreamHandler=lambda *_args: object(),
             ),
+            "open": open,
             "os": os,
             "resolve_env": resolve_env,
             "setup_docker_environment": setup_docker_environment,
+            "yaml": types.SimpleNamespace(safe_load=lambda _handle: task_config),
         },
+        dependencies=("_validate_phycode_contract",),
     )
 
-    with pytest.raises(ValueError, match="explicit PhyCode contract"):
+    with pytest.raises(ValueError, match="PhyCode contract"):
         asyncio.run(
             launch_evaluation(  # type: ignore[arg-type]
                 task_id="public-task",
                 white_agent_type="phycode",
                 green_agent_type="opencode",
-                phycode_contract=contract_values[contract_case],
+                phycode_contract=str(contract),
             )
         )
 
@@ -1704,10 +1794,21 @@ def test_official_phycode_controls_reject_missing_contract_without_fallback(
     workspace.mkdir()
     (task_dir / "instruction.md").write_text("public instruction", encoding="utf-8")
     (workspace / "paper.md").write_text("public paper", encoding="utf-8")
+    launcher = patched_official_evaluator / "src/launcher.py"
+    validate_contract = _load_function(
+        launcher,
+        "_validate_phycode_contract",
+        {"json": json, "open": open, "os": os},
+    )
     copy_controls = _load_function(
-        patched_official_evaluator / "src/launcher.py",
+        launcher,
         "_copy_phycode_controls",
-        {"json": json, "os": os, "shutil": shutil},
+        {
+            "_validate_phycode_contract": validate_contract,
+            "json": json,
+            "os": os,
+            "shutil": shutil,
+        },
     )
     task_config = {
         "instruction_file": "instruction.md",
@@ -1745,22 +1846,38 @@ def test_official_phycode_controls_copy_explicit_contract_exactly(
             "paper_file": "paper.md",
             "expected_files": ["result.csv"],
             "constraints": [
-                {"path": "result.csv", "csv_header": ["结果"], "csv_min_rows": 1}
+                {
+                    "path": "result.csv",
+                    "csv_header": ["结果"],
+                    "csv_data_row_count": 1,
+                }
             ],
         },
         ensure_ascii=False,
     )
     contract.write_text(contract_text, encoding="utf-8")
+    launcher = patched_official_evaluator / "src/launcher.py"
+    validate_contract = _load_function(
+        launcher,
+        "_validate_phycode_contract",
+        {"json": json, "open": open, "os": os},
+    )
     copy_controls = _load_function(
-        patched_official_evaluator / "src/launcher.py",
+        launcher,
         "_copy_phycode_controls",
-        {"json": json, "os": os, "shutil": shutil},
+        {
+            "_validate_phycode_contract": validate_contract,
+            "json": json,
+            "os": os,
+            "shutil": shutil,
+        },
     )
 
     copy_controls(  # type: ignore[operator]
         {
             "instruction_file": "instruction.md",
             "paper": {"paper_file": "paper.md"},
+            "expected_outputs": {"data": ["result.csv"]},
         },
         str(task_dir),
         str(workspace),
@@ -2173,7 +2290,17 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
     task_root.mkdir(parents=True)
     (task_root / "task.yaml").write_text("public task", encoding="utf-8")
     contract = tmp_path / "contract.json"
-    contract.write_text("{}", encoding="utf-8")
+    contract.write_text(
+        json.dumps(
+            {
+                "instruction_file": "instruction.md",
+                "paper_file": "paper.md",
+                "input_files": [],
+                "expected_files": [],
+            }
+        ),
+        encoding="utf-8",
+    )
     report_path = task_root / "workspace/eval_logs/eval_report.json"
     run_result_path = task_root / "workspace/.phycode/prbench/run_result.json"
     if outcome == "stale_report":
@@ -2341,6 +2468,7 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
             "time": types.SimpleNamespace(time=lambda: 1.0),
             "yaml": types.SimpleNamespace(
                 safe_load=lambda _handle: {
+                    "instruction_file": "instruction.md",
                     "paper": {
                         "title": "Public task",
                         "author": "Public author",
@@ -3549,20 +3677,15 @@ def test_patch_uses_explicit_controls_and_minimal_provider_environment() -> None
     assert "ground_truth_data_dir" not in patch
 
 
-def test_patch_validates_explicit_phycode_contract_before_provider_resolution() -> None:
-    launcher = "\n".join(_added_hunks("src/launcher.py"))
-
-    assert "not phycode_contract.strip()" in launcher
-    assert "not os.path.isfile(phycode_contract)" in launcher
-    assert launcher.index("not phycode_contract.strip()") < launcher.index(
-        "phycode_provider_env = "
-    )
-
-
 def test_patch_removes_generated_phycode_contract_fallback() -> None:
     launcher = "\n".join(_added_hunks("src/launcher.py"))
 
-    assert "expected_config = task_config.get" not in launcher
+    assert "def _validate_phycode_contract(" in launcher
+    assert launcher.count("_validate_phycode_contract(") == 3
+    assert launcher.index("phycode_contract = _validate_phycode_contract(") < (
+        launcher.index('phycode_provider_env = resolve_env("phycode")')
+    )
+    assert "json.dump(contract" not in launcher
     assert "Explicit PhyCode contract is required" in launcher
 
 
