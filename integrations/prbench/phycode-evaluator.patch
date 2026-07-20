@@ -348,7 +348,7 @@ index c705de8..62b1e15 100644
 +            or not _path_is_within(workspace_dir, output_path)
 +        ):
 +            return False, None
-+        with open(output_path, "r") as handle:
++        with open(output_path, "r", encoding="utf-8") as handle:
 +            payload = json.load(handle)
 +    except (FileNotFoundError, OSError, TypeError, ValueError):
 +        return False, None
@@ -403,33 +403,33 @@ index c705de8..62b1e15 100644
 +                raise RuntimeError("PhyCode control destination is not a file")
 +            os.remove(destination)
 +
-+    if contract_file:
-+        if not os.path.isfile(contract_file):
-+            raise RuntimeError("Explicit PhyCode contract is unavailable")
-+        shutil.copy2(contract_file, contract_dst)
-+    else:
-+        expected_config = task_config.get("expected_outputs", {})
-+        if code_only:
-+            expected_config = task_config.get("code_only", {}).get(
-+                "expected_outputs", expected_config
-+            )
-+        expected_files = [
-+            path
-+            for group in ("code", "data")
-+            for path in expected_config.get(group, [])
-+        ]
-+        contract = {
-+            "instruction_file": os.path.basename(instruction_file),
-+            "paper_file": os.path.basename(paper_file),
-+            "input_files": [
-+                os.path.basename(path) for path in task_config.get("input_files", [])
-+            ],
-+            "expected_files": expected_files,
-+            "constraints": [],
-+        }
-+        with open(contract_dst, "w", encoding="utf-8") as handle:
-+            json.dump(contract, handle, indent=2)
-+            handle.write("\n")
++    if not isinstance(contract_file, str) or not contract_file.strip():
++        raise RuntimeError("Explicit PhyCode contract is required")
++    contract_file = contract_file.strip()
++    if not os.path.isfile(contract_file):
++        raise RuntimeError("Explicit PhyCode contract is unavailable")
++    try:
++        with open(contract_file, "r", encoding="utf-8") as handle:
++            contract = json.load(handle)
++    except (OSError, TypeError, ValueError):
++        raise RuntimeError("Explicit PhyCode contract is invalid") from None
++    if not isinstance(contract, dict):
++        raise RuntimeError("Explicit PhyCode contract is invalid")
++    if contract.get("instruction_file") != os.path.basename(instruction_file):
++        raise RuntimeError("Explicit PhyCode contract is invalid")
++    if contract.get("paper_file") != os.path.basename(paper_file):
++        raise RuntimeError("Explicit PhyCode contract is invalid")
++    declared_input_files = [
++        os.path.basename(path) for path in task_config.get("input_files", [])
++    ]
++    if contract.get("input_files", []) != declared_input_files:
++        raise RuntimeError("Explicit PhyCode contract is invalid")
++    expected_files = contract.get("expected_files")
++    if not isinstance(expected_files, list):
++        raise RuntimeError("Explicit PhyCode contract is invalid")
++    if any(not isinstance(path, str) or not path for path in expected_files):
++        raise RuntimeError("Explicit PhyCode contract is invalid")
++    shutil.copy2(contract_file, contract_dst)
 +
 +    if approvals_file:
 +        if not os.path.isfile(approvals_file):
@@ -569,9 +569,9 @@ index c705de8..62b1e15 100644
 +        raise ValueError("PhyCode is supported only as the white task-solving agent")
 +    if effective_white_type == "phycode" and code_only:
 +        raise ValueError("PhyCode adapter supports only full verified evaluations")
-+    phycode_provider_env = (
-+        resolve_env("phycode") if effective_white_type == "phycode" else {}
-+    )
++    if effective_white_type == "phycode" and (not isinstance(phycode_contract, str) or not phycode_contract.strip() or not os.path.isfile(phycode_contract)):
++        raise ValueError("PhyCode white run requires an explicit PhyCode contract file")
++    phycode_provider_env = resolve_env("phycode") if effective_white_type == "phycode" else {}
 @@ -357 +538 @@ async def launch_evaluation(
 -        return
 +        return False

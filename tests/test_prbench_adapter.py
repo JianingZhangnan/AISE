@@ -191,6 +191,36 @@ def _load_launcher_output_helpers(
     }
 
 
+def _text_open_calls_missing_utf8(source: Path) -> list[int]:
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    missing_utf8: list[int] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "open"
+        ):
+            continue
+        mode_node = node.args[1] if len(node.args) > 1 else None
+        mode_node = next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "mode"),
+            mode_node,
+        )
+        mode = mode_node.value if isinstance(mode_node, ast.Constant) else "r"
+        if isinstance(mode, str) and "b" in mode:
+            continue
+        encoding_node = next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "encoding"),
+            None,
+        )
+        if not (
+            isinstance(encoding_node, ast.Constant)
+            and encoding_node.value == "utf-8"
+        ):
+            missing_utf8.append(node.lineno)
+    return missing_utf8
+
+
 def _load_agent_env(source: Path) -> types.ModuleType:
     spec = importlib.util.spec_from_file_location("patched_agent_env", source)
     assert spec is not None and spec.loader is not None
@@ -600,33 +630,7 @@ def test_official_green_agent_text_open_calls_use_utf8(
     patched_official_evaluator: Path,
 ) -> None:
     source = patched_official_evaluator / "src/green_agent/agent.py"
-    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
-    missing_utf8: list[int] = []
-
-    for node in ast.walk(tree):
-        if not (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "open"
-        ):
-            continue
-        mode_node = node.args[1] if len(node.args) > 1 else None
-        mode_node = next(
-            (keyword.value for keyword in node.keywords if keyword.arg == "mode"),
-            mode_node,
-        )
-        mode = mode_node.value if isinstance(mode_node, ast.Constant) else "r"
-        if isinstance(mode, str) and "b" in mode:
-            continue
-        encoding_node = next(
-            (keyword.value for keyword in node.keywords if keyword.arg == "encoding"),
-            None,
-        )
-        if not (
-            isinstance(encoding_node, ast.Constant)
-            and encoding_node.value == "utf-8"
-        ):
-            missing_utf8.append(node.lineno)
+    missing_utf8 = _text_open_calls_missing_utf8(source)
 
     assert missing_utf8 == [], (
         "green evaluator text open calls missing encoding='utf-8' at lines "
@@ -651,33 +655,7 @@ def test_official_white_agent_text_open_calls_use_utf8(
     patched_official_evaluator: Path,
 ) -> None:
     source = patched_official_evaluator / "src/white_agent/agent.py"
-    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
-    missing_utf8: list[int] = []
-
-    for node in ast.walk(tree):
-        if not (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "open"
-        ):
-            continue
-        mode_node = node.args[1] if len(node.args) > 1 else None
-        mode_node = next(
-            (keyword.value for keyword in node.keywords if keyword.arg == "mode"),
-            mode_node,
-        )
-        mode = mode_node.value if isinstance(mode_node, ast.Constant) else "r"
-        if isinstance(mode, str) and "b" in mode:
-            continue
-        encoding_node = next(
-            (keyword.value for keyword in node.keywords if keyword.arg == "encoding"),
-            None,
-        )
-        if not (
-            isinstance(encoding_node, ast.Constant)
-            and encoding_node.value == "utf-8"
-        ):
-            missing_utf8.append(node.lineno)
+    missing_utf8 = _text_open_calls_missing_utf8(source)
 
     assert missing_utf8 == [], (
         "white evaluator text open calls missing encoding='utf-8' at lines "
@@ -746,6 +724,51 @@ def test_official_white_instruction_writer_round_trips_utf8(
     write_instruction(target, expected)
 
     assert target.read_text(encoding="utf-8") == expected
+
+
+def test_official_launcher_text_open_calls_use_utf8(
+    patched_official_evaluator: Path,
+) -> None:
+    source = patched_official_evaluator / "src/launcher.py"
+    missing_utf8 = _text_open_calls_missing_utf8(source)
+
+    assert missing_utf8 == [], (
+        "launcher text open calls missing encoding='utf-8' at lines "
+        f"{missing_utf8}"
+    )
+
+
+def test_official_launcher_verified_json_round_trips_utf8_without_platform_default(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+) -> None:
+    def windows_text_open(
+        path: str | os.PathLike[str],
+        mode: str = "r",
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        kwargs.setdefault("encoding", "gbk")
+        return open(path, mode, *args, **kwargs)  # type: ignore[call-overload]
+
+    launcher = patched_official_evaluator / "src/launcher.py"
+    helpers = _load_launcher_output_helpers(
+        launcher,
+        os,
+        open_function=windows_text_open,
+    )
+    load_verified_json = helpers["_load_verified_json"]
+    expected = {"summary": "Chinese: 中文; non-GBK: 🧪"}
+    output = tmp_path / "result.json"
+    output.write_text(
+        json.dumps(expected, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    valid, payload = load_verified_json(str(tmp_path), str(output))  # type: ignore[operator]
+
+    assert valid is True
+    assert payload == expected
 
 
 def test_official_phycode_setup_defers_green_credentials_until_grading(
@@ -930,6 +953,8 @@ def test_official_launcher_does_not_double_remove_after_setup_self_cleanup(
     task_root = tmp_path / "tasks/public-task"
     task_root.mkdir(parents=True)
     (task_root / "task.yaml").write_text("public task", encoding="utf-8")
+    contract = tmp_path / "contract.json"
+    contract.write_text("{}", encoding="utf-8")
     owned_remove_calls: list[bool] = []
     outer_remove_calls: list[str | None] = []
     setup_error = RuntimeError("setup failed after owned cleanup")
@@ -997,6 +1022,7 @@ def test_official_launcher_does_not_double_remove_after_setup_self_cleanup(
                     white_port=9002,
                     white_agent_type="phycode",
                     green_agent_type="opencode",
+                    phycode_contract=str(contract),
                     archive=False,
                 ),
             )
@@ -1610,6 +1636,145 @@ def test_official_launcher_rejects_invalid_phycode_limits_before_container_setup
         asyncio.run(launch_evaluation(**limits))  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    "contract_case",
+    ["missing", "empty", "whitespace", "unavailable", "directory"],
+)
+def test_official_launcher_requires_explicit_phycode_contract_before_agent_side_effects(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+    contract_case: str,
+) -> None:
+    side_effects: list[str] = []
+    contract_values: dict[str, str | None] = {
+        "missing": None,
+        "empty": "",
+        "whitespace": "   ",
+        "unavailable": str(tmp_path / "missing-contract.json"),
+        "directory": str(tmp_path),
+    }
+
+    def resolve_env(_agent_type: str) -> dict[str, str]:
+        side_effects.append("resolve-env")
+        return {}
+
+    def setup_docker_environment(*_args: object, **_kwargs: object) -> object:
+        side_effects.append("docker-setup")
+        return object()
+
+    launch_evaluation = _load_function(
+        patched_official_evaluator / "src/launcher.py",
+        "launch_evaluation",
+        {
+            "DATA_DIR": str(tmp_path / "tasks"),
+            "find_free_port_pair": lambda: (9001, 9002),
+            "logger": types.SimpleNamespace(error=lambda *_: None),
+            "logging": types.SimpleNamespace(
+                INFO=20,
+                basicConfig=lambda **_kwargs: None,
+                FileHandler=lambda *_args: object(),
+                StreamHandler=lambda *_args: object(),
+            ),
+            "os": os,
+            "resolve_env": resolve_env,
+            "setup_docker_environment": setup_docker_environment,
+        },
+    )
+
+    with pytest.raises(ValueError, match="explicit PhyCode contract"):
+        asyncio.run(
+            launch_evaluation(  # type: ignore[arg-type]
+                task_id="public-task",
+                white_agent_type="phycode",
+                green_agent_type="opencode",
+                phycode_contract=contract_values[contract_case],
+            )
+        )
+
+    assert side_effects == []
+
+
+def test_official_phycode_controls_reject_missing_contract_without_fallback(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+) -> None:
+    task_dir = tmp_path / "task"
+    workspace = task_dir / "workspace"
+    task_dir.mkdir()
+    workspace.mkdir()
+    (task_dir / "instruction.md").write_text("public instruction", encoding="utf-8")
+    (workspace / "paper.md").write_text("public paper", encoding="utf-8")
+    copy_controls = _load_function(
+        patched_official_evaluator / "src/launcher.py",
+        "_copy_phycode_controls",
+        {"json": json, "os": os, "shutil": shutil},
+    )
+    task_config = {
+        "instruction_file": "instruction.md",
+        "paper": {"paper_file": "paper.md"},
+        "expected_outputs": {"code": ["reproduce.py"], "data": ["result.csv"]},
+    }
+
+    with pytest.raises(RuntimeError, match="explicit PhyCode contract"):
+        copy_controls(  # type: ignore[operator]
+            task_config,
+            str(task_dir),
+            str(workspace),
+            None,
+            None,
+            False,
+        )
+
+    assert not (workspace / "task_contract.json").exists()
+
+
+def test_official_phycode_controls_copy_explicit_contract_exactly(
+    patched_official_evaluator: Path,
+    tmp_path: Path,
+) -> None:
+    task_dir = tmp_path / "task"
+    workspace = task_dir / "workspace"
+    task_dir.mkdir()
+    workspace.mkdir()
+    (task_dir / "instruction.md").write_text("public instruction", encoding="utf-8")
+    (workspace / "paper.md").write_text("public paper", encoding="utf-8")
+    contract = tmp_path / "public-contract.json"
+    contract_text = json.dumps(
+        {
+            "instruction_file": "instruction.md",
+            "paper_file": "paper.md",
+            "expected_files": ["result.csv"],
+            "constraints": [
+                {"path": "result.csv", "csv_header": ["结果"], "csv_min_rows": 1}
+            ],
+        },
+        ensure_ascii=False,
+    )
+    contract.write_text(contract_text, encoding="utf-8")
+    copy_controls = _load_function(
+        patched_official_evaluator / "src/launcher.py",
+        "_copy_phycode_controls",
+        {"json": json, "os": os, "shutil": shutil},
+    )
+
+    copy_controls(  # type: ignore[operator]
+        {
+            "instruction_file": "instruction.md",
+            "paper": {"paper_file": "paper.md"},
+        },
+        str(task_dir),
+        str(workspace),
+        str(contract),
+        None,
+        False,
+    )
+
+    assert (workspace / "task_contract.json").read_text(encoding="utf-8") == contract_text
+    assert json.loads(
+        (workspace / "phycode-approvals.json").read_text(encoding="utf-8")
+    ) == {"grants": []}
+
+
 def test_official_main_and_white_runner_pass_approval_wait_only_to_phycode(
     patched_official_evaluator: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2007,6 +2172,8 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
     task_root = tmp_path / "tasks/public-task"
     task_root.mkdir(parents=True)
     (task_root / "task.yaml").write_text("public task", encoding="utf-8")
+    contract = tmp_path / "contract.json"
+    contract.write_text("{}", encoding="utf-8")
     report_path = task_root / "workspace/eval_logs/eval_report.json"
     run_result_path = task_root / "workspace/.phycode/prbench/run_result.json"
     if outcome == "stale_report":
@@ -2188,6 +2355,7 @@ def test_official_launcher_returns_report_success_and_always_runs_cleanup(
                 white_port=9002,
                 white_agent_type="phycode",
                 green_agent_type="opencode",
+                phycode_contract=str(contract),
                 phycode_max_tool_calls=50,
                 phycode_max_context_chars=24_000,
             ),
@@ -3374,6 +3542,29 @@ def test_patch_uses_explicit_controls_and_minimal_provider_environment() -> None
     assert "PHYCODE_MODEL" in patch
     assert "metadata_file" not in patch
     assert "ground_truth_data_dir" not in patch
+
+
+def test_patch_validates_explicit_phycode_contract_before_provider_resolution() -> None:
+    launcher = "\n".join(_added_hunks("src/launcher.py"))
+
+    assert "not phycode_contract.strip()" in launcher
+    assert "not os.path.isfile(phycode_contract)" in launcher
+    assert launcher.index("not phycode_contract.strip()") < launcher.index(
+        "phycode_provider_env = "
+    )
+
+
+def test_patch_removes_generated_phycode_contract_fallback() -> None:
+    launcher = "\n".join(_added_hunks("src/launcher.py"))
+
+    assert "expected_config = task_config.get" not in launcher
+    assert "Explicit PhyCode contract is required" in launcher
+
+
+def test_patch_launcher_verified_json_uses_explicit_utf8() -> None:
+    launcher = "\n".join(_added_hunks("src/launcher.py"))
+
+    assert 'with open(output_path, "r", encoding="utf-8") as handle:' in launcher
 
 
 def test_patch_uses_pinned_uv_without_pip_bootstrap() -> None:
