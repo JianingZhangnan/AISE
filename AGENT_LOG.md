@@ -741,3 +741,23 @@
   `tools list` 正常。注意事项：不带版本的 `uvx phycode` 在本机曾输出 0.1.2，经核实为本机
   历史 `uv tool install` 的旧工具环境优先所致；已解包核对 PyPI wheel 内
   `__version__ = "0.1.4"`，与发布产物无关。
+
+## 2026-07-20 v0.1.5：PyPI 页面重写（Claude Code 主 agent）
+
+- 用户反馈 PyPI 页面描述不合格：GAIA/PRBench 内容对最终用户无意义、安装方式太模糊；同时
+  要求删除过时的未跟踪文件 `docs/PROJECT_GAP_ANALYSIS.md`（已删除，其中含「PyPI 已完成」等
+  与现状不符的结论）。
+- 方案：PyPI 长描述与仓库 README 解耦。仓库 `README.md` 的 PRBench 章节是课程过程证据且被
+  `tests/test_docs_process.py` 文档合同锁定，不删除；新增面向最终用户的 `README_PYPI.md`
+  作为 pyproject `readme`（sdist 同步改带该文件），内容为特性、四种分步安装方式
+  （uvx / `uv tool install`、venv+pip、离线 wheel+SHA256、源码 uv sync）、快速开始、
+  供应商与 key 配置、安全边界、链接，全程不出现 PRBench/GAIA。
+- 文档 TDD：先增合同 `test_pypi_readme_is_user_focused_with_detailed_install`——要求
+  pyproject readme 指向 `README_PYPI.md`、该文件禁止出现 PRBench/prbench/GAIA/
+  task_white_1993/evaluator、必须含四种安装路径关键命令，且主 README 安装章节同步细化；
+  确认 RED（`aee68ff`）后写 `README_PYPI.md` 与主 README 安装章节变绿（`4568f03`）。
+- 版本 0.1.5（`613c7b0`）：PyPI 每个版本的描述不可修改，刷新页面必须发新版。沿用 0.1.4 的
+  TDD 流程：版本断言先 RED，统一 pyproject 与 `__version__`，按版本一致性契约同步五个
+  消费端与测试字面量；「完整公开任务」历史章节的 0.1.3 引用继续保留。
+- 验证：`uv run pytest` 全量 671 passed / 98 skipped；`uvx pyright` 0 errors；`uv build`
+  生成 0.1.5 wheel/sdist。随后推送 `v0.1.5` tag 走同一 Trusted Publishing 发布链路。
