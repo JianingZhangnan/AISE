@@ -2,7 +2,7 @@
 name = "phycode"
 version = "0.1.4"
 description = "CLI-first coding agent harness with policy-aware tool runtime"
-readme = "README.md"
+readme = "README_PYPI.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
@@ -48,7 +48,7 @@ packages = ["src/phycode"]
 [tool.hatch.build.targets.sdist]
 include = [
     "src/phycode",
-    "README.md",
+    "README_PYPI.md",
     "LICENSE",
 ]
 exclude = [

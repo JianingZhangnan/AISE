@@ -6,18 +6,30 @@ PhyCode 是面向 AI4SE 期末项目的 CLI 优先 coding agent harness，核心
 
 ## 安装
 
-最终用户通过 PyPI 安装（无需克隆仓库）：
+环境要求：Python >= 3.11。Windows 与 Linux 已验证，macOS 未实测。PyPI 页面使用面向最终用户的 `README_PYPI.md` 作为描述；本 README 为仓库完整文档。
+
+**方式一：uv / uvx（推荐）。** 已安装 [uv](https://docs.astral.sh/uv/) 时免安装直接运行，或装成常驻命令：
 
 ```bash
-uvx phycode version          # 免安装直接运行（推荐先试这个）
-# 或安装到当前环境
-pip install phycode
+uvx phycode version          # 免安装直接运行
+uv tool install phycode      # 或安装为常驻命令
 phycode version
+uv tool upgrade phycode      # 升级；卸载用 uv tool uninstall phycode
 ```
 
-也可以从 GitHub Releases 获取构建产物：每个版本（<https://github.com/JianingZhangnan/AISE/releases>）都附带 wheel、sdist 及其 SHA256 校验值，下载后 `pip install ./phycode-<version>-py3-none-any.whl`。
+**方式二：pip + 虚拟环境。**
 
-从源码获取并以开发模式运行：
+```bash
+python -m venv .venv
+.venv\Scripts\activate       # Windows；macOS/Linux 用 source .venv/bin/activate
+pip install phycode
+phycode version
+pip install -U phycode       # 升级到最新版
+```
+
+**方式三：离线 wheel。** 从 GitHub Releases（<https://github.com/JianingZhangnan/AISE/releases>）下载 wheel（每个 Release 说明附 SHA256 校验值），然后 `pip install ./phycode-<version>-py3-none-any.whl`。
+
+**方式四：源码开发模式。**
 
 ```bash
 git clone https://github.com/JianingZhangnan/AISE.git
