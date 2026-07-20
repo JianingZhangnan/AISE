@@ -699,3 +699,37 @@
 - Task 36 whole-branch review 与最终复验已完成，Task 36 整体可以按过程门禁完成；但
   五次正式尝试仍未跑通，runner `completed` 与有效 green report 的成功合同未满足，绝不改写
   为成功。本次文档提交不 push。
+
+## 2026-07-20 发布与交付收尾（Claude Code 主 agent）
+
+- 本批次由 Claude Code 主 agent（Fable 5）直接完成，无 subagent；改动限于文档、打包元数据与 CI，
+  不触碰 `src` 运行时行为（版本号除外）。用户人工决策：不做 WebUI（课程交付清单第 9 条与
+  通用要求 §4.11 的矛盾按纯 CLI 定位处理，已在 SPEC_PROCESS 反思小节记录）；NJU Git 由用户
+  后续从 GitHub 直接导入；PyPI 采用 GitHub Actions Trusted Publishing（OIDC）发布，任何环节
+  不落长期 token。
+- `REFLECTION.md`：正文由学生本人撰写；agent 仅将文件名从 `REFLECTION.md.md` 修正为
+  `REFLECTION.md` 后原样提交（`2bba137`），未改动任何内容。
+- 文档 TDD：先在 `tests/test_docs_process.py` 增加 README 安装/目录结构/已知限制/第三方
+  许可证章节与 LICENSE 文件、pyproject license 字段的合同，聚焦运行确认 RED（1 failed，
+  提交 `1c037f1`）；再补齐 `README.md` 四个新章节与扩写「分发」、新增 MIT `LICENSE`、
+  pyproject `license`/`license-files` 元数据变绿（`50b9e68`）。
+- 一致性修正（同 `50b9e68`）：`AGENTS.md` 修正笔误（「Codex / Codex / Cursor」→
+  「Codex / Claude Code / Cursor」）并纳入版本控制；`SPEC.md` §5.9 与未决事项按实现现状
+  收敛——带主密码的加密文件后备未实现、keyring 为唯一持久安全存储、钥匙串异常按「未配置
+  凭据」回退 EchoLLM，未使用的 `cryptography` 依赖随之移除；`SPEC_PROCESS.md` 补充课程
+  §4.4 要求的 brainstorming 技能使用反思；`PLAN.md` Task 3–9 标题按完成标记规范补记日期与
+  commit hash（`d8dc44f`/`d44f58d`/`97b4db2`/`e3f549d`/`4f00ea5`/`5f3121b`/`5f0465d`，
+  取自 git 历史，与 2026-07-08 各 task 条目对应）。
+- 版本收敛 0.1.4（`30434db`）：`tests/test_cli_smoke.py` 版本断言先行改为 0.1.4 并确认
+  RED——包内 `__version__` 实为 0.1.2，与 pyproject 0.1.3 早已不同步；统一 pyproject 与
+  `src/phycode/__init__.py` 后按版本一致性契约测试的失败清单更新五个消费端（adapter
+  `EXPECTED_WHEEL_FILENAME`、主 README smoke 命令、integrations README、patch 的
+  copy/install 目标）及相关测试字面量。README「PRBench 完整公开任务」历史章节按文档合同
+  保留 0.1.3 wheel 名——五次正式尝试确实使用该构建，历史事实不改写。
+- CI 与发布（`4511d49`）：新增 `.github/workflows/release.yml`——推送 `v*` tag（或手动
+  dispatch）时依次执行全量 pytest、`uv build`、`uv publish`（Trusted Publishing）；
+  `.gitlab-ci.yml` 保持 `unit-test` job 不变，新增 `build-package` job 产出 wheel/sdist
+  构建产物，供 NJU Git 镜像侧执行。
+- 验证：`uv run pytest` 全量 670 passed / 98 skipped、exit 0；`uvx pyright` 0 errors /
+  0 warnings；`uv build` 成功生成 `phycode-0.1.4` wheel/sdist。v0.1.4 tag、GitHub Release
+  与 PyPI 首次发布待用户在 PyPI 网页完成 pending publisher（Trusted Publisher）配置后执行。
